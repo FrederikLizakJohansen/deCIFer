@@ -149,6 +149,7 @@ class Tokenizer:
         #  or any space group symbol to avoid problematic cases, like 'P1'
         spacegroups = "|".join(SPACE_GROUPS)
         cif_string = re.sub(fr'(_symmetry_space_group_name_H-M *\b({spacegroups}))\n', r'\1_sg\n', cif_string)
+        print(cif_string)
 
         # Create a regex pattern by joining the escaped tokens with '|'
         token_pattern = '|'.join(self._escaped_tokens)

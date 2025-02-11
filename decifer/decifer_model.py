@@ -20,6 +20,9 @@ from decifer.tokenizer import Tokenizer
 TOKENIZER = Tokenizer()
 NEWLINE_ID = TOKENIZER.token_to_id["\n"]
 PADDING_ID = TOKENIZER.padding_id
+TOKENIZE = TOKENIZER.tokenize_cif
+ENCODE = TOKENIZER.encode
+DECODE = TOKENIZER.decode
 
 @dataclass
 class DeciferConfig:
@@ -586,6 +589,132 @@ class Decifer(nn.Module):
             seq_len = seq_lens[i].item()
             idx_truncated[i, :seq_len] = idx[i, :seq_len]
         return idx_truncated
+
+    @torch.no_grad()
+    def generate_custom(
+        self,
+        idx: torch.Tensor,
+        max_new_tokens: int,
+        cond_vec: Optional[torch.Tensor],
+        start_indices_batch: List[List[int]],
+        temperature: float = 1.0,
+        top_k: Optional[float] = None,
+        disable_pbar: bool = False,
+        custom_cond_emb: Optional[torch.Tensor] = None,
+        composition_string: Optional[str] = None,
+        spacegroup_string: Optional[str] = None,
+        cell_a_string: Optional[str] = None,
+        cell_b_string: Optional[str] = None,
+        cell_c_string: Optional[str] = None,
+        cell_alpha_string: Optional[str] = None,
+        cell_beta_string: Optional[str] = None,
+        cell_gamma_string: Optional[str] = None,
+        atoms_string_list: Optional[List[str]] = None,
+    ) -> torch.Tensor:
+
+        """
+        -- Single-sequence version --
+        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
+        the sequence max_new_tokens times, feeding the predictions back into the model each time.
+        This function takes custom token inputs that it uses to override certain tokens at certain positions.
+        """
+
+        prev_id = None
+        generation_pbar = tqdm(total=max_new_tokens, desc="Generating custom sequence", leave=False, disable=disable_pbar)
+
+        for i in range(max_new_tokens):
+            
+            # Identify the last token in the current sequence 
+            last_token = DECODE([idx[0][-1].item()])
+            
+            if composition_string is not None and last_token == "data_":
+                # Insert composition and newline
+                idx_insert = torch.tensor(ENCODE(TOKENIZE(composition_string)) + [NEWLINE_ID]).to(device=self.device).unsqueeze(0)
+                idx = torch.cat((idx, idx_insert), dim=1)
+            if idx.size(1) > 2:
+                second_to_last_token = DECODE([idx[0][-2].item()])
+
+                if spacegroup_string is not None and second_to_last_token == "_symmetry_space_group_name_H-M" and last_token == " ":
+                    print(ENCODE(TOKENIZE(spacegroup_string)))
+                    # Insert space group and newline
+                    idx_insert = torch.tensor(ENCODE(TOKENIZE(spacegroup_string)) + [NEWLINE_ID]).to(device=self.device).unsqueeze(0)
+                    idx = torch.cat((idx, idx_insert), dim=1)
+                if cell_a_string is not None and second_to_last_token == "_cell_length_a" and last_token == " ":
+                    print(ENCODE(TOKENIZE(cell_a_string)))
+                    # Insert cell length a
+                    idx_insert = torch.tensor(ENCODE(TOKENIZE(cell_a_string)) + [NEWLINE_ID]).to(device=self.device).unsqueeze(0)
+                    idx = torch.cat((idx, idx_insert), dim=1)
+                if cell_b_string is not None and last_token == "_cell_length_b":
+                    # Insert cell length a
+                    idx_insert = torch.tensor(ENCODE(TOKENIZE(cell_b_string)) + [NEWLINE_ID]).to(device=self.device).unsqueeze(0)
+                    idx = torch.cat((idx, idx_insert), dim=1)
+                if cell_c_string is not None and last_token == "_cell_length_c":
+                    # Insert cell length a
+                    idx_insert = torch.tensor(ENCODE(TOKENIZE(cell_c_string)) + [NEWLINE_ID]).to(device=self.device).unsqueeze(0)
+                    idx = torch.cat((idx, idx_insert), dim=1)
+                if cell_alpha_string is not None and last_token == "_cell_angle_alpha":
+                    # Insert cell length a
+                    idx_insert = torch.tensor(ENCODE(TOKENIZE(cell_alpha_string)) + [NEWLINE_ID]).to(device=self.device).unsqueeze(0)
+                    idx = torch.cat((idx, idx_insert), dim=1)
+                if cell_beta_string is not None and last_token == "_cell_angle_beta":
+                    # Insert cell length a
+                    idx_insert = torch.tensor(ENCODE(TOKENIZE(cell_beta_string)) + [NEWLINE_ID]).to(device=self.device).unsqueeze(0)
+                    idx = torch.cat((idx, idx_insert), dim=1)
+                if cell_gamma_string is not None and last_token == "_cell_angle_gamma":
+                    # Insert cell length a
+                    idx_insert = torch.tensor(ENCODE(TOKENIZE(cell_gamma_string)) + [NEWLINE_ID]).to(device=self.device).unsqueeze(0)
+                    idx = torch.cat((idx, idx_insert), dim=1)
+
+                # Insert atoms
+                if atoms_string_list is not None and second_to_last_token == "_atom_site_occupancy" and last_token == "\n":
+                    for atom_string in atoms_string_list:
+                        idx_insert = torch.tensor(ENCODE(TOKENIZE(atom_string)) + [NEWLINE_ID]).to(device=self.device).unsqueeze(0)
+                        idx = torch.cat((idx, idx_insert), dim=1)
+
+            # If the sequence has grown longer than the context length, chop
+            idx_context = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size]
+
+            # Forward the model to get logits
+            logits, _ = self(
+                idx_context,
+                cond_vec=cond_vec, 
+                start_indices_batch=start_indices_batch,
+                custom_cond_emb=custom_cond_emb,
+            )
+
+            # Pluck logits at the final step and scale by temperature
+            logits = logits[:, -1, :] / temperature
+
+            # Crop the logits using top_k
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float("inf")
+
+            # Apply softmax
+            probs = F.softmax(logits, dim=1)
+
+            # Sample from the distribution
+            idx_next = torch.multinomial(probs, num_samples=1)
+
+            # Append
+            idx = torch.cat((idx, idx_next), dim=1)
+
+            # Stop generation if met with two new lines
+            if prev_id is not None and prev_id == NEWLINE_ID and idx_next.item() == NEWLINE_ID:
+                break
+
+            # Stop as soon as the pad-idx is hit
+            if idx_next.item() == PADDING_ID:
+                idx = idx[:,:-1]
+                break
+
+            # Update previous id and pbar
+            prev_id = idx_next.item()
+            generation_pbar.update(1)
+
+        generation_pbar.close()
+
+        return idx
     
     @torch.no_grad()
     def generate_and_print(self, idx, max_new_tokens, cond_vec=None, start_indices_batch=None, temperature=1.0, top_k=None, custom_cond_emb=None):

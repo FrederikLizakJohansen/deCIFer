@@ -111,7 +111,6 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 du.configure_upload(app, UPLOAD_FOLDER)
 
 from plotly.subplots import make_subplots  # Add this import at the top with your other imports
-import matplotlib.pyplot as plt
 
 def generate_reference_pxrd(cif_string, height=100, width=525):
     out = generate_continuous_xrd_from_cif(cif_string, fwhm_range=(0.01, 0.01))
@@ -176,6 +175,14 @@ def generate_interactive_plot(cif_string):
         return fig
     else:
         return None
+
+# Spacegroup dropdown
+with open("decifer/spacegroups.txt", "r") as f:
+    space_groups = [line.strip() for line in f if line.strip()] # Remove empty lines
+spacegroup_dropdown = [{"label": sg, "value": f"{sg}_sg"} for sg in space_groups]
+
+# Default structure
+structure_component = ctc.StructureMoleculeComponent(id="structure-viewer")
 
 # Layout
 layout = html.Div([
@@ -262,19 +269,6 @@ layout = html.Div([
                     ),
                 ], style={"marginBottom": "10px", "display": "flex", "justifyContent": "space-evenly"}),
 
-                # # Reference structure
-                # html.Div([
-                #     dcc.Graph(
-                #         id="plot-container-reference",
-                #         config = {
-                #             "staticPlot": True,
-                #             "displayModeBar": False,
-                #         }
-                #     )
-                # ], style={
-                #     "margin": "0px auto",
-                #     "minHeight": "0px",
-                # }),
                 # Composition input
                 html.Div([
                     html.Label("Composition (use 'X' for wildcards):"),
@@ -287,14 +281,9 @@ layout = html.Div([
                     html.Label("Space Group:"),
                     dcc.Dropdown(
                         id="spacegroup-dropdown",
-                        options=[
-                            {"label": "Any", "value": "X"},
-                            {"label": "P1", "value": "P1"},
-                            {"label": "P-1", "value": "P-1"},
-                            {"label": "P2", "value": "P2"},
-                            {"label": "P2₁/c", "value": "P21/c"}
-                        ],
-                        placeholder="Select a space group"
+                        options=spacegroup_dropdown,
+                        placeholder="Select a space group",
+                        value="None", 
                     )
                 ], style={"marginBottom": "10px"}),
                 
@@ -349,54 +338,35 @@ layout = html.Div([
                     ),
                     html.Button("Add Atom", id="add-atom-button", n_clicks=0, style={"marginTop": "5px"})
                 ], style={"marginBottom": "20px"}),
-                html.Div([
-                    du.Upload(
-                        id="upload-model",
-                        text="Upload deCIFer Model",
-                        max_files=1,
-                        filetypes=["pt"],
-                        default_style={
-                            "width": "200px",
-                            "backgroundColor": "black",
-                            "color": "white",
-                            "borderRadius": "5px",
-                            "lineHeight": "30px",  # Matches height for centering
-                            "textAlign": "center",
-                            "cursor": "pointer",
-                            "display": "flex",
-                            "alignItems": "center",
-                            "justifyContent": "center",
-                            "fontSize": "16px",  # Adjusted for a smaller button
-                            "fontWeight": "bold",
-                            "padding": "2px 5px",  # Keeps it compact
-                            "minHeight": "15px",
-                        }
-                    ),
-                ], style={"marginBottom": "10px", "display": "flex", "justifyContent": "space-evenly"}),
                 # Generate button
                 html.Div([
-                    dcc.Input(
-                        id="generate-number", 
-                        type="number", 
-                        placeholder="Enter a number", 
-                        style={"width": "100px", "marginRight": "10px"}
-                    ),
-                    html.Button("Generate", id="generate-button", n_clicks=0)
-                ], style={"textAlign": "center", "marginTop": "10px"}),
-                # --- New: Progress bar ---
-                html.Div([
-                    html.Div(
-                        id="progress-bar", 
-                        children="Progress: 0%", 
-                        style={
-                            "width": "0%", 
-                            "height": "20px", 
-                            "backgroundColor": "#007BFF", 
-                            "color": "white", 
-                            "textAlign": "center"
-                        }
-                    )
-                ], style={"width": "100%", "border": "1px solid #ccc", "marginTop": "10px"}),
+                        html.Button(
+                            "🚀 Generate",  # Added an emoji for a more interactive feel
+                            id="generate-button",
+                            n_clicks=0,
+                            style={
+                                "padding": "10px 20px",
+                                "fontSize": "16px",
+                                "borderRadius": "8px",
+                                "backgroundColor": "#007bff",
+                                "color": "white",
+                                "border": "none",
+                                "cursor": "pointer",
+                                "transition": "0.3s",
+                            }
+                        ),
+                        dcc.Loading(
+                            id="loading",
+                            type="dot",
+                            children=[html.Div(id="loading-div", style={"display": "none"})],
+                        ),
+                    ], style={
+                        "display": "flex",
+                        "alignItems": "center",
+                        "justifyContent": "center",
+                        "gap": "50px",  # Space between button and loading indicator
+                        "marginTop": "10px"
+                    }),
                 # Error div
                 html.Div(id="error-div"),
 
@@ -438,7 +408,9 @@ layout = html.Div([
             
             html.Div([
                 # Right column: Crystal Visualization
-                html.Div(
+                html.Div([
+                    structure_component.layout(),
+                ],
                     id="crystal-vis-container",
                     style={
                         "width": "525px",
@@ -452,11 +424,11 @@ layout = html.Div([
                 ),
                 html.Div([
                     dcc.Graph(
-                        id="crystal-vis-container-pxrd-plot",
-                        config = {
-                            "staticPlot": False,
-                            "displayModeBar": False,
-                        }
+                       id="crystal-vis-container-pxrd-plot",
+                       config = {
+                           "staticPlot": False,
+                           "displayModeBar": False,
+                       }
                     )
                 ],
                     id="crystal-vis-container-pxrd",
@@ -483,22 +455,6 @@ layout = html.Div([
             "maxWidth": "1600px",
             "margin": "1px auto"
     }),
-    
-    # Bottom row: Interactive PXRD Plots (full width)
-    html.Div([
-        dcc.Graph(id="plot-container")
-    ], style={
-        "width": "80%",
-        "padding": "10px",
-        "margin": "20px auto",
-        "boxShadow": "0px 0px 5px #ccc",
-        "borderRadius": "10px",
-        "backgroundColor": "white"
-    }),
-    # Hidden components
-    dcc.Interval(id="progress-interval", interval=1000, n_intervals=0, disabled=True),
-    dcc.Store(id="progress-store", data=0),
-    dcc.Store(id="active-cif-store", data=""),
 ])
 
 def custom_generate_function(number, cif_string):
@@ -531,10 +487,7 @@ def create_structure_display(cif_string):
     # Make structure from cif_string
     structure = Structure.from_str(cif_string, fmt='cif')
 
-    # Create crystal visualization component
-    structure_component = ctc.StructureMoleculeComponent(structure, id="structure-viewer")
-
-    return cif_display, structure_component.layout()
+    return cif_display, structure
 
 import torch
 from warnings import warn
@@ -643,235 +596,205 @@ def rwp_fn(sample, gen):
 
 @app.callback(
     Output("cif-string-container", "children"),
-    Output("crystal-vis-container", "children"),
+    Output(structure_component.id(), "data"),
     Output("crystal-vis-container-pxrd-plot", "figure"),
     Output("crystal-vis-container-pxrd-plot", "style"),
+    Output("loading-div", "children"),
     Output("error-div", "children"),
     Input("upload-cif", "isCompleted"),
     Input("upload-cif", "fileNames"),
     Input("upload-pxrd", "isCompleted"),
     Input("upload-pxrd", "fileNames"),
-    Input("upload-model", "isCompleted"),
-    Input("upload-model", "fileNames"),
     Input("generate-button", "n_clicks"),
-    State("generate-number", "value"),
     State("composition-input", "value"),
+    State("spacegroup-dropdown", "value"),
+    State("cell-a", "value"),
+    State("cell-b", "value"),
+    State("cell-c", "value"),
+    State("cell-alpha", "value"),
+    State("cell-beta", "value"),
+    State("cell-gamma", "value"),
+    State({"type": "atom-element", "index": dash.ALL}, "value"),
+    State({"type": "atom-multiplicity", "index": dash.ALL}, "value"),
+    State({"type": "atom-x", "index": dash.ALL}, "value"),
+    State({"type": "atom-y", "index": dash.ALL}, "value"),
+    State({"type": "atom-z", "index": dash.ALL}, "value"),
 )
-def generate_structures(cif_completed, cif_names, pxrd_completed, pxrd_names, model_completed, model_names, generate_button_clicks, generate_number, composition_string):
-    
-    if cif_completed and cif_names:
-        
-        cif_paths = glob(os.path.join(UPLOAD_FOLDER, "*", cif_names[0]))
-        if cif_paths:
-            cif_paths.sort(key=os.path.getmtime, reverse=True)
-            cif_path = cif_paths[0]
-        else:
-            raise dash.exceptions.PreventUpdate
-            
-        # Create PXRD input from input CIF 
+def generate_structures(
+    cif_completed,
+    cif_names,
+    pxrd_completed,
+    pxrd_names,
+    #model_completed,
+    #model_names,
+    generate_button_clicks,
+    composition_string,
+    spacegroup_string,
+    cell_a_value,
+    cell_b_value,
+    cell_c_value,
+    cell_alpha_value,
+    cell_beta_value,
+    cell_gamma_value,
+    atoms_element,
+    atoms_mult,
+    atoms_x,
+    atoms_y,
+    atoms_z,
+):
+    # Generation button triggered:
+    if ctx.triggered_id == "generate-button": #model_completed and model_names:
+
         #TODO: make same system for PXRD input, involves downsampling to correct q-grid
-        structure = Structure.from_file(cif_path)
-        cif_string = CifWriter(struct=structure, symprec=0.1).__str__()
-        pxrd = generate_continuous_xrd_from_cif(cif_string, qmin=0.0, qmax=10.0, debug=True)
-        pxrd_ref = generate_continuous_xrd_from_cif(cif_string, qmin=0.5, qmax=7.5, debug=True)
-        cond_vec = torch.from_numpy(pxrd['iq']).unsqueeze(0).to(device='cuda')
-                
+        
         fig = make_subplots(rows=1, cols=1)
-        fig.add_traces([
-            go.Scatter(x=pxrd_ref['q'], y=pxrd_ref['iq'], mode='lines', name='Reference'),
-        ])
-        fig.update_layout(
-            xaxis_title='Q [Å^-1]',
-            yaxis_title='I(Q) [a.u.]',
-            height=225,
-            width=475,
-            yaxis = dict(tickvals=[]),
-            margin=dict(l=0, r=0, t=0, b=0),
-            plot_bgcolor = 'rgba(0, 0, 0, 0)',
-            paper_bgcolor = 'rgba(0, 0, 0, 0)',
-            legend=dict(x=0.8, y=1.0),
-        )
+    
+        # Look for CIF:
+        if cif_completed and cif_names:
 
-        # Load model
-        if ctx.triggered_id == "generate-button": #model_completed and model_names:
+            cif_paths = glob(os.path.join(UPLOAD_FOLDER, "*", cif_names[0]))
+            if cif_paths:
+                cif_paths.sort(key=os.path.getmtime, reverse=True)
+                cif_path = cif_paths[0]
+            else:
+                raise dash.exceptions.PreventUpdate
+
+            # Create PXRD input from input CIF 
+            structure = Structure.from_file(cif_path)
+            cif_string = CifWriter(struct=structure, symprec=0.1).__str__()
+            pxrd = generate_continuous_xrd_from_cif(cif_string, qmin=0.0, qmax=10.0, debug=True)
+            if pxrd is not None:
+                cond_vec = torch.from_numpy(pxrd['iq']).unsqueeze(0).to(device='cuda')
+            else:
+                cond_vec = None
+            pxrd_ref = generate_continuous_xrd_from_cif(cif_string, qmin=0.5, qmax=7.5, debug=True)
             
-            #model_paths = glob(os.path.join(UPLOAD_FOLDER, "*", model_names[0]))
-            #if model_paths:
-            #    model_paths.sort(key=os.path.getmtime, reverse=True)
-            model_paths = ["../../phd_projects/deCIFer/experiments/model__conditioned_mlp_augmentation__context_3076__robust_full_trainingcurves/ckpt.pt"]
-            model = load_model_from_checkpoint(model_paths[0], device='cuda') # TODO: Let user decide device
-                #print(model)
-            # TODO: PROMPTING GET FROM INPUT
+            # Display PXRD
+            if pxrd_ref is not None:
+                fig.add_traces([
+                    go.Scatter(x=pxrd_ref['q'], y=pxrd_ref['iq'], mode='lines', name='Reference'),
+                ])
+                fig.update_layout(
+                    xaxis_title='Q [Å^-1]',
+                    yaxis_title='I(Q) [a.u.]',
+                    height=225,
+                    width=475,
+                    yaxis = dict(tickvals=[]),
+                    margin=dict(l=0, r=0, t=0, b=0),
+                    plot_bgcolor = 'rgba(0, 0, 0, 0)',
+                    paper_bgcolor = 'rgba(0, 0, 0, 0)',
+                    legend=dict(x=0.8, y=1.0),
+                )
+            else:
+                raise Exception("Cannot read CIF")
 
-            prompt_ids = [START_ID]
-            print(composition_string)
-            if composition_string is not None and composition_string != "":
-                prompt_ids = prompt_ids + ENCODE(TOKENIZER.tokenize_cif(composition_string)) + [NEWLINE_ID]
-            print(prompt_ids)
-            prompt = torch.tensor(list(prompt_ids)).unsqueeze(0).to(device='cuda') # TODO:
+        elif pxrd_completed and pxrd_names:
 
-            # Generate batched reps
-            try:
-                batch_prompt = prompt#.repeat(batch_size, 1) # TODO:
-                cond_vec_batch = cond_vec#.repeat(batch_size, 1) # TODO:
-                generated = model.generate_batched_reps(
-                    batch_prompt,
-                    max_new_tokens=3076,
-                    cond_vec=cond_vec_batch,
-                    start_indices_batch=[[0]],# * batch_size, # TODO:
-                ).cpu().numpy()
-                generated = [ids[ids != PADDING_ID] for ids in generated]
+            # Do something
+            cond_vec = None
+            pxrd_ref = None
+        else:
+            # Do nothing
+            cond_vec = None
+            pxrd_ref = None
+            
+        # Load model
+        #if model_completed and model_names:
+        #    model_paths = glob(os.path.join(UPLOAD_FOLDER, "*", model_names[0]))
+        #    if model_paths:
+        #        model_paths.sort(key=os.path.getmtime, reverse=True)
+        if True: # NOTE: TEMP
+            if cond_vec is None:
+                model_paths = ["../../phd_projects/deCIFer/experiments/model__nocond__context_3076__robust_full_trainingcurves/ckpt.pt"]
+            else:
+                model_paths = ["../../phd_projects/deCIFer/experiments/model__conditioned_mlp_augmentation__context_3076__robust_full_trainingcurves/ckpt.pt"]
+            model = load_model_from_checkpoint(model_paths[0], device='cuda')
+
+            # Make atoms
+            atoms = []
+            for i, (el, mtpl, x, y, z) in enumerate(zip(atoms_element, atoms_mult, atoms_x, atoms_y, atoms_z)):
+                if not None in [el, mtpl, x, y, z]:
+                    atoms.append(f"{el} {el}{i} {int(mtpl)} {x:.4f} {y:.4f} {z:.4f} 1.0000")
+
+            # Generate custom CIF
+            generated = model.generate_custom(
+                idx = torch.tensor([START_ID]).unsqueeze(0).to(device='cuda'),
+                max_new_tokens=3076,
+                cond_vec = cond_vec,
+                start_indices_batch=[[0]],
+                composition_string = composition_string,
+                spacegroup_string = spacegroup_string,
+                cell_a_string = f'{cell_a_value:.4f}' if cell_a_value is not None else None,
+                cell_b_string = f'{cell_b_value:.4f}' if cell_b_value is not None else None,
+                cell_c_string = f'{cell_c_value:.4f}' if cell_c_value is not None else None,
+                cell_alpha_string = f'{cell_alpha_value:.4f}' if cell_alpha_value is not None else None,
+                cell_beta_string = f'{cell_beta_value:.4f}' if cell_beta_value is not None else None,
+                cell_gamma_string = f'{cell_gamma_value:.4f}' if cell_gamma_value is not None else None,
+                atoms_string_list = atoms if len(atoms) > 0 else None,
+            ).cpu().numpy()
+
+            generated = [ids[ids != PADDING_ID] for ids in generated]
                 
-                # Convert to string
-                out_cif = DECODE(generated[0])
-                out_cif = replace_symmetry_loop_with_P1(out_cif)
-                spacegroup_symbol = extract_space_group_symbol(out_cif)
-                if spacegroup_symbol != "P 1":
-                    out_cif = reinstate_symmetry_loop(out_cif, spacegroup_symbol)
+            # Convert to string
+            cif_string_gen = DECODE(generated[0])
+            cif_string_gen = replace_symmetry_loop_with_P1(cif_string_gen)
+            spacegroup_symbol = extract_space_group_symbol(cif_string_gen)
+            if spacegroup_symbol != "P 1":
+                cif_string_gen = reinstate_symmetry_loop(cif_string_gen, spacegroup_symbol)
 
-                # Calculate PXRD
-                pxrd_gen = generate_continuous_xrd_from_cif(out_cif, qmin=0.5, qmax=7.5, debug=True, fwhm_range=(0.05, 0.05))
+            # Calculate PXRD
+            pxrd_gen = generate_continuous_xrd_from_cif(cif_string_gen, qmin=0.5, qmax=7.5, debug=True, fwhm_range=(0.05, 0.05))
 
-                if pxrd_gen is not None and pxrd_ref is not None:
+            if pxrd_gen is not None:
+                fig.add_traces([
+                    go.Scatter(x=pxrd_gen['q'], y=pxrd_gen['iq'], mode='lines', name='Generated'),
+                ])
+                if pxrd_ref is not None:
                     fig.add_traces([
-                        go.Scatter(x=pxrd_ref['q'], y=pxrd_ref['iq'], mode='lines', name='Reference'),
-                        go.Scatter(x=pxrd_gen['q'], y=pxrd_gen['iq'], mode='lines', name='Generated'),
                         go.Scatter(x=pxrd_gen['q'], y=pxrd_ref['iq'] - pxrd_gen['iq'] - 0.5, mode='lines', name=f'Difference, Rwp:{rwp_fn(pxrd_ref['iq'], pxrd_gen['iq']):1.3f}'),
                     ])
-                    fig.update_layout(
-                        xaxis_title='Q [Å^-1]',
-                        yaxis_title='I(Q) [a.u.]',
-                        height=225,
-                        width=475,
-                        yaxis = dict(tickvals=[]),
-                        margin=dict(l=0, r=0, t=0, b=0),
-                        plot_bgcolor = 'rgba(0, 0, 0, 0)',
-                        paper_bgcolor = 'rgba(0, 0, 0, 0)',
-                        legend=dict(x=0.8, y=1.0),
-                    )
 
-                # Get display, TODO: Make it show the best structure
-                cif_display, structure_display = create_structure_display(out_cif)
+                fig.update_layout(
+                    xaxis_title='Q [Å^-1]',
+                    yaxis_title='I(Q) [a.u.]',
+                    height=225,
+                    width=475,
+                    yaxis = dict(tickvals=[]),
+                    margin=dict(l=0, r=0, t=0, b=0),
+                    plot_bgcolor = 'rgba(0, 0, 0, 0)',
+                    paper_bgcolor = 'rgba(0, 0, 0, 0)',
+                    legend=dict(x=0.8, y=1.0),
+                )
 
-            except Exception as e:
-                raise dash.exceptions.PreventUpdate
+            # Get display, TODO: Make it show the best structure
+            cif_display, new_structure = create_structure_display(cif_string_gen)
+
             return (
                 cif_display, 
-                structure_display,
+                new_structure,
                 fig,
                 {},
+                "",
                 html.Div(),
             )
         else:
             return (
                 html.Div(),
-                html.Div(),
+                None,
                 fig,
                 {},
+                "",
                 html.Div(),
             )
     else:
         return (
             html.Div(),
-            html.Div(),
+            None,
             go.Figure(),
-            {'display': 'none'},
+            {"display": "none"},
+            "",
             html.Div(),
         )
-
-# @app.callback(
-#     [Output("progress-bar", "children"),
-#      Output("progress-bar", "style"),
-#      #Output("cif-string-container", "children"),
-#      #Output("crystal-vis-container", "children"),
-#      Output("progress-interval", "disabled"),
-#      Output("progress-store", "data")],
-#
-#     Input("progress-interval", "n_intervals"),
-#     Input("generate-button", "n_clicks"),
-#     State("generate-number", "value"),
-#     State("active-cif-store", "data"),
-#
-#     State("progress-store", "data"),
-# )
-# def update_progress(n_intervals, n_clicks, gen_number, active_cif, progress):
-#
-#     print("Start:")
-#     print(progress)
-#     print(active_cif)
-#     print(gen_number)
-#     print()
-#     if ctx.triggered_id == "generate-button":
-#         new_progress = 0
-#         progress_text = f"Progress: {new_progress}%"
-#         progress_style = {
-#             "width": f"{new_progress}%",
-#             "height": "20px",
-#             "backgroundColor": "#007BFF",
-#             "color": "white",
-#             "textAlign": "center",
-#         }
-#         return progress_text, progress_style, False, new_progress
-#
-#     if gen_number is None:
-#     #if active_cif == "" or gen_number is None:
-#         raise dash.exceptions.PreventUpdate
-#
-#     # Increment progress by 20% per interval (for demonstration)
-#     new_progress = progress + 20
-#     if new_progress >= 100:
-#         new_progress = 100
-#         # When complete, call the custom function to get updated outputs.
-#         updated_cif, updated_vis = custom_generate_function(gen_number, active_cif)
-#         progress_text = "Progress: 100%"
-#         progress_style = {
-#             "width": "100%", 
-#             "height": "20px", 
-#             "backgroundColor": "#007BFF", 
-#             "color": "white", 
-#             "textAlign": "center"
-#         }
-#         # Update the CIF display with the final updated CIF.
-#         cif_display = html.Pre(updated_cif, style={
-#             'whiteSpace': 'pre-wrap',
-#             'maxHeight': '775px',
-#             'overflow': 'auto',
-#             'backgroundColor': '#f8f9fa',
-#             'padding': '10px',
-#             'border': '1px solid #ddd'
-#         })
-#         # Disable the interval by returning disabled=True.
-#         #return progress_text, progress_style, cif_display, updated_vis, True, new_progress
-#         return progress_text, progress_style, True, new_progress
-#     else:
-#         progress_text = f"Progress: {new_progress}%"
-#         progress_style = {
-#             "width": f"{new_progress}%", 
-#             "height": "20px", 
-#             "backgroundColor": "#007BFF", 
-#             "color": "white", 
-#             "textAlign": "center"
-#         }
-#         # For a dynamic update, you might simply append a progress message to the CIF string.
-#         dynamic_cif = html.Pre(
-#             active_cif + f"\n\nUpdating... {new_progress}%",
-#             style={
-#                 'whiteSpace': 'pre-wrap',
-#                 'maxHeight': '775px',
-#                 'overflow': 'auto',
-#                 'backgroundColor': '#f8f9fa',
-#                 'padding': '10px',
-#                 'border': '1px solid #ddd'
-#             }
-#         )
-#         # Similarly, update the crystal visualization with a placeholder.
-#         dynamic_vis = html.Div(
-#             f"Crystal visualization updating... {new_progress}%",
-#             style={"textAlign": "center"}
-#         )
-#         # Continue running (disabled remains False)
-#         #return progress_text, progress_style, dynamic_cif, dynamic_vis, False, new_progress
-#         return progress_text, progress_style, False, new_progress
 
 @app.callback(
     Output("atoms-container", "children"),
@@ -892,74 +815,6 @@ def add_atom_row(n_clicks, children):
     ], style={"marginBottom": "5px"})
     children.append(new_atom)
     return children
-
-# @app.callback(
-#     [
-#         #Output("cif-string-container", "children"),
-#         #Output("crystal-vis-container", "children"),
-#         Output("plot-container-reference", "figure"),
-#         Output("plot-container-reference", "style"),
-#         #Output("crystal-vis-container-pxrd-plot", "figure"),
-#         #Output("crystal-vis-container-pxrd-plot", "style"),
-#      ],
-#     [
-#         Input("upload-cif", "isCompleted"),
-#         Input("upload-cif", "fileNames"),
-#         Input("upload-pxrd", "isCompleted"),
-#         Input("upload-pxrd", "fileNames")
-#     ]
-# )
-# def display_structure_and_plot(cif_completed, cif_names, pxrd_completed, pxrd_names):
-#
-#     # if not (cif_completed and cif_names):
-#     #     return {}, {"display": "none"}, {}
-#
-#     if cif_completed and cif_names:
-#         cif_paths = glob(os.path.join(UPLOAD_FOLDER, "*", cif_names[0]))
-#         if cif_paths:
-#             cif_paths.sort(key=os.path.getmtime, reverse=True)
-#             cif_path = cif_paths[0]
-#         else:
-#             return (
-#                 #html.Div("No CIF found", style={"color": "red"}),
-#                 #html.Div(),
-#                 go.Figure(),
-#                 {"display": "none"}
-#             )
-#         try:
-#             structure = Structure.from_file(cif_path)
-#             # Generate CIF string for display
-#             cif_string = CifWriter(struct=structure, symprec=0.1).__str__()
-#             cif_display = html.Pre(cif_string, style={
-#                 'whiteSpace': 'pre-wrap',
-#                 'maxHeight': '775px',
-#                 'overflow': 'auto',
-#                 'backgroundColor': '#f8f9fa',
-#                 'padding': '10px',
-#                 'border': '1px solid #ddd'
-#             })
-#             # Generate interactive PXRD plot
-#             # plot_figure = generate_interactive_plot(cif_string)
-#             plot_figure = generate_reference_pxrd(cif_string, width=500)
-#             #comparison_pxrd = generate_reference_pxrd(cif_string, height=225, width=475) # Placeholder
-#             # Create crystal visualization component
-#             #structure_component = ctc.StructureMoleculeComponent(structure, id="structure-viewer")
-#             #return cif_display, structure_component.layout(), plot_figure, {}, comparison_pxrd, {}
-#             return plot_figure, {}
-#         except Exception as e:
-#             return (
-#                 #html.Div(f"Error loading CIF: {str(e)}", style={"color": "red"}),
-#                 #html.Div(),
-#                 #go.Figure(), {"display": "none"},
-#                 go.Figure(), {"display": "none"}
-#             )
-#
-#     return (
-#             #html.Div(), 
-#             #html.Div(), 
-#             #go.Figure(), {"display": "none"}, 
-#             go.Figure(), {"display": "none"}
-#     )
 
 
 # Register

@@ -122,7 +122,7 @@ def extract_prompt_batch(sequences, device, add_composition=True, add_spacegroup
 def load_model_from_checkpoint(ckpt_path, device):
     
     # Checkpoint
-    checkpoint = torch.load(ckpt_path, map_location=device)  # Load checkpoint
+    checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)  # Load checkpoint
     state_dict = checkpoint.get("best_model_state", checkpoint.get("best_model"))
     
     model_args = checkpoint["model_args"]

@@ -86,9 +86,9 @@ def discrete_to_continuous_xrd(
     qstep: float = 0.01,
     fwhm_range: Tuple[float, float] = (0.01, 0.5),
     eta_range: Tuple[float, float] = (0.5, 0.5),  # Mixing range for pseudo-Voigt, 1.0 is fully Lorentzian
-    noise_range: Optional[Tuple[float, float]] = (0.001, 0.05),
-    intensity_scale_range: Optional[Tuple[float, float]] =(0.95, 1.0),
-    mask_prob: Optional[float] = 0.1,
+    noise_range: Optional[Tuple[float, float]] = None,
+    intensity_scale_range: Optional[Tuple[float, float]] = None,
+    mask_prob: Optional[float] = None,
     **kwargs, # Ignoring
 ):
     """
@@ -183,9 +183,9 @@ def generate_continuous_xrd_from_cif(
     qstep: float = 0.01,
     fwhm_range: Tuple[float, float] = (0.01, 0.5),
     eta_range: Tuple[float, float] = (0.5, 0.5),  # Mixing range for pseudo-Voigt, 1.0 is fully Lorentzian
-    noise_range: Optional[Tuple[float, float]] = (0.001, 0.05),
-    intensity_scale_range: Optional[Tuple[float, float]] =(0.95, 1.0),
-    mask_prob: Optional[float] = 0.1,
+    noise_range: Optional[Tuple[float, float]] = None,
+    intensity_scale_range: Optional[Tuple[float, float]] = None,
+    mask_prob: Optional[float] = None,
     debug: bool = False
 ):
     """
