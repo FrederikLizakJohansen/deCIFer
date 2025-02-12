@@ -610,6 +610,7 @@ class Decifer(nn.Module):
         cell_beta_string: Optional[str] = None,
         cell_gamma_string: Optional[str] = None,
         atoms_string_list: Optional[List[str]] = None,
+        exclude_elements: Optional[List[str]] = None,
     ) -> torch.Tensor:
 
         """
@@ -635,12 +636,10 @@ class Decifer(nn.Module):
                 second_to_last_token = DECODE([idx[0][-2].item()])
 
                 if spacegroup_string is not None and second_to_last_token == "_symmetry_space_group_name_H-M" and last_token == " ":
-                    print(ENCODE(TOKENIZE(spacegroup_string)))
                     # Insert space group and newline
                     idx_insert = torch.tensor(ENCODE(TOKENIZE(spacegroup_string)) + [NEWLINE_ID]).to(device=self.device).unsqueeze(0)
                     idx = torch.cat((idx, idx_insert), dim=1)
                 if cell_a_string is not None and second_to_last_token == "_cell_length_a" and last_token == " ":
-                    print(ENCODE(TOKENIZE(cell_a_string)))
                     # Insert cell length a
                     idx_insert = torch.tensor(ENCODE(TOKENIZE(cell_a_string)) + [NEWLINE_ID]).to(device=self.device).unsqueeze(0)
                     idx = torch.cat((idx, idx_insert), dim=1)
@@ -689,6 +688,13 @@ class Decifer(nn.Module):
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float("inf")
+
+            # Exclude elements
+            if exclude_elements:
+                for el in exclude_elements:
+                    # Convert string to token id
+                    id = ENCODE(TOKENIZE(el))
+                    logits[:,id] = -float("inf")
 
             # Apply softmax
             probs = F.softmax(logits, dim=1)
