@@ -2,8 +2,7 @@ import base64
 import os
 
 import dash
-from dash import Dash
-from dash import Input, Output, State, ctx, html, Dash, dcc
+from dash import Dash, html, dcc, Input, Output, State, ctx
 from plotly.subplots import make_subplots
 import plotly.graph_objs as go
 import torch
@@ -26,9 +25,141 @@ import dash_uploader as du
 import crystal_toolkit.components as ctc
 from crystal_toolkit.settings import SETTINGS
 
+# === Fancy Button CSS Injection ===
+css = """
+
+button {
+    all: unset;
+    cursor: pointer;
+    -webkit-tap-highlight-color: rgba(0, 0, 0, 0);
+    position: relative;
+    border-radius: 999vw;
+    background-color: rgba(0, 0, 0, 0.75);
+    box-shadow: -0.15em -0.15em 0.15em -0.075em rgba(5, 5, 5, 0.25),
+        0.0375em 0.0375em 0.0675em 0 rgba(5, 5, 5, 0.1);
+}
+
+button::after {
+    content: "";
+    position: absolute;
+    z-index: 0;
+    width: calc(100% + 0.3em);
+    height: calc(100% + 0.3em);
+    top: -0.15em;
+    left: -0.15em;
+    border-radius: inherit;
+    background: linear-gradient(-135deg,
+            rgba(5, 5, 5, 0.5),
+            transparent 20%,
+            transparent 100%);
+    filter: blur(0.0125em);
+    opacity: 0.25;
+    mix-blend-mode: multiply;
+}
+
+button .button-outer {
+    position: relative;
+    z-index: 1;
+    border-radius: inherit;
+    transition: box-shadow 300ms ease;
+    will-change: box-shadow;
+    box-shadow: 0 0.05em 0.05em -0.01em rgba(5, 5, 5, 1),
+        0 0.01em 0.01em -0.01em rgba(5, 5, 5, 0.5),
+        0.15em 0.3em 0.1em -0.01em rgba(5, 5, 5, 0.25);
+}
+
+button:hover .button-outer {
+    box-shadow: 0 0 0 0 rgba(5, 5, 5, 1), 0 0 0 0 rgba(5, 5, 5, 0.5),
+        0 0 0 0 rgba(5, 5, 5, 0.25);
+}
+
+.button-inner {
+    --inset: 0.035em;
+    position: relative;
+    z-index: 1;
+    border-radius: inherit;
+    padding: 1em 1.5em;
+    background-image: linear-gradient(135deg,
+            rgba(230, 230, 230, 1),
+            rgba(180, 180, 180, 1));
+    transition: box-shadow 300ms ease, clip-path 250ms ease,
+        background-image 250ms ease, transform 250ms ease;
+    will-change: box-shadow, clip-path, background-image, transform;
+    overflow: clip;
+    clip-path: inset(0 0 0 0 round 999vw);
+    box-shadow:
+        0 0 0 0 inset rgba(5, 5, 5, 0.1),
+        -0.05em -0.05em 0.05em 0 inset rgba(5, 5, 5, 0.25),
+        0 0 0 0 inset rgba(5, 5, 5, 0.1),
+        0 0 0.05em 0.2em inset rgba(255, 255, 255, 0.25),
+        0.025em 0.05em 0.1em 0 inset rgba(255, 255, 255, 1),
+        0.12em 0.12em 0.12em inset rgba(255, 255, 255, 0.25),
+        -0.075em -0.25em 0.25em 0.1em inset rgba(5, 5, 5, 0.25);
+}
+
+button:hover .button-inner {
+    clip-path: inset(clamp(1px, 0.0625em, 2px) clamp(1px, 0.0625em, 2px) clamp(1px, 0.0625em, 2px) clamp(1px, 0.0625em, 2px) round 999vw);
+    box-shadow:
+        0.1em 0.15em 0.05em 0 inset rgba(5, 5, 5, 0.75),
+        -0.025em -0.03em 0.05em 0.025em inset rgba(5, 5, 5, 0.5),
+        0.25em 0.25em 0.2em 0 inset rgba(5, 5, 5, 0.5),
+        0 0 0.05em 0.5em inset rgba(255, 255, 255, 0.15),
+        0 0 0 0 inset rgba(255, 255, 255, 1),
+        0.12em 0.12em 0.12em inset rgba(255, 255, 255, 0.25),
+        -0.075em -0.12em 0.2em 0.1em inset rgba(5, 5, 5, 0.25);
+}
+
+button .button-inner span {
+    position: relative;
+    z-index: 4;
+    font-family: "Inter", sans-serif;
+    letter-spacing: -0.05em;
+    font-weight: 500;
+    color: rgba(0, 0, 0, 0);
+    background-image: linear-gradient(135deg,
+            rgba(25, 25, 25, 1),
+            rgba(75, 75, 75, 1));
+    -webkit-background-clip: text;
+    background-clip: text;
+    transition: transform 250ms ease;
+    display: block;
+    will-change: transform;
+    text-shadow: rgba(0, 0, 0, 0.1) 0 0 0.1em;
+}
+
+button:hover .button-inner span {
+    transform: scale(0.975);
+}
+
+button:active .button-inner {
+    transform: scale(0.975);
+}
+"""
+
 # Instantiate the app and override index_string
 app = Dash(__name__, assets_folder=SETTINGS.ASSETS_PATH)
 server = app.server
+
+app.index_string = f'''
+<!DOCTYPE html>
+<html>
+    <head>
+        {{%metas%}}
+        <title>deCIFer Demo</title>
+        {{%favicon%}}
+        {{%css%}}
+        <style>{css}</style>
+    </head>
+    <body>
+        {{%app_entry%}}
+        <footer>
+            {{%config%}}
+            {{%scripts%}}
+            {{%renderer%}}
+        </footer>
+    </body>
+</html>
+'''
 
 # Configure Dash Uploader
 UPLOAD_FOLDER = "./uploads"
@@ -49,8 +180,6 @@ def rwp_fn(sample, gen):
 structure_component = ctc.StructureMoleculeComponent(id="structure-viewer")
 STRUCTURE_COMPONENT_ID = structure_component.id()
 
-FWHM = 0.05
-
 # Read in available space groups
 with open("../decifer/spacegroups.txt", "r") as f:
     space_groups = [line.strip() for line in f if line.strip()]
@@ -61,38 +190,26 @@ structure_component = ctc.StructureMoleculeComponent(id="structure-viewer")
 
 # Define the periodic table layout (rows of 18 cells; use None for blank cells)
 periodic_table_layout = [
-    # Period 1
     ["H", None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, "He"],
-    # Period 2
     ["Li", "Be", None, None, None, None, None, None, None, None, None, None, "B", "C", "N", "O", "F", "Ne"],
-    # Period 3
     ["Na", "Mg", None, None, None, None, None, None, None, None, None, None, "Al", "Si", "P", "S", "Cl", "Ar"],
-    # Period 4
     ["K", "Ca", "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Ga", "Ge", "As", "Se", "Br", "Kr"],
-    # Period 5
     ["Rb", "Sr", "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd", "In", "Sn", "Sb", "Te", "I", "Xe"],
-    # Period 6 Main Block
     ["Cs", "Ba", "La", "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au", "Hg", "Tl", "Pb", "Bi", "Po", "At", "Rn", None],
-    # Period 7 Main Block
     ["Fr", "Ra", "Ac", "Rf", "Db", "Sg", "Bh", "Hs", "Mt", "Ds", "Rg", "Cn", "Nh", "Fl", "Mc", "Lv", "Ts", "Og", None],
-    # Break
     [None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None],
-    # Lanthanides (Period 6)
     [None, None, None, "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu", None],
-    # Actinides (Period 7)
     [None, None, None, "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk", "Cf", "Es", "Fm", "Md", "No", "Lr", None]
 ]
 
 # Build a list of all unique element symbols (default: all are selected)
-inactive_elements_dict = {}
+all_elements = []
 for row in periodic_table_layout:
     for el in row:
-        if el is not None:
-            inactive_elements_dict[el] = False
-            # inactive_elements_dict['element'] = el
-            # inactive_elements_dict['inactive'] = False
+        if el is not None and el not in all_elements:
+            all_elements.append(el)
 
-# Define element group mappings (for the elements present in the table)
+# Define element group mappings
 element_to_group = {
     "H": "nonmetal",
     "He": "noble",
@@ -215,29 +332,26 @@ element_to_group = {
 }
 
 group_colors = {
-    "alkali": "#FF6666",         # red-ish
-    "alkaline": "#FFB347",       # orange-ish
-    "transition": "#B0C4DE",     # light steel blue
-    "post-transition": "#CCCCCC",# grey
-    "metalloid": "#CCCC99",      # olive-ish
-    "nonmetal": "#90EE90",       # light green
-    "halogen": "#66CDAA",        # medium aquamarine
-    "noble": "#87CEFA",          # light sky blue
-    "lanthanide": "#FFB6C1",     # light pink
-    "actinide": "#FFA07A",       # light salmon
+    "alkali": "#FF6666",
+    "alkaline": "#FFB347",
+    "transition": "#B0C4DE",
+    "post-transition": "#CCCCCC",
+    "metalloid": "#CCCC99",
+    "nonmetal": "#90EE90",
+    "halogen": "#66CDAA",
+    "noble": "#87CEFA",
+    "lanthanide": "#FFB6C1",
+    "actinide": "#FFA07A",
 }
 
-PERIODIC_DIM = "30px"
-PERIODIC_FONTSIZE = "1.0em"
+PERIODIC_DIM = "20px"
+PERIODIC_FONTSIZE = "0.6em"
 
 def create_periodic_table():
-    """Return an HTML table representing the periodic table with clickable element cells colored by group."""
     table_rows = []
-    # Reduce cell size to make the table less wide.
     cell_width = PERIODIC_DIM
     cell_height = PERIODIC_DIM
     for row in periodic_table_layout:
-        # Check if the row is a break row (all cells are None)
         if all(cell is None for cell in row):
             table_rows.append(html.Tr(
                 html.Td("", colSpan=len(row), style={"height": "10px", "border": "none"})
@@ -247,7 +361,7 @@ def create_periodic_table():
         cells = []
         for cell in row:
             if cell is None:
-                cells.append(html.Td(""))  # Empty cell for spacing
+                cells.append(html.Td(""))
             else:
                 group = element_to_group.get(cell, "nonmetal")
                 base_color = group_colors.get(group, "#4CAF50")
@@ -259,22 +373,18 @@ def create_periodic_table():
                         style={
                             "width": cell_width,
                             "height": cell_height,
-                            "margin": "0px",
-                            "border": "0px solid #ccc",
-                            "borderRadius": "0px",
+                            "margin": "2px",
+                            "border": "1px solid #ccc",
+                            "borderRadius": "4px",
                             "backgroundColor": base_color,
-                            "color": "black",
+                            "color": "white",
                             "cursor": "pointer",
-                            "fontSize": PERIODIC_FONTSIZE,
-                            "textAlign": "center",
-                            "display": "flex",
-                            "alignItems": "center",
-                            "justifyContent": "center",
+                            "fontSize": PERIODIC_FONTSIZE
                         }
                     )
                 ))
         table_rows.append(html.Tr(cells))
-    return html.Table(table_rows, style={"borderCollapse": "collapse", "width": "auto", "marginBottom": "20px"})
+    return html.Table(table_rows, style={"borderCollapse": "collapse", "margin": "0 auto", "width": "auto"})
 
 layout = html.Div([
     html.Header([
@@ -315,52 +425,104 @@ layout = html.Div([
                 "fontSize": "20px", 
                 "margin-bottom": "10px"
             }),
-
+            dcc.Store(id="inactive-elements-store", data=[]),
+            dcc.Store(id="selected-elements-store", data=all_elements),
+            dcc.Store(id="ptable-states", data={el: True for el in all_elements}),
             html.Div([
-                # ---- New Periodic Table Section Start ----
-                dcc.Store(id="inactive-elements-store", data=inactive_elements_dict),
-                dcc.Store(id="element-to-group-store", data=element_to_group),
-                dcc.Store(id="group-colors-store", data=group_colors),
-
-                #dcc.Store(id="selected-elements-store", data=all_elements),
-                #dcc.Store(id="ptable-states", data={el: True for el in all_elements}),
-                html.H3("Select Elements", style={"textAlign": "left", "marginBottom": "10px"}),
+                html.H3("Periodic Table", style={"textAlign": "center", "marginBottom": "10px"}),
+                create_periodic_table(),
                 html.Div([
                     html.Button("Select All", id="select-all", n_clicks=0, style={"marginRight": "5px"}),
                     html.Button("Unselect All", id="unselect-all", n_clicks=0)
-                ], style={"marginTop": "10px", "textAlign": "center", "marginBottom": "0px"}),
-                html.Div(
-                [create_periodic_table()],
-                    style={"display": "flex", "alignItems": "center", "justifyContent": "center"},
-                ),
-                # html.Div([
-                # ], style={
-                #     "marginBottom": "20px",
-                #     "padding": "10px",
-                #     "border": "1px solid #ccc",
-                #     "borderRadius": "5px",
-                #     "backgroundColor": "#ffffff"
-                # }),
+                ], style={"marginTop": "10px", "textAlign": "center"})
+            ], style={
+                "marginBottom": "20px",
+                "padding": "10px",
+                "border": "1px solid #ccc",
+                "borderRadius": "5px",
+                "backgroundColor": "#ffffff"
+            }),
+
+            html.Div([
+                html.Div([
+                    dcc.Upload(
+                        id="upload-cif",
+                        children=html.Div(["🎉 Upload CIF"]),
+                        multiple=False, 
+                        style={
+                            "width": "200px",
+                            "backgroundColor": "#FF6B6B",
+                            "color": "white",
+                            "borderRadius": "8px",
+                            "lineHeight": "30px",
+                            "textAlign": "center",
+                            "cursor": "pointer",
+                            "display": "flex",
+                            "alignItems": "center",
+                            "justifyContent": "center",
+                            "fontSize": "16px",
+                            "fontWeight": "bold",
+                            "padding": "5px 10px",
+                            "minHeight": "15px",
+                            "boxShadow": "2px 2px 8px rgba(0, 0, 0, 0.3)",
+                            "transition": "all 0.2s ease-in-out",
+                        },
+                        style_active={
+                            "backgroundColor": "#FF8A65",
+                            "boxShadow": "0 0 10px rgba(0,0,0,0.4)",
+                            "transform": "scale(1.05)",
+                        },
+                        accept=".cif"
+                    ),
+                    dcc.Upload(
+                        id="upload-pxrd",
+                        children=html.Div(["💥 Upload PXRD"]),
+                        multiple=False,
+                        style={
+                            "width": "200px",
+                            "backgroundColor": "#6BCBFF",
+                            "color": "white",
+                            "borderRadius": "8px",
+                            "lineHeight": "30px",
+                            "textAlign": "center",
+                            "cursor": "pointer",
+                            "display": "flex",
+                            "alignItems": "center",
+                            "justifyContent": "center",
+                            "fontSize": "16px",
+                            "fontWeight": "bold",
+                            "padding": "5px 10px",
+                            "minHeight": "15px",
+                            "boxShadow": "2px 2px 8px rgba(0, 0, 0, 0.3)",
+                            "transition": "all 0.2s ease-in-out",
+                        },
+                        style_active={
+                            "backgroundColor": "#42A5F5",
+                            "boxShadow": "0 0 10px rgba(0,0,0,0.4)",
+                            "transform": "scale(1.05)",
+                        },
+                        accept=".xy"
+                    ),
+                ], style={
+                    "marginBottom": "10px",
+                    "display": "flex",
+                    "justifyContent": "space-evenly"
+                }),
 
                 html.Div([
-                    html.H2("Composition:", style={
-                        #"fontFamily": 'Helvetica Neue, sans-serif', 
-                        "fontSize": "16px", 
-                        "margin-bottom": "0px"
-                    }),
-                    dcc.Input(id="composition-input", type="text", placeholder="", style={"width": "50%"})
-                ], style={"marginBottom": "10px", "display": "flex", "gap": "10px"}),
+                    html.Label("Exact Composition:"),
+                    dcc.Input(id="composition-input", type="text", placeholder="e.g. A2BX6", style={"width": "100%"})
+                ], style={"marginBottom": "10px"}),
 
                 html.Div([
-                    html.Label("Space Group:",style={"white-space": "nowrap"}),
+                    html.Label("Space Group:"),
                     dcc.Dropdown(
                         id="spacegroup-dropdown",
                         options=spacegroup_dropdown,
                         placeholder="Select a space group",
                         value="None",
-                        style={"width": "70%"}
                     )
-                ], style={"marginBottom": "10px", "display": "flex", "alignItems": "center", "gap": "10px"}),
+                ], style={"marginBottom": "10px"}),
 
                 # Cell parameters
                 html.Div([
@@ -368,31 +530,31 @@ layout = html.Div([
                     html.Div([
                         html.Div([
                             html.Label("a:"),
-                            dcc.Input(id="cell-a", type="number", placeholder="", style={"width": "90%"})
-                        ], style={"display": "flex", "width": "20%", "paddingRight": "5px", "alignItems": "center", "gap": "10px"}),
+                            dcc.Input(id="cell-a", type="number", placeholder="a", style={"width": "90%"})
+                        ], style={"display": "inline-block", "width": "30%", "paddingRight": "5px"}),
                         html.Div([
                             html.Label("b:"),
-                            dcc.Input(id="cell-b", type="number", placeholder="", style={"width": "90%"})
-                        ], style={"display": "flex", "width": "20%", "paddingRight": "5px", "alignItems": "center", "gap": "10px"}),
+                            dcc.Input(id="cell-b", type="number", placeholder="b", style={"width": "90%"})
+                        ], style={"display": "inline-block", "width": "30%", "paddingRight": "5px"}),
                         html.Div([
                             html.Label("c:"),
-                            dcc.Input(id="cell-c", type="number", placeholder="", style={"width": "90%"})
-                        ], style={"display": "flex", "width": "20%", "paddingRight": "5px", "alignItems": "center", "gap": "10px"}),
-                    ], style={"display": "flex", "gap": "10px"}),
+                            dcc.Input(id="cell-c", type="number", placeholder="c", style={"width": "90%"})
+                        ], style={"display": "inline-block", "width": "30%"})
+                    ], style={"display": "flex", "justifyContent": "space-between"}),
                     html.Div([
                         html.Div([
                             html.Label("α:"),
-                            dcc.Input(id="cell-alpha", type="number", placeholder="", style={"width": "90%"})
-                        ], style={"display": "flex", "width": "20%", "paddingRight": "5px", "alignItems": "center", "gap": "10px"}),
+                            dcc.Input(id="cell-alpha", type="number", placeholder="alpha", style={"width": "90%"})
+                        ], style={"display": "inline-block", "width": "30%", "paddingRight": "5px"}),
                         html.Div([
                             html.Label("β:"),
-                            dcc.Input(id="cell-beta", type="number", placeholder="", style={"width": "90%"})
-                        ], style={"display": "flex", "width": "20%", "paddingRight": "5px", "alignItems": "center", "gap": "10px"}),
+                            dcc.Input(id="cell-beta", type="number", placeholder="beta", style={"width": "90%"})
+                        ], style={"display": "inline-block", "width": "30%", "paddingRight": "5px"}),
                         html.Div([
                             html.Label("γ:"),
-                            dcc.Input(id="cell-gamma", type="number", placeholder="", style={"width": "90%"})
-                        ], style={"display": "flex", "width": "20%", "paddingRight": "5px", "alignItems": "center", "gap": "10px"}),
-                    ], style={"display": "flex", "marginTop": "10px", "gap": "10px"})
+                            dcc.Input(id="cell-gamma", type="number", placeholder="gamma", style={"width": "90%"})
+                        ], style={"display": "inline-block", "width": "30%"})
+                    ], style={"display": "flex", "justifyContent": "space-between", "marginTop": "10px"})
                 ], style={"marginBottom": "10px"}),
 
                 # Atoms input
@@ -437,113 +599,57 @@ layout = html.Div([
                                     disabled=True,
                                     type="number",
                                     placeholder="Occupancy",
-                                    style={"width": "5%"}
+                                    style={"width": "15%"}
                                 )
                             ], style={"marginBottom": "5px"})
                         ]
                     ),
                     html.Button("Add Atom", id="add-atom-button", n_clicks=0, style={"marginTop": "5px"})
                 ], style={"marginBottom": "20px"}),
-                
+
+                # --- Updated Generate Button ---
                 html.Div([
-                    html.Div([
-                        # Upload button for CIF
-                        dcc.Upload(
-                            id="upload-cif",
-                            children=html.Button(
-                                "⬆️ Upload CIF",
-                                style={"fontSize": "16px", "padding": "12px 24px"}  # Adjust size
-                            ),
-                            multiple=False,
-                            accept=".cif"
-                        ),
-                            html.Div(id="file-name-display-cif", style={"marginTop": "10px", "fontSize": "14px", "alignText": "center"}),
-
-                    ], style = {"display": "flex", "flexDirection": "column", "marginRight": "10px", "alignItems": "center"}),
-                    # Upload button for PXRD
-
-                    html.Div([
-                        dcc.Upload(
-                            id="upload-pxrd",
-                            children=html.Button(
-                                "⬆️ Upload PXRD",
-                                style={"fontSize": "16px", "padding": "12px 24px"}  # Adjust size
-                            ),
-                            multiple=False,
-                            accept=".xy"
-                        ),
-                            html.Div(id="file-name-display-pxrd", style={"marginTop": "10px", "fontSize": "14px", "alignText": "center"}),
-
-                    ], style = {"display": "flex", "flexDirection": "column", "marginRight": "10px", "alignItems": "center"}),
-
-                    html.Div([
-                        # Generate button
-                        html.Button(
-                            id="generate-button",
-                            children = [html.Span("🚀 Generate")],
-                            style={"fontSize": "16px", "padding": "12px 24px"},  # Adjust size
-                            n_clicks=0,
-                        ),
-                        dcc.Loading(
-                            id="loading",
-                            type="dot",
-                            color="black",  # Set loading dot color to black
-                            children=[html.Div(id="loading-div", style={"display": "none"})],
-                            style={
-                                "position": "absolute",
-                                "top": "50%",
-                                "left": "50%",
-                                "transform": "translate(-50%, -70%)",
-                                "zIndex": 2
-                            }
-                        ),
-                        ], style = {"display": "flex", "flexDirection": "column", "marginRight": "10px", "alignItems": "center"}),
-
-                    # # Generate button with loading dots overlaid
-                    # html.Div([
-                    #     html.Button(
-                    #         children=[
-                    #             html.Div(
-                    #                 children=[
-                    #                     html.Div(
-                    #                         children=[html.Span("🚀 Generate")],
-                    #                         className="button-inner"
-                    #                     )
-                    #                 ],
-                    #                 className="button-outer"
-                    #             )
-                    #         ],
-                    #         id="generate-button",
-                    #         n_clicks=0,
-                    #         #style={"transform": "scale(0.8)", "transformOrigin": "center"}
-                    #     ),
-                        # dcc.Loading(
-                        #     id="loading",
-                        #     type="dot",
-                        #     color="black",  # Set loading dot color to black
-                        #     children=[html.Div(id="loading-div", style={"display": "none"})],
-                        #     style={
-                        #         "position": "absolute",
-                        #         "top": "50%",
-                        #         "left": "50%",
-                        #         "transform": "translate(-50%, -70%)",
-                        #         "zIndex": 2
-                        #     }
-                        # ),
-                    #], style={"position": "relative", "display": "inline-block"}),
-                ], style={"marginBottom": "10px", "display": "flex", "justifyContent": "space-evenly"}),
+                    html.Button(
+                        children=[
+                            html.Div(
+                                children=[
+                                    html.Div(
+                                        children=[
+                                            html.Span("🚀 Generate")
+                                        ],
+                                        className="button-inner"
+                                    )
+                                ],
+                                className="button-outer"
+                            )
+                        ],
+                        id="generate-button",
+                        n_clicks=0
+                    ),
+                    dcc.Loading(
+                        id="loading",
+                        type="dot",
+                        children=[html.Div(id="loading-div", style={"display": "none"})],
+                    ),
+                ], style={
+                    "display": "flex",
+                    "alignItems": "center",
+                    "justifyContent": "center",
+                    "gap": "50px",
+                    "marginTop": "10px"
+                }),
 
                 html.Div(id="error-div"),
             ], style={
-                "width": "575px",
+                "width": "525px",
                 "padding": "10px",
                 "boxShadow": "0px 0px 5px #ccc",
                 "borderRadius": "10px",
                 "backgroundColor": "#f8f9fa",
                 "fontFamily": "Courier New, monospace",
                 "overflowY": "auto",
-                "minHeight": "975px",
-                "maxHeight": "975px"
+                "minHeight": "800px",
+                "maxHeight": "800px"
             }),
         ]),
 
@@ -558,15 +664,15 @@ layout = html.Div([
             html.Div(
                 id="cif-string-container",
                 style={
-                    "width": "425px",
+                    "width": "525px",
                     "padding": "10px",
                     "boxShadow": "0px 0px 5px #ccc",
                     "borderRadius": "10px",
                     "backgroundColor": "#f8f9fa",
                     "fontFamily": "Courier New, monospace",
                     "overflowY": "auto",
-                    "minHeight": "975px",
-                    "maxHeight": "975px",
+                    "minHeight": "800px",
+                    "maxHeight": "800px",
                 }
             ),
         ]),
@@ -610,8 +716,8 @@ layout = html.Div([
                         "boxShadow": "0px 0px 5px #ccc",
                         "borderRadius": "10px",
                         "backgroundColor": "white",
-                        "minHeight": "435px",
-                        "maxHeight": "435px"
+                        "minHeight": "260px",
+                        "maxHeight": "260px"
                     }
                 ),
             ], style={
@@ -631,71 +737,62 @@ layout = html.Div([
 ])
 
 @app.callback(
-    Output("inactive-elements-store", "data"),
-    [
-        Input({"type": "ptable-cell", "element": dash.ALL}, "n_clicks"),
-        Input("select-all", "n_clicks"),
-        Input("unselect-all", "n_clicks"),
-    ],
-    State("inactive-elements-store", "data"),
-    prevent_initial_call=True
+    Output("ptable-states", "data"),
+    Input("select-all", "n_clicks"),
+    Input("unselect-all", "n_clicks"),
+    Input({"type": "ptable-cell", "element": dash.ALL}, "n_clicks"),
+    State({"type": "ptable-cell", "element": dash.ALL}, "id"),
+    State("ptable-states", "data")
 )
-def update_element_style(n_clicks_all, select_all, unselect_all, current_data):
+def update_ptable_states(select_all, unselect_all, cell_n_clicks, cell_ids, current_states):
     trigger = ctx.triggered_id
-    updated_data = current_data.copy()
+    if trigger in ["select-all", "unselect-all"]:
+        if trigger == "select-all":
+            return {comp_id["element"]: True for comp_id in cell_ids}
+        elif trigger == "unselect-all":
+            return {comp_id["element"]: False for comp_id in cell_ids}
+    new_states = {}
+    for n_clicks, comp_id in zip(cell_n_clicks, cell_ids):
+        if n_clicks is None:
+            n_clicks = 0
+        new_states[comp_id["element"]] = (n_clicks % 2 == 0)
+    return new_states
 
-    if trigger == "select-all":
-        updated_data = {key: False for key in updated_data}  # Activate all
-    elif trigger == "unselect-all":
-        updated_data = {key: True for key in updated_data}  # Deactivate all
-    elif isinstance(trigger, dict) and trigger.get("type") == "ptable-cell":
-        element = trigger["element"]
-        updated_data[element] = not updated_data[element]  # Toggle
-
-    return updated_data  # Only update store, frontend will handle styles
-
-# Clientside Callback: Updates element styles instantly
-app.clientside_callback(
-    """
-    function(updateDict, elementToGroup, groupColors) {
-        let styles = [];
-
-        for (let el in updateDict) {
-            let group = elementToGroup[el] || "nonmetal";
-            let baseColor = groupColors[group] || "#4CAF50";
-            let style = {
-                "width": "30px",
-                "height": "30px",
-                "margin": "0px",
-                "border": "0px solid #ccc",
-                "borderRadius": "0px",
-                "cursor": "pointer",
-                "fontSize": "14px",
-                "textAlign": "center",
-                "display": "flex",
-                "alignItems": "center",
-                "justifyContent": "center"
-            };
-
-            if (updateDict[el]) {
-                // Inactive (gray)
-                style["backgroundColor"] = "rgba(238, 238, 238, 0.1)";
-                style["color"] = "#666666";
-            } else {
-                // Active (group color)
-                style["backgroundColor"] = baseColor;
-                style["color"] = "black";
-            }
-            styles.push(style);
-        }
-        return styles;
-    }
-    """,
-    Output({"type": "ptable-cell", "element": dash.ALL}, "style"),
-    Input("inactive-elements-store", "data"),
-    Input("element-to-group-store", "data"),
-    Input("group-colors-store", "data"),
+@app.callback(
+    Output({"type": "ptable-cell", "element": dash.MATCH}, "style"),
+    Input("ptable-states", "data"),
+    State({"type": "ptable-cell", "element": dash.MATCH}, "id")
 )
+def update_cell_style(ptable_states, cell_id):
+    cell_width = "30px"
+    cell_height = "30px"
+    element = cell_id["element"]
+    group = element_to_group.get(element, "nonmetal")
+    base_color = group_colors.get(group, "#4CAF50")
+    if ptable_states.get(element, True):
+        return {
+            "width": cell_width,
+            "height": cell_height,
+            "margin": "2px",
+            "border": "1px solid #ccc",
+            "borderRadius": "4px",
+            "backgroundColor": base_color,
+            "color": "white",
+            "cursor": "pointer",
+            "fontSize": "0.8em"
+        }
+    else:
+        return {
+            "width": cell_width,
+            "height": cell_height,
+            "margin": "2px",
+            "border": "1px solid #ccc",
+            "borderRadius": "4px",
+            "backgroundColor": "#eeeeee",
+            "color": "#666666",
+            "cursor": "pointer",
+            "fontSize": "0.8em"
+        }
 
 @app.callback(
     Output("cif-string-container", "children"),
@@ -704,8 +801,6 @@ app.clientside_callback(
     Output("crystal-vis-container-pxrd-plot", "style"),
     Output("loading-div", "children"),
     Output("error-div", "children"),
-    Output("file-name-display-cif", "children"),
-    Output("file-name-display-pxrd", "children"),
     Input("upload-cif", "contents"),
     Input("upload-cif", "filename"),
     Input("upload-pxrd", "contents"),
@@ -724,7 +819,6 @@ app.clientside_callback(
     State({"type": "atom-x", "index": dash.ALL}, "value"),
     State({"type": "atom-y", "index": dash.ALL}, "value"),
     State({"type": "atom-z", "index": dash.ALL}, "value"),
-    State("inactive-elements-store", "data"),
 )
 def generate_structures(
     cif_content,
@@ -745,60 +839,44 @@ def generate_structures(
     atoms_x,
     atoms_y,
     atoms_z,
-    inactive_elements
 ):
-        
-    display_cif_name = f"{cif_name}" if cif_name else "no file uploaded"
-    display_pxrd_name = f"{pxrd_name}" if pxrd_name else "no file uploaded"
-        
-    # Start with an empty figure
-    fig = make_subplots(rows=1, cols=1)
-
-    # 1) Check for uploaded CIF to build a reference
-    cond_vec = None
-    pxrd_ref = None
-
-    if cif_content and cif_name:
-        _, cif_content_byte = cif_content.split(',')
-        cif_string = base64.b64decode(cif_content_byte).decode("utf-8")
-
-        # Build reference XRD
-        #structure = Structure.from_string(cif_string)
-        #cif_string = CifWriter(struct=structure, symprec=0.1).__str__()
-        pxrd = generate_continuous_xrd_from_cif(cif_string, qmin=0.0, qmax=10.0, debug=True, fwhm_range=(FWHM, FWHM))
-        if pxrd is not None:
-            # Example: condition vector from the PXRD
-            cond_vec = torch.from_numpy(pxrd['iq']).unsqueeze(0).to('cuda')
-
-        # Also create a smaller-range PXRD for display
-        pxrd_ref = generate_continuous_xrd_from_cif(cif_string, qmin=0.5, qmax=7.5, debug=True, fwhm_range=(FWHM, FWHM))
-        if pxrd_ref is not None:
-            fig.add_trace(go.Scatter(x=pxrd_ref['q'], y=pxrd_ref['iq'], mode='lines', name='Reference'))
-            fig.update_layout(
-               xaxis_title='Q [Å^-1]',
-               yaxis_title='I(Q) [a.u.]',
-               height=425,
-               width=475,
-               yaxis=dict(tickvals=[]),
-               margin=dict(l=0, r=0, t=0, b=0),
-               plot_bgcolor='rgba(0, 0, 0, 0)',
-               paper_bgcolor='rgba(0, 0, 0, 0)',
-               legend=dict(x=0.8, y=1.0),
-            )
-        else:
-            raise Exception("Cannot generate PXRD from given CIF")
-
-    elif pxrd_content and pxrd_name:
-        # If a standalone PXRD was uploaded, you could parse that here.
-        # For brevity, we skip it.
-        pass
-    else:
-        pass
 
     if ctx.triggered_id == "generate-button":
+        fig = make_subplots(rows=1, cols=1)
 
-        # 2) Load your model
-        #    For demonstration, we’ll just pick one path:
+        cond_vec = None
+        pxrd_ref = None
+
+        if cif_content and cif_name:
+            _, cif_content_byte = cif_content.split(',')
+            cif_string = base64.b64decode(cif_content_byte).decode("utf-8")
+
+            pxrd = generate_continuous_xrd_from_cif(cif_string, qmin=0.0, qmax=10.0, debug=True, fwhm_range=(0.05, 0.05))
+            if pxrd is not None:
+                cond_vec = torch.from_numpy(pxrd['iq']).unsqueeze(0).to('cuda')
+
+            pxrd_ref = generate_continuous_xrd_from_cif(cif_string, qmin=0.5, qmax=7.5, debug=True, fwhm_range=(0.05, 0.05))
+            if pxrd_ref is not None:
+                fig.add_trace(go.Scatter(x=pxrd_ref['q'], y=pxrd_ref['iq'], mode='lines', name='Reference'))
+                fig.update_layout(
+                   xaxis_title='Q [Å^-1]',
+                   yaxis_title='I(Q) [a.u.]',
+                   height=225,
+                   width=475,
+                   yaxis=dict(tickvals=[]),
+                   margin=dict(l=0, r=0, t=0, b=0),
+                   plot_bgcolor='rgba(0, 0, 0, 0)',
+                   paper_bgcolor='rgba(0, 0, 0, 0)',
+                   legend=dict(x=0.8, y=1.0),
+                )
+            else:
+                raise Exception("Cannot generate PXRD from given CIF")
+
+        elif pxrd_content and pxrd_name:
+            pass
+        else:
+            pass
+
         if cond_vec is not None:
             model_path = "../../../phd_projects/deCIFer/experiments/model__conditioned_mlp_augmentation__context_3076__robust_full_trainingcurves/ckpt.pt"
         else:
@@ -806,21 +884,17 @@ def generate_structures(
 
         model = load_model_from_checkpoint(model_path, device='cuda')
 
-        # 3) Build a simple atoms string list
         atoms = []
         for i, (el, mtpl, x, y, z) in enumerate(zip(atoms_element, atoms_mult, atoms_x, atoms_y, atoms_z)):
-            # Make sure no None in the line
             if None not in [el, mtpl, x, y, z]:
                 atoms.append(f"{el} {el}{i} {int(mtpl)} {x:.4f} {y:.4f} {z:.4f} 1.0000")
 
-        # 4) Actually generate the CIF using a hypothetical model method
-        #    You would replace with your real generate_custom or similar
         generated = model.generate_custom(
             idx=torch.tensor([START_ID]).unsqueeze(0).to('cuda'),
             max_new_tokens=3076,
             cond_vec=cond_vec,
             start_indices_batch=[[0]],
-            composition_string=composition_string if composition_string != "" else None,
+            composition_string=composition_string,
             spacegroup_string=spacegroup_string,
             cell_a_string=f'{cell_a_value:.4f}' if cell_a_value else None,
             cell_b_string=f'{cell_b_value:.4f}' if cell_b_value else None,
@@ -829,25 +903,21 @@ def generate_structures(
             cell_beta_string=f'{cell_beta_value:.4f}' if cell_beta_value else None,
             cell_gamma_string=f'{cell_gamma_value:.4f}' if cell_gamma_value else None,
             atoms_string_list=atoms if len(atoms) > 0 else None,
-            exclude_elements=[el for (el,inact) in inactive_elements.items() if inact],
         ).cpu().numpy()
 
-        # Remove padding
         generated = [ids[ids != PADDING_ID] for ids in generated]
 
         cif_string_gen = DECODE(generated[0])
-        # Fix P1 issues if needed
         cif_string_gen = replace_symmetry_loop_with_P1(cif_string_gen)
         spacegroup_symbol = extract_space_group_symbol(cif_string_gen)
         if spacegroup_symbol != "P 1":
             cif_string_gen = reinstate_symmetry_loop(cif_string_gen, spacegroup_symbol)
 
-        # 5) Generate XRD from the newly created CIF
-        pxrd_gen = generate_continuous_xrd_from_cif(cif_string_gen, qmin=0.5, qmax=7.5, debug=True, fwhm_range=(FWHM, FWHM))
+        pxrd_gen = generate_continuous_xrd_from_cif(cif_string_gen, qmin=0.5, qmax=7.5, debug=True, fwhm_range=(0.05, 0.05))
         if pxrd_gen is not None:
             fig.add_trace(go.Scatter(x=pxrd_gen['q'], y=pxrd_gen['iq'], mode='lines', name='Generated'))
             if pxrd_ref is not None:
-                diff = pxrd_ref['iq'] - pxrd_gen['iq'] - 0.1
+                diff = pxrd_ref['iq'] - pxrd_gen['iq'] - 0.5
                 rwp_val = rwp_fn(pxrd_ref['iq'], pxrd_gen['iq'])
                 fig.add_trace(go.Scatter(
                     x=pxrd_gen['q'], y=diff, mode='lines',
@@ -856,19 +926,18 @@ def generate_structures(
             fig.update_layout(
                 xaxis_title='Q [Å^-1]',
                 yaxis_title='I(Q) [a.u.]',
-                height=425,
+                height=225,
                 width=475,
-                yaxis = dict(tickvals=[]),
+                yaxis=dict(tickvals=[]),
                 margin=dict(l=0, r=0, t=0, b=0),
-                plot_bgcolor = 'rgba(0, 0, 0, 0)',
-                paper_bgcolor = 'rgba(0, 0, 0, 0)',
+                plot_bgcolor='rgba(0, 0, 0, 0)',
+                paper_bgcolor='rgba(0, 0, 0, 0)',
                 legend=dict(x=0.8, y=1.0),
             )
 
-        # 6) Generate display and structure data
         cif_display = html.Pre(cif_string_gen, style={
             'whiteSpace': 'pre-wrap',
-            'maxHeight': '950px',
+            'maxHeight': '775px',
             'overflow': 'auto',
             'backgroundColor': '#f8f9fa',
             'padding': '10px',
@@ -881,25 +950,19 @@ def generate_structures(
             cif_display,
             structure_gen,
             fig,
-            {},  # style for the figure
+            {},
             "",
-            html.Div(),  # no errors
-            display_cif_name,
-            display_pxrd_name,
-        )
-    else:
-        # If no generation triggered yet, return empty placeholders
-        return (
-            html.Div(),
-            None,
-            go.Figure(),
-            {"display": "none"},
-            "",
-            html.Div(),
-            display_cif_name,
-            display_pxrd_name,
+            html.Div()
         )
 
+    return (
+        html.Div(),
+        None,
+        go.Figure(),
+        {"display": "none"},
+        "",
+        html.Div(),
+    )
 
 @app.callback(
     Output("atoms-container", "children"),
@@ -911,27 +974,23 @@ def add_atom_row(n_clicks, children):
         raise dash.exceptions.PreventUpdate
     new_index = len(children)
     new_atom = html.Div([
-        dash.dcc.Input(id={"type": "atom-element", "index": new_index}, type="text",
+        dcc.Input(id={"type": "atom-element", "index": new_index}, type="text",
                        placeholder="Element", style={"width": "15%", "marginRight": "5px"}),
-        dash.dcc.Input(id={"type": "atom-multiplicity", "index": new_index}, type="number",
+        dcc.Input(id={"type": "atom-multiplicity", "index": new_index}, type="number",
                        placeholder="Multiplicity", style={"width": "15%", "marginRight": "5px"}),
-        dash.dcc.Input(id={"type": "atom-x", "index": new_index}, type="number",
+        dcc.Input(id={"type": "atom-x", "index": new_index}, type="number",
                        placeholder="x", style={"width": "15%", "marginRight": "5px"}),
-        dash.dcc.Input(id={"type": "atom-y", "index": new_index}, type="number",
+        dcc.Input(id={"type": "atom-y", "index": new_index}, type="number",
                        placeholder="y", style={"width": "15%", "marginRight": "5px"}),
-        dash.dcc.Input(id={"type": "atom-z", "index": new_index}, type="number",
+        dcc.Input(id={"type": "atom-z", "index": new_index}, type="number",
                        placeholder="z", style={"width": "15%", "marginRight": "5px"}),
-        dash.dcc.Input(value="1.0", disabled=True, type="number", placeholder="Occupancy",
-                       style={"width": "5%"})
+        dcc.Input(value="1.0", disabled=True, type="number", placeholder="Occupancy",
+                       style={"width": "15%"})
     ], style={"marginBottom": "5px"})
     children.append(new_atom)
     return children
 
-# Use Crystal Toolkit's layout registration
 ctc.register_crystal_toolkit(app, layout=layout)
 
-
 if __name__ == "__main__":
-
-    # Run server
     app.run_server(debug=True, port=8060)
