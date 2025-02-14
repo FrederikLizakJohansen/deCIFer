@@ -51,6 +51,20 @@ STRUCTURE_COMPONENT_ID = structure_component.id()
 
 FWHM = 0.05
 
+CS = [ 
+    "#A69580", # Background
+    "#0D0D0D", # Top bar
+    "#F2F2F2", 
+    "#F2C166", # Component smaller sections
+    "#F2D06B", # Component background
+]
+CS = [
+    "#F0F5F5",  # Background (soft pastel green)
+    "#2E2E2E",  # Top bar (deep charcoal for contrast)
+    "black",  # Component smaller sections (pastel peach)
+    "#F5F0F4",  # Component background (muted sand)
+    "white",  # Light accent (gentle off-white)
+]
 # Read in available space groups
 with open("../decifer/spacegroups.txt", "r") as f:
     space_groups = [line.strip() for line in f if line.strip()]
@@ -274,7 +288,7 @@ def create_periodic_table():
                     )
                 ))
         table_rows.append(html.Tr(cells))
-    return html.Table(table_rows, style={"borderCollapse": "collapse", "width": "auto", "marginBottom": "20px"})
+    return html.Table(table_rows, style={"borderCollapse": "collapse", "width": "auto", "marginBottom": "0px"})
 
 layout = html.Div([
     html.Header([
@@ -290,7 +304,7 @@ layout = html.Div([
         ], style={
             "textAlign": "left",
             "margin": "0",
-            "padding": "20px",
+            "padding": "10px",
             "fontFamily": "Helvetica Neue, sans-serif",
             "fontSize": "3em",
             "fontWeight": "bold",
@@ -302,54 +316,33 @@ layout = html.Div([
         "flexDirection": "column",
         "alignItems": "center",
         "gap": "0px",
-        "margin-bottom": "20px",
+        "margin-bottom": "10px",
+        "background-color": CS[1],
     }),
 
     # Top row with three columns
     html.Div([
         # Left column: input forms
         html.Div([
-            html.H3("Structure Generation Input", style={
+            html.H1("Structure Generation Input", style={
                 "textAlign": "center", 
                 "fontFamily": 'Helvetica Neue, sans-serif', 
-                "fontSize": "20px", 
-                "margin-bottom": "10px"
+                "fontSize": "30px", 
+                "fontWeight": "bold",
+                "margin-bottom": "5px",
+                "color": CS[2]
             }),
 
             html.Div([
-                # ---- New Periodic Table Section Start ----
-                dcc.Store(id="inactive-elements-store", data=inactive_elements_dict),
-                dcc.Store(id="element-to-group-store", data=element_to_group),
-                dcc.Store(id="group-colors-store", data=group_colors),
-
-                #dcc.Store(id="selected-elements-store", data=all_elements),
-                #dcc.Store(id="ptable-states", data={el: True for el in all_elements}),
-                html.H3("Select Elements", style={"textAlign": "left", "marginBottom": "10px"}),
-                html.Div([
-                    html.Button("Select All", id="select-all", n_clicks=0, style={"marginRight": "5px"}),
-                    html.Button("Unselect All", id="unselect-all", n_clicks=0)
-                ], style={"marginTop": "10px", "textAlign": "center", "marginBottom": "0px"}),
-                html.Div(
-                [create_periodic_table()],
-                    style={"display": "flex", "alignItems": "center", "justifyContent": "center"},
-                ),
-                # html.Div([
-                # ], style={
-                #     "marginBottom": "20px",
-                #     "padding": "10px",
-                #     "border": "1px solid #ccc",
-                #     "borderRadius": "5px",
-                #     "backgroundColor": "#ffffff"
-                # }),
 
                 html.Div([
                     html.H2("Composition:", style={
-                        #"fontFamily": 'Helvetica Neue, sans-serif', 
+                        #"fontFamily": 'Verdana, sans-serif', 
                         "fontSize": "16px", 
                         "margin-bottom": "0px"
                     }),
-                    dcc.Input(id="composition-input", type="text", placeholder="", style={"width": "50%"})
-                ], style={"marginBottom": "10px", "display": "flex", "gap": "10px"}),
+                    dcc.Input(id="composition-input", type="text", placeholder="Enter a composition (e.g. CdCl2)", style={"width": "100%", "height": "30px", "fontSize": "14px", "borderRadius": "5px", "padding": "5px"})
+                ], style={"marginBottom": "10px", "display": "flex", "justifyContent": "center", "gap": "10px", "padding": "10px", "background-color": CS[3], "alignItems": "center", "borderRadius": "5px"}),#, "flexDirection": "column", "alignItems": "center"}),
 
                 html.Div([
                     html.Label("Space Group:",style={"white-space": "nowrap"}),
@@ -358,42 +351,176 @@ layout = html.Div([
                         options=spacegroup_dropdown,
                         placeholder="Select a space group",
                         value="None",
-                        style={"width": "70%"}
+                        style={"width": "100%"}
                     )
-                ], style={"marginBottom": "10px", "display": "flex", "alignItems": "center", "gap": "10px"}),
+                ], style={"marginBottom": "10px", "display": "flex", "alignItems": "center", "justifyContent": "center", "gap": "10px", "padding": "10px", "background-color": CS[3]}),
 
                 # Cell parameters
                 html.Div([
                     html.Label("Cell Parameters:"),
                     html.Div([
-                        html.Div([
+                        html.Div(
+                            id = "cell-a-display",
+                            children = [
                             html.Label("a:"),
-                            dcc.Input(id="cell-a", type="number", placeholder="", style={"width": "90%"})
-                        ], style={"display": "flex", "width": "20%", "paddingRight": "5px", "alignItems": "center", "gap": "10px"}),
+                            dcc.Input(id="cell-a", type="text", placeholder="Enter a number", step="any", style={"width": "90%", "fontSize": "14px", "height": "30px", "borderRadius": "5px", "padding": "5px"}),
+                            html.Button(
+                                "x",
+                                id="clear-btn-a",
+                                n_clicks=0,
+                                tabIndex="-1",
+                                style={
+                                    "height": "20px",
+                                    "width": "20px",
+                                    "fontSize": "20px",
+                                    "background-color": "black",
+                                    "color": "white",
+                                    "borderRadius": "50%",
+                                    "display": "inline-flex",
+                                    "flexDirection": "column",
+                                    "alignItems": "center",
+                                    "justifyContent": "center",
+                                    "textAlign": "center",
+                                    "paddingBottom": "8px",
+                                    "userSelect": "none",
+                                    "cursor": "pointer",
+                                }
+                            ),
+                        ], style={"display": "flex", "width": "100%", "paddingRight": "5px", "alignItems": "center", "gap": "5px"}),
                         html.Div([
                             html.Label("b:"),
-                            dcc.Input(id="cell-b", type="number", placeholder="", style={"width": "90%"})
-                        ], style={"display": "flex", "width": "20%", "paddingRight": "5px", "alignItems": "center", "gap": "10px"}),
+                            dcc.Input(id="cell-b", type="text", placeholder="Enter a number", step="any", style={"width": "90%", "fontSize": "14px", "height": "30px", "borderRadius": "5px", "padding": "5px"}),
+                            html.Button(
+                                "x",
+                                id="clear-btn-b",
+                                n_clicks=0,
+                                tabIndex="-1",
+                                style={
+                                    "height": "20px",
+                                    "width": "20px",
+                                    "fontSize": "20px",
+                                    "background-color": "black",
+                                    "color": "white",
+                                    "borderRadius": "50%",
+                                    "display": "inline-flex",
+                                    "flexDirection": "column",
+                                    "alignItems": "center",
+                                    "justifyContent": "center",
+                                    "textAlign": "center",
+                                    "paddingBottom": "8px",
+                                    "userSelect": "none",
+                                    "cursor": "pointer",
+                                }
+                            ),
+                        ], style={"display": "flex", "width": "100%", "paddingRight": "5px", "alignItems": "center", "gap": "5px"}),
                         html.Div([
                             html.Label("c:"),
-                            dcc.Input(id="cell-c", type="number", placeholder="", style={"width": "90%"})
-                        ], style={"display": "flex", "width": "20%", "paddingRight": "5px", "alignItems": "center", "gap": "10px"}),
+                            dcc.Input(id="cell-c", type="text", placeholder="Enter a number", step="any", style={"width": "90%", "fontSize": "14px", "height": "30px", "borderRadius": "5px", "padding": "5px"}),
+                            html.Button(
+                                "x",
+                                id="clear-btn-c",
+                                n_clicks=0,
+                                tabIndex="-1",
+                                style={
+                                    "height": "20px",
+                                    "width": "20px",
+                                    "fontSize": "20px",
+                                    "background-color": "black",
+                                    "color": "white",
+                                    "borderRadius": "50%",
+                                    "display": "inline-flex",
+                                    "flexDirection": "column",
+                                    "alignItems": "center",
+                                    "justifyContent": "center",
+                                    "textAlign": "center",
+                                    "paddingBottom": "8px",
+                                    "userSelect": "none",
+                                    "cursor": "pointer",
+                                }
+                            ),
+                        ], style={"display": "flex", "width": "100%", "paddingRight": "5px", "alignItems": "center", "gap": "5px"}),
                     ], style={"display": "flex", "gap": "10px"}),
                     html.Div([
                         html.Div([
                             html.Label("α:"),
-                            dcc.Input(id="cell-alpha", type="number", placeholder="", style={"width": "90%"})
-                        ], style={"display": "flex", "width": "20%", "paddingRight": "5px", "alignItems": "center", "gap": "10px"}),
+                            dcc.Input(id="cell-alpha", type="text", placeholder="Enter a number", step="any", style={"width": "90%", "fontSize": "14px", "height": "30px", "borderRadius": "5px", "padding": "5px"}),
+                            html.Button(
+                                "x",
+                                id="clear-btn-alpha",
+                                n_clicks=0,
+                                tabIndex="-1",
+                                style={
+                                    "height": "20px",
+                                    "width": "20px",
+                                    "fontSize": "20px",
+                                    "background-color": "black",
+                                    "color": "white",
+                                    "borderRadius": "50%",
+                                    "display": "inline-flex",
+                                    "flexDirection": "column",
+                                    "alignItems": "center",
+                                    "justifyContent": "center",
+                                    "textAlign": "center",
+                                    "paddingBottom": "8px",
+                                    "userSelect": "none",
+                                    "cursor": "pointer",
+                                }
+                            ),
+                        ], style={"display": "flex", "width": "100%", "paddingRight": "5px", "alignItems": "center", "gap": "5px"}),
                         html.Div([
                             html.Label("β:"),
-                            dcc.Input(id="cell-beta", type="number", placeholder="", style={"width": "90%"})
-                        ], style={"display": "flex", "width": "20%", "paddingRight": "5px", "alignItems": "center", "gap": "10px"}),
+                            dcc.Input(id="cell-beta", type="text", placeholder="Enter a number", step="any", style={"width": "90%", "fontSize": "14px", "height": "30px", "borderRadius": "5px", "padding": "5px"}),
+                            html.Button(
+                                "x",
+                                id="clear-btn-beta",
+                                n_clicks=0,
+                                tabIndex="-1",
+                                style={
+                                    "height": "20px",
+                                    "width": "20px",
+                                    "fontSize": "20px",
+                                    "background-color": "black",
+                                    "color": "white",
+                                    "borderRadius": "50%",
+                                    "display": "inline-flex",
+                                    "flexDirection": "column",
+                                    "alignItems": "center",
+                                    "justifyContent": "center",
+                                    "textAlign": "center",
+                                    "paddingBottom": "8px",
+                                    "userSelect": "none",
+                                    "cursor": "pointer",
+                                }
+                            ),
+                        ], style={"display": "flex", "width": "100%", "paddingRight": "5px", "alignItems": "center", "gap": "5px"}),
                         html.Div([
                             html.Label("γ:"),
-                            dcc.Input(id="cell-gamma", type="number", placeholder="", style={"width": "90%"})
-                        ], style={"display": "flex", "width": "20%", "paddingRight": "5px", "alignItems": "center", "gap": "10px"}),
+                            dcc.Input(id="cell-gamma", type="text", placeholder="Enter a number", step="any", style={"width": "90%", "fontSize": "14px", "height": "30px", "borderRadius": "5px", "padding": "5px"}),
+                            html.Button(
+                                "x",
+                                id="clear-btn-gamma",
+                                n_clicks=0,
+                                tabIndex="-1",
+                                style={
+                                    "height": "20px",
+                                    "width": "20px",
+                                    "fontSize": "20px",
+                                    "background-color": "black",
+                                    "color": "white",
+                                    "borderRadius": "50%",
+                                    "display": "inline-flex",
+                                    "flexDirection": "column",
+                                    "alignItems": "center",
+                                    "justifyContent": "center",
+                                    "textAlign": "center",
+                                    "paddingBottom": "8px",
+                                    "userSelect": "none",
+                                    "cursor": "pointer",
+                                }
+                            ),
+                        ], style={"display": "flex", "width": "100%", "paddingRight": "5px", "alignItems": "center", "gap": "5px"}),
                     ], style={"display": "flex", "marginTop": "10px", "gap": "10px"})
-                ], style={"marginBottom": "10px"}),
+                ], style={"marginBottom": "10px", "padding": "10px", "background-color": CS[3]}),
 
                 # Atoms input
                 html.Div([
@@ -443,7 +570,26 @@ layout = html.Div([
                         ]
                     ),
                     html.Button("Add Atom", id="add-atom-button", n_clicks=0, style={"marginTop": "5px"})
-                ], style={"marginBottom": "20px"}),
+                ], style={"marginBottom": "10px", "background-color": CS[3], "padding": "10px"}),
+                
+                # ---- New Periodic Table Section Start ----
+                dcc.Store(id="inactive-elements-store", data=inactive_elements_dict),
+                dcc.Store(id="element-to-group-store", data=element_to_group),
+                dcc.Store(id="group-colors-store", data=group_colors),
+                html.Div([
+                    html.Div([
+                        html.H3("Select elements from periodic table:", style={"textAlign": "left", "marginBottom": "10px"}),
+                        html.Div([
+                        html.Button("Select All", id="select-all", n_clicks=0, style={"marginRight": "5px"}),
+                        html.Button("Unselect All", id="unselect-all", n_clicks=0)
+                        ]),
+                    ], style={"marginTop": "10px", "textAlign": "center", "marginBottom": "10px", "display": "flex", "justifyContent": "space-between", "marginLeft": "5px", "marginRight": "10px"}),
+                    
+                    html.Div(
+                    [create_periodic_table()],
+                        style={"display": "flex", "alignItems": "center", "justifyContent": "center"},
+                    ),
+                ], style={"background-color": CS[3], "padding": "10px", "marginBottom": "10px"}),
                 
                 html.Div([
                     html.Div([
@@ -476,12 +622,14 @@ layout = html.Div([
 
                     ], style = {"display": "flex", "flexDirection": "column", "marginRight": "10px", "alignItems": "center"}),
 
+                ], style={"marginBottom": "10px", "display": "flex", "justifyContent": "space-evenly"}),
+                html.Div([
                     html.Div([
                         # Generate button
                         html.Button(
                             id="generate-button",
                             children = [html.Span("🚀 Generate")],
-                            style={"fontSize": "16px", "padding": "12px 24px"},  # Adjust size
+                            style={"fontSize": "25px", "padding": "12px 24px", "borderRadius": "5px", "cursor": "pointer"},  # Adjust size
                             n_clicks=0,
                         ),
                         dcc.Loading(
@@ -499,38 +647,6 @@ layout = html.Div([
                         ),
                         ], style = {"display": "flex", "flexDirection": "column", "marginRight": "10px", "alignItems": "center"}),
 
-                    # # Generate button with loading dots overlaid
-                    # html.Div([
-                    #     html.Button(
-                    #         children=[
-                    #             html.Div(
-                    #                 children=[
-                    #                     html.Div(
-                    #                         children=[html.Span("🚀 Generate")],
-                    #                         className="button-inner"
-                    #                     )
-                    #                 ],
-                    #                 className="button-outer"
-                    #             )
-                    #         ],
-                    #         id="generate-button",
-                    #         n_clicks=0,
-                    #         #style={"transform": "scale(0.8)", "transformOrigin": "center"}
-                    #     ),
-                        # dcc.Loading(
-                        #     id="loading",
-                        #     type="dot",
-                        #     color="black",  # Set loading dot color to black
-                        #     children=[html.Div(id="loading-div", style={"display": "none"})],
-                        #     style={
-                        #         "position": "absolute",
-                        #         "top": "50%",
-                        #         "left": "50%",
-                        #         "transform": "translate(-50%, -70%)",
-                        #         "zIndex": 2
-                        #     }
-                        # ),
-                    #], style={"position": "relative", "display": "inline-block"}),
                 ], style={"marginBottom": "10px", "display": "flex", "justifyContent": "space-evenly"}),
 
                 html.Div(id="error-div"),
@@ -539,21 +655,23 @@ layout = html.Div([
                 "padding": "10px",
                 "boxShadow": "0px 0px 5px #ccc",
                 "borderRadius": "10px",
-                "backgroundColor": "#f8f9fa",
+                "backgroundColor": CS[4],
                 "fontFamily": "Courier New, monospace",
                 "overflowY": "auto",
                 "minHeight": "975px",
-                "maxHeight": "975px"
+                "maxHeight": "975px",
             }),
         ]),
 
         # Middle column: CIF display
         html.Div([
             html.H3("CIF Display", style={
-                "textAlign": "center",
-                "fontFamily": 'Helvetica Neue, sans-serif',
-                "fontSize": "20px",
-                "margin-bottom": "10px"
+                "textAlign": "center", 
+                "fontFamily": 'Helvetica Neue, sans-serif', 
+                "fontSize": "30px", 
+                "fontWeight": "bold",
+                "margin-bottom": "5px",
+                "color": CS[2],
             }),
             html.Div(
                 id="cif-string-container",
@@ -562,7 +680,7 @@ layout = html.Div([
                     "padding": "10px",
                     "boxShadow": "0px 0px 5px #ccc",
                     "borderRadius": "10px",
-                    "backgroundColor": "#f8f9fa",
+                    "backgroundColor": CS[4],
                     "fontFamily": "Courier New, monospace",
                     "overflowY": "auto",
                     "minHeight": "975px",
@@ -576,8 +694,10 @@ layout = html.Div([
             html.H3("Crystal Display", style={
                 "textAlign": "center", 
                 "fontFamily": 'Helvetica Neue, sans-serif', 
-                "fontSize": "20px", 
-                "margin-bottom": "10px"
+                "fontSize": "30px", 
+                "fontWeight": "bold",
+                "margin-bottom": "5px",
+                "color": CS[2]
             }),
             html.Div([
                 html.Div([
@@ -589,7 +709,7 @@ layout = html.Div([
                         "padding": "10px",
                         "boxShadow": "0px 0px 5px #ccc",
                         "borderRadius": "10px",
-                        "backgroundColor": "white",
+                        "backgroundColor": CS[4],
                         "minHeight": "525px",
                         "maxHeight": "525px"
                     }
@@ -609,7 +729,7 @@ layout = html.Div([
                         "padding": "10px",
                         "boxShadow": "0px 0px 5px #ccc",
                         "borderRadius": "10px",
-                        "backgroundColor": "white",
+                        "backgroundColor": CS[4],
                         "minHeight": "435px",
                         "maxHeight": "435px"
                     }
@@ -628,7 +748,68 @@ layout = html.Div([
         "maxWidth": "1600px",
         "margin": "1px auto"
     }),
-])
+], style={"background-color": CS[0]})
+
+@app.callback(
+    Output("cell-a", "value"),
+    Output("cell-b", "value"),
+    Output("cell-c", "value"),
+    Output("cell-alpha", "value"),
+    Output("cell-beta", "value"),
+    Output("cell-gamma", "value"),
+    Input("cell-a", "n_blur"),
+    Input("cell-b", "n_blur"),
+    Input("cell-c", "n_blur"),
+    Input("cell-alpha", "n_blur"),
+    Input("cell-beta", "n_blur"),
+    Input("cell-gamma", "n_blur"),
+    Input("clear-btn-a", "n_clicks"),
+    Input("clear-btn-b", "n_clicks"),
+    Input("clear-btn-c", "n_clicks"),
+    Input("clear-btn-alpha", "n_clicks"),
+    Input("clear-btn-beta", "n_clicks"),
+    Input("clear-btn-gamma", "n_clicks"),
+    State("cell-a", "value"),
+    State("cell-b", "value"),
+    State("cell-c", "value"),
+    State("cell-alpha", "value"),
+    State("cell-beta", "value"),
+    State("cell-gamma", "value"),
+    prevent_initial_call=True
+)
+def format_number_all(_a, _b, _c, _alpha, _beta, _gamma, n_clicks_a, n_clicks_b, n_clicks_c, n_clicks_alpha, n_click_beta, n_clicks_gamma, value_a, value_b, value_c, value_alpha, value_beta, value_gamma):
+
+    ctx = dash.callback_context
+
+    if not ctx.triggered:
+        return value_a, value_b, value_c, value_alpha, value_beta, value_gamma
+
+    trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
+
+    def format_value(value):
+        if value is not None and value != "":
+            try:
+                output_value = f"{float(value):.4f}" #np.around(value, 4)  # Automatically rounds to 4 decimal places
+                return output_value
+            except ValueError:
+                return ""
+        return value
+
+    if trigger_id == "clear-btn-a":
+        return "", value_b, value_c, value_alpha, value_beta, value_gamma
+    if trigger_id == "clear-btn-b":
+        return value_a, "", value_c, value_alpha, value_beta, value_gamma
+    if trigger_id == "clear-btn-c":
+        return value_a, value_b, "", value_alpha, value_beta, value_gamma
+    if trigger_id == "clear-btn-alpha":
+        return value_a, value_b, value_c, "", value_beta, value_gamma
+    if trigger_id == "clear-btn-beta":
+        return value_a, value_b, value_c, value_alpha, "", value_gamma
+    if trigger_id == "clear-btn-gamma":
+        return value_a, value_b, value_c, value_alpha, value_beta, ""
+
+    return format_value(value_a), format_value(value_b), format_value(value_c), format_value(value_alpha), format_value(value_beta), format_value(value_gamma)
+
 
 @app.callback(
     Output("inactive-elements-store", "data"),
@@ -753,6 +934,7 @@ def generate_structures(
         
     # Start with an empty figure
     fig = make_subplots(rows=1, cols=1)
+    fig_style = {"display": "none"}
 
     # 1) Check for uploaded CIF to build a reference
     cond_vec = None
@@ -771,20 +953,36 @@ def generate_structures(
             cond_vec = torch.from_numpy(pxrd['iq']).unsqueeze(0).to('cuda')
 
         # Also create a smaller-range PXRD for display
-        pxrd_ref = generate_continuous_xrd_from_cif(cif_string, qmin=0.5, qmax=7.5, debug=True, fwhm_range=(FWHM, FWHM))
+        pxrd_ref = generate_continuous_xrd_from_cif(cif_string, qmin=0.5, qmax=7.9, qstep=0.005, debug=True, fwhm_range=(FWHM, FWHM))
         if pxrd_ref is not None:
             fig.add_trace(go.Scatter(x=pxrd_ref['q'], y=pxrd_ref['iq'], mode='lines', name='Reference'))
             fig.update_layout(
-               xaxis_title='Q [Å^-1]',
-               yaxis_title='I(Q) [a.u.]',
-               height=425,
-               width=475,
-               yaxis=dict(tickvals=[]),
-               margin=dict(l=0, r=0, t=0, b=0),
-               plot_bgcolor='rgba(0, 0, 0, 0)',
-               paper_bgcolor='rgba(0, 0, 0, 0)',
-               legend=dict(x=0.8, y=1.0),
+                xaxis_title=r'Q [Å<sup>-1</sup>]',  # Proper subscript formatting
+                yaxis_title='I(Q) [a.u.]',
+                height=400,
+                width=475,
+                yaxis=dict(
+                    tickvals=[], 
+                    showgrid=False, 
+                    zeroline=False
+                ),
+                xaxis=dict(
+                    showgrid=False, 
+                    zeroline=False, 
+                    mirror=True, 
+                    linewidth=1, 
+                    linecolor='black'
+                ),
+                margin=dict(l=10, r=10, t=10, b=10),
+                plot_bgcolor='white',
+                paper_bgcolor='white',
+                font=dict(family="Arial, sans-serif", size=14),
+                legend=dict(
+                    x=0.6, 
+                    y=1.0, 
+                )
             )
+            fig_style = {}
         else:
             raise Exception("Cannot generate PXRD from given CIF")
 
@@ -843,7 +1041,7 @@ def generate_structures(
             cif_string_gen = reinstate_symmetry_loop(cif_string_gen, spacegroup_symbol)
 
         # 5) Generate XRD from the newly created CIF
-        pxrd_gen = generate_continuous_xrd_from_cif(cif_string_gen, qmin=0.5, qmax=7.5, debug=True, fwhm_range=(FWHM, FWHM))
+        pxrd_gen = generate_continuous_xrd_from_cif(cif_string_gen, qmin=0.5, qmax=7.9, qstep=0.005, debug=True, fwhm_range=(FWHM, FWHM))
         if pxrd_gen is not None:
             fig.add_trace(go.Scatter(x=pxrd_gen['q'], y=pxrd_gen['iq'], mode='lines', name='Generated'))
             if pxrd_ref is not None:
@@ -854,15 +1052,33 @@ def generate_structures(
                     name=f'Difference, Rwp: {rwp_val:.3f}'
                 ))
             fig.update_layout(
-                xaxis_title='Q [Å^-1]',
+                xaxis_title=r'Q [Å<sup>-1</sup>]',  # Proper subscript formatting
                 yaxis_title='I(Q) [a.u.]',
-                height=425,
+                height=400,
                 width=475,
-                yaxis = dict(tickvals=[]),
-                margin=dict(l=0, r=0, t=0, b=0),
-                plot_bgcolor = 'rgba(0, 0, 0, 0)',
-                paper_bgcolor = 'rgba(0, 0, 0, 0)',
-                legend=dict(x=0.8, y=1.0),
+                yaxis=dict(
+                    tickvals=[], 
+                    showgrid=False, 
+                    zeroline=False
+                ),
+                xaxis=dict(
+                    showgrid=False, 
+                    zeroline=False, 
+                    mirror=True, 
+                    linewidth=1, 
+                    linecolor='black'
+                ),
+                margin=dict(l=10, r=10, t=10, b=10),
+                plot_bgcolor='white',
+                paper_bgcolor='white',
+                font=dict(family="Arial, sans-serif", size=14),
+                legend=dict(
+                    x=0.6, 
+                    y=1.0, 
+                    #bgcolor='rgba(255,255,255,0.5)',
+                    #bordercolor='black', 
+                    #borderwidth=1
+                )
             )
 
         # 6) Generate display and structure data
@@ -892,8 +1108,8 @@ def generate_structures(
         return (
             html.Div(),
             None,
-            go.Figure(),
-            {"display": "none"},
+            fig,
+            fig_style,
             "",
             html.Div(),
             display_cif_name,
