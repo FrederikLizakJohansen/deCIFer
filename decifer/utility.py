@@ -2,7 +2,7 @@
 
 import re
 import math
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 import torch
 import h5py
 import numpy as np
@@ -296,6 +296,197 @@ def generate_continuous_xrd_from_cif(
     iq_cont = torch.clamp(iq_cont, min=0.0)
 
     return {'q': q_cont.numpy(), 'iq': iq_cont.numpy(), 'q_disc': q_disc.numpy(), 'iq_disc': iq_disc.numpy()}
+
+def pxrd_from_cif(
+    cif_string,
+    structure_name: str = 'null',
+    wavelength: str = 'CuKa',
+    qmin: float = 0.0,
+    qmax: float = 10.0,
+    qstep: float = 0.01,
+    base_fwhm_range: Tuple[float, float] = (0.05, 0.05),
+    eta_range: Tuple[float, float] = (0.5, 0.5),  # 1.0 is fully Lorentzian
+    noise_range: Optional[Tuple[float, float]] = None,
+    intensity_scale_range: Optional[Tuple[float, float]] = None,
+    mask_prob: Optional[float] = None,
+    particle_size: Optional[float] = None,  # in same length units as wavelength
+    peak_asymmetry_range: Optional[Tuple[float, float]] = None,  # e.g., (0.0, 0.2)
+    peak_redaction_prob: Optional[float] = None,  # probability to redact a discrete peak
+    chebychev_order: int = 0,
+    chebychev_norm_coeff_range: Optional[Tuple[float, float]] = None,
+    preferred_orientation_range: Optional[Tuple[float, float]] = None,  # e.g., (0.9, 1.1)
+    phase_scales: Optional[List[float]] = None,
+    debug: bool = False
+):
+    """
+    Generates a continuous XRD pattern from CIF structure(s) with additional effects:
+      - Particle size broadening
+      - Peak asymmetry
+      - Redaction (removal) of discrete peaks
+      - Chebychev background
+      - Preferred orientation modifications
+      - Multiple phases support
+      - Synchrotron-specific peak shape
+
+    Parameters are as described above.
+    """
+    try:
+        # Allow for multiple phases: if cif_string is not a list, wrap it in a list.
+        if not isinstance(cif_string, list):
+            cif_list = [cif_string]
+        else:
+            cif_list = cif_string
+
+        # Create a continuous Q grid
+        q_cont = torch.arange(qmin, qmax, qstep, dtype=torch.float32)
+        overall_iq_cont = torch.zeros_like(q_cont)
+
+        # Lists to store discrete peak data for each phase
+        q_disc_list = []
+        iq_disc_list = []
+
+        # Loop over each phase
+        for phase_index, cif in enumerate(cif_list):
+            try:
+                structure = Structure.from_str(cif, fmt="cif")
+                xrd_calculator = XRDCalculator(wavelength=wavelength)
+                
+                # Determine two_theta_range based on qmin and qmax
+                max_q = ((4 * np.pi) / xrd_calculator.wavelength) * np.sin(np.radians(90))
+                if qmax >= max_q:
+                    two_theta_range = None
+                else:
+                    tth_min = np.degrees(2 * np.arcsin((qmin * xrd_calculator.wavelength) / (4 * np.pi)))
+                    tth_max = np.degrees(2 * np.arcsin((qmax * xrd_calculator.wavelength) / (4 * np.pi)))
+                    two_theta_range = (tth_min, tth_max)
+                
+                pattern = xrd_calculator.get_pattern(structure, two_theta_range=two_theta_range)
+            except Exception as e:
+                if debug:
+                    print(f"Error processing {structure_name} (phase {phase_index}): {e}")
+                return None
+
+            # Convert 2θ to Q for discrete peaks
+            theta = np.radians(np.array(pattern.x) / 2)
+            # Ensure wavelength is a float (e.g., CuKa -> 1.5418 Å) if needed; here we assume xrd_calculator.wavelength is numeric.
+            wavelength_val = float(xrd_calculator.wavelength)
+            q_disc = torch.tensor(4 * np.pi * np.sin(theta) / wavelength_val, dtype=torch.float32)
+            iq_disc = torch.tensor(pattern.y, dtype=torch.float32)
+
+            # Apply intensity scaling to discrete peaks if requested
+            if intensity_scale_range is not None:
+                scale = torch.empty(1).uniform_(*intensity_scale_range).item()
+                iq_disc *= scale
+
+            # Apply preferred orientation: scale each peak by a random factor from the given range.
+            if preferred_orientation_range is not None:
+                po_factors = torch.empty_like(iq_disc).uniform_(*preferred_orientation_range)
+                iq_disc *= po_factors
+
+            # Apply redaction of peaks (suppress some peaks)
+            if peak_redaction_prob is not None:
+                redaction_mask = (torch.rand_like(iq_disc) > peak_redaction_prob).float()
+                iq_disc *= redaction_mask
+
+            # Save discrete peaks for output
+            q_disc_list.append(q_disc)
+            iq_disc_list.append(iq_disc)
+
+            # --- Determine Peak Broadening Parameters ---
+            eta_sample = torch.empty(1).uniform_(*eta_range).item()
+            fwhm_sample = torch.empty(1).uniform_(*base_fwhm_range).item()
+
+            # Compute Gaussian and Lorentzian widths (from FWHM)
+            sigma_gauss = fwhm_sample / (2 * np.sqrt(2 * np.log(2)))
+            gamma_lorentz = fwhm_sample / 2  # base Lorentzian width
+
+            # --- Particle Size Broadening ---
+            # If particle_size is provided, add additional Lorentzian broadening per peak.
+            if particle_size is not None:
+                # Compute theta for each discrete peak: sin(theta) = q * wavelength / (4π)
+                # Clamp the argument to [-1, 1] to avoid errors.
+                sin_theta = (q_disc * wavelength_val / (4 * np.pi)).clamp(max=1.0)
+                theta_i = torch.as_tensor(np.arcsin(sin_theta.numpy()))
+                # Additional broadening from particle size (using Scherrer constant K ~ 0.9)
+                gamma_size = 0.9 * wavelength_val / (particle_size * torch.cos(theta_i))
+                # Update Lorentzian width per peak (will be a vector matching q_disc)
+                gamma_lorentz = gamma_lorentz + gamma_size
+                # Optionally, also apply to the Gaussian component:
+                sigma_size = gamma_size / (2 * np.sqrt(2 * np.log(2)))
+                sigma_gauss = torch.sqrt(sigma_gauss**2 + sigma_size**2)
+
+            # --- Peak Asymmetry ---
+            if peak_asymmetry_range is not None:
+                asymmetry = torch.empty(1).uniform_(*peak_asymmetry_range).item()
+            else:
+                asymmetry = 0.0
+
+            # --- Convolution to Continuous Pattern ---
+            # Create a (n_q x n_peaks) difference grid
+            delta_q = q_cont.unsqueeze(1) - q_disc.unsqueeze(0)
+
+            # For asymmetry, choose different effective widths on each side of each peak.
+            sigma_eff = torch.where(delta_q < 0, sigma_gauss * (1 + asymmetry), sigma_gauss * (1 - asymmetry))
+            # gamma_lorentz might be a scalar or vector; if vector, unsqueeze to match dimensions.
+            if torch.numel(torch.tensor(gamma_lorentz)) > 1:
+                gamma_base = gamma_lorentz.unsqueeze(0)  # shape (1, n_peaks)
+            else:
+                gamma_base = torch.tensor(gamma_lorentz).unsqueeze(0)
+            gamma_eff = torch.where(delta_q < 0, gamma_base * (1 + asymmetry), gamma_base * (1 - asymmetry))
+
+            # Compute the Gaussian and Lorentzian components
+            gaussian_component = torch.exp(-0.5 * (delta_q / sigma_eff) ** 2)
+            lorentzian_component = 1 / (1 + (delta_q / gamma_eff) ** 2)
+            pseudo_voigt = eta_sample * lorentzian_component + (1 - eta_sample) * gaussian_component
+
+            # Sum the contributions of each (redacted, oriented) discrete peak
+            phase_iq_cont = (pseudo_voigt * iq_disc).sum(dim=1)
+
+            # Normalize the phase contribution
+            phase_iq_cont /= (phase_iq_cont.max() + 1e-16)
+            
+            # --- Chebychev Background ---
+            if chebychev_order > 0 and chebychev_norm_coeff_range is not None:
+                # Scale q to [-1, 1]
+                x_scaled = (2 * q_cont - (qmin + qmax)) / (qmax - qmin)
+                background = torch.zeros_like(q_cont)
+                for n in range(chebychev_order + 1):
+                    coeff = torch.empty(1).uniform_(*chebychev_norm_coeff_range).item()
+                    # T_n(x) = cos(n * arccos(x))
+                    # Clamp x to [-1, 1] to avoid NaNs.
+                    background += coeff * torch.cos(n * torch.acos(x_scaled.clamp(-1, 1)))
+                phase_iq_cont += background
+            
+            # Add random noise if specified
+            if noise_range is not None:
+                noise_scale = torch.empty(1).uniform_(*noise_range).item()
+                phase_iq_cont += torch.randn_like(phase_iq_cont) * noise_scale
+
+            # Weight the phase by its scale (if provided)
+            phase_weight = 1.0
+            if phase_scales is not None and phase_index < len(phase_scales):
+                phase_weight = phase_scales[phase_index]
+            overall_iq_cont += phase_weight * phase_iq_cont
+
+        # Optionally, apply a random mask to the continuous pattern
+        if mask_prob is not None:
+            mask = (torch.rand_like(overall_iq_cont) > mask_prob).float()
+            overall_iq_cont *= mask
+
+        # Ensure non-negative intensities
+        overall_iq_cont = torch.clamp(overall_iq_cont, min=0.0)
+
+        return {
+            'q': q_cont.numpy(),
+            'iq': overall_iq_cont.numpy(),
+            'q_disc': [qd.numpy() for qd in q_disc_list],
+            'iq_disc': [idisc.numpy() for idisc in iq_disc_list]
+        }
+
+    except Exception as e:
+        if debug:
+            print(f"General error in processing {structure_name}: {e}")
+        return None
 
 def get_atomic_props_block(composition, oxi=False):
     noble_vdw_radii = {
