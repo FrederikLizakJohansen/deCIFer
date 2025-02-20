@@ -316,20 +316,11 @@ def pxrd_from_cif(
     chebychev_norm_coeff_range: Optional[Tuple[float, float]] = None,
     preferred_orientation_range: Optional[Tuple[float, float]] = None,  # e.g., (0.9, 1.1)
     phase_scales: Optional[List[float]] = None,
+    q_shift: float = 0.0,
+    q_scale: float = 1.0,
+    mask_ranges: Optional[List[Tuple[float, float]]] = None,
     debug: bool = False
 ):
-    """
-    Generates a continuous XRD pattern from CIF structure(s) with additional effects:
-      - Particle size broadening
-      - Peak asymmetry
-      - Redaction (removal) of discrete peaks
-      - Chebychev background
-      - Preferred orientation modifications
-      - Multiple phases support
-      - Synchrotron-specific peak shape
-
-    Parameters are as described above.
-    """
     try:
         # Allow for multiple phases: if cif_string is not a list, wrap it in a list.
         if not isinstance(cif_string, list):
@@ -387,6 +378,8 @@ def pxrd_from_cif(
             if peak_redaction_prob is not None:
                 redaction_mask = (torch.rand_like(iq_disc) > peak_redaction_prob).float()
                 iq_disc *= redaction_mask
+
+            q_disc = (q_disc + q_shift) * q_scale
 
             # Save discrete peaks for output
             q_disc_list.append(q_disc)
@@ -475,6 +468,12 @@ def pxrd_from_cif(
 
         # Ensure non-negative intensities
         overall_iq_cont = torch.clamp(overall_iq_cont, min=0.0)
+
+        # --- Masking Specific q Ranges ---
+        # Here we apply the mask on the final continuous profile using the original q grid.
+        if mask_ranges is not None:
+            for (mask_low, mask_high) in mask_ranges:
+                overall_iq_cont[(q_cont >= mask_low) & (q_cont <= mask_high)] = 0.0
 
         return {
             'q': q_cont.numpy(),
