@@ -1,18 +1,12 @@
 dataset_path: "../../phd_projects/deCIFer/data/chili100k_clean/serialized/test.h5"
 model_path: "../../phd_projects/deCIFer/experiments/model__conditioned_mlp_augmentation__context_3076__robust_full_trainingcurves/ckpt.pt"
 params_dict:
-  particle_size: [1, 5, 10, 20, 50, 100, 1000]
-  #peak_asymmetry_range: [[0.1, 0.1], [0.5, 0.5], [0.9, 0.9]]
-  #base_fwhm_range: [[0.1, 0.1]]
-  #peak_asymmetry_range: [[0.9, 0.9]]
-  #noise_range: [[0.01, 0.01]]
-  #preferred_orientation_range: [[0.9, 0.9]]
-  #chebychev_coeff_range: [[-0.1, -0.1]]
-  #chebychev_order: [3]
-batch_size: 4
-n_repeats: 4
+  #particle_size: [1, 5, 10, 20, 50, 100, 1000]
+  peak_asymmetry: [0.0, 0.1, 0.5, 0.9]
+batch_size: 1
+n_repeats: 1
 max_new_tokens: 1000 #3076
-add_composition: false
-add_spacegroup: false
+add_composition: true
+add_spacegroup: true
 use_multi_phase: false
-output: "experimental_results_none.pkl"
+output: "peak_asym_experimental_results_compsg.pkl"

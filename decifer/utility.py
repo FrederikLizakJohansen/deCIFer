@@ -304,17 +304,16 @@ def pxrd_from_cif(
     qmin: float = 0.0,
     qmax: float = 10.0,
     qstep: float = 0.01,
-    base_fwhm_range: Tuple[float, float] = (0.05, 0.05),
-    eta_range: Tuple[float, float] = (0.5, 0.5),  # 1.0 is fully Lorentzian
-    noise_range: Optional[Tuple[float, float]] = None,
-    intensity_scale_range: Optional[Tuple[float, float]] = None,
-    mask_prob: Optional[float] = None,
-    particle_size: Optional[float] = None,  # in same length units as wavelength
-    peak_asymmetry_range: Optional[Tuple[float, float]] = None,  # e.g., (0.0, 0.2)
-    peak_redaction_prob: Optional[float] = None,  # probability to redact a discrete peak
+    base_fwhm: float = 0.05,
+    eta: float = 0.5,
+    noise: Optional[float] = None,
+    random_mask_prob: Optional[float] = None,
+    particle_size: Optional[float] = None,
+    peak_asymmetry: Optional[float] = None,
+    peak_redaction_prob: Optional[float] = None,
     chebychev_order: int = 0,
-    chebychev_norm_coeff_range: Optional[Tuple[float, float]] = None,
-    preferred_orientation_range: Optional[Tuple[float, float]] = None,  # e.g., (0.9, 1.1)
+    chebychev_norm_coeffs: Optional[List[float]] = None,
+    preferred_orientation_range: Optional[Tuple[float, float]] = None,
     phase_scales: Optional[List[float]] = None,
     q_shift: float = 0.0,
     q_scale: float = 1.0,
@@ -363,12 +362,6 @@ def pxrd_from_cif(
             wavelength_val = float(xrd_calculator.wavelength)
             q_disc = torch.tensor(4 * np.pi * np.sin(theta) / wavelength_val, dtype=torch.float32)
             iq_disc = torch.tensor(pattern.y, dtype=torch.float32)
-
-            # Apply intensity scaling to discrete peaks if requested
-            if intensity_scale_range is not None:
-                scale = torch.empty(1).uniform_(*intensity_scale_range).item()
-                iq_disc *= scale
-
             # Apply preferred orientation: scale each peak by a random factor from the given range.
             if preferred_orientation_range is not None:
                 po_factors = torch.empty_like(iq_disc).uniform_(*preferred_orientation_range)
@@ -385,13 +378,9 @@ def pxrd_from_cif(
             q_disc_list.append(q_disc)
             iq_disc_list.append(iq_disc)
 
-            # --- Determine Peak Broadening Parameters ---
-            eta_sample = torch.empty(1).uniform_(*eta_range).item()
-            fwhm_sample = torch.empty(1).uniform_(*base_fwhm_range).item()
-
             # Compute Gaussian and Lorentzian widths (from FWHM)
-            sigma_gauss = fwhm_sample / (2 * np.sqrt(2 * np.log(2)))
-            gamma_lorentz = fwhm_sample / 2  # base Lorentzian width
+            sigma_gauss = base_fwhm / (2 * np.sqrt(2 * np.log(2)))
+            gamma_lorentz = base_fwhm / 2  # base Lorentzian width
 
             # --- Particle Size Broadening ---
             # If particle_size is provided, add additional Lorentzian broadening per peak.
@@ -409,10 +398,7 @@ def pxrd_from_cif(
                 sigma_gauss = torch.sqrt(sigma_gauss**2 + sigma_size**2)
 
             # --- Peak Asymmetry ---
-            if peak_asymmetry_range is not None:
-                asymmetry = torch.empty(1).uniform_(*peak_asymmetry_range).item()
-            else:
-                asymmetry = 0.0
+            asymmetry = 0.0 if peak_asymmetry is None else peak_asymmetry
 
             # --- Convolution to Continuous Pattern ---
             # Create a (n_q x n_peaks) difference grid
@@ -430,7 +416,7 @@ def pxrd_from_cif(
             # Compute the Gaussian and Lorentzian components
             gaussian_component = torch.exp(-0.5 * (delta_q / sigma_eff) ** 2)
             lorentzian_component = 1 / (1 + (delta_q / gamma_eff) ** 2)
-            pseudo_voigt = eta_sample * lorentzian_component + (1 - eta_sample) * gaussian_component
+            pseudo_voigt = eta * lorentzian_component + (1 - eta) * gaussian_component
 
             # Sum the contributions of each (redacted, oriented) discrete peak
             phase_iq_cont = (pseudo_voigt * iq_disc).sum(dim=1)
@@ -439,21 +425,20 @@ def pxrd_from_cif(
             phase_iq_cont /= (phase_iq_cont.max() + 1e-16)
             
             # --- Chebychev Background ---
-            if chebychev_order > 0 and chebychev_norm_coeff_range is not None:
+            if chebychev_order > 0 and chebychev_norm_coeffs is not None:
                 # Scale q to [-1, 1]
                 x_scaled = (2 * q_cont - (qmin + qmax)) / (qmax - qmin)
                 background = torch.zeros_like(q_cont)
+                chebychev_norm_coeffs = [1] + chebychev_norm_coeffs
                 for n in range(chebychev_order + 1):
-                    coeff = torch.empty(1).uniform_(*chebychev_norm_coeff_range).item()
                     # T_n(x) = cos(n * arccos(x))
                     # Clamp x to [-1, 1] to avoid NaNs.
-                    background += coeff * torch.cos(n * torch.acos(x_scaled.clamp(-1, 1)))
+                    background += chebychev_norm_coeffs[n] * torch.cos(n * torch.acos(x_scaled.clamp(-1, 1)))
                 phase_iq_cont += background
             
             # Add random noise if specified
-            if noise_range is not None:
-                noise_scale = torch.empty(1).uniform_(*noise_range).item()
-                phase_iq_cont += torch.randn_like(phase_iq_cont) * noise_scale
+            if noise is not None:
+                phase_iq_cont += torch.randn_like(phase_iq_cont) * noise
 
             # Weight the phase by its scale (if provided)
             phase_weight = 1.0
@@ -462,8 +447,8 @@ def pxrd_from_cif(
             overall_iq_cont += phase_weight * phase_iq_cont
 
         # Optionally, apply a random mask to the continuous pattern
-        if mask_prob is not None:
-            mask = (torch.rand_like(overall_iq_cont) > mask_prob).float()
+        if random_mask_prob is not None:
+            mask = (torch.rand_like(overall_iq_cont) > random_mask_prob).float()
             overall_iq_cont *= mask
 
         # Ensure non-negative intensities
