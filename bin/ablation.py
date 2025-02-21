@@ -32,6 +32,7 @@ START_ID = tokenizer.token_to_id["data_"]
 DECODE = tokenizer.decode
 
 def experiment(cif_sample, cif_tokens, params_dict, model, batch_size=1, n_repeats=1, cif_sample_other=None,
+               combinatory = False, default_params_dict = None,
                add_composition=True, add_spacegroup=False,
                max_new_tokens=3076, temperature=1.0, top_k=None):
     """
@@ -46,6 +47,7 @@ def experiment(cif_sample, cif_tokens, params_dict, model, batch_size=1, n_repea
         model: The generative model with a generate_batched_reps() method.
         n_repeats (int): Number of repeats (batch size) per parameter combination.
         cif_sample_other (str, optional): Alternative CIF (for multi-phase experiments).
+        combinatory (bool): Run combinations of parameters (grid-search), default False.
         add_composition (bool): Whether to add composition info to the prompt.
         add_spacegroup (bool): Whether to add spacegroup info to the prompt.
         max_new_tokens (int): Maximum new tokens to generate.
@@ -62,13 +64,23 @@ def experiment(cif_sample, cif_tokens, params_dict, model, batch_size=1, n_repea
     param_keys = list(params_dict.keys())
     matcher = StructureMatcher(stol=0.5, angle_tol=10, ltol=0.3)
     
-    combos = list(product(*[params_dict[key] for key in param_keys]))
+    # Generate combinations
+    if combinatory:
+        combos = [dict(zip(param_keys, values)) for values in product(*[params_dict[key] for key in param_keys])]
+    else:
+        combos = [{key: val} for key in param_keys for val in params_dict[key]]
+
     total_combos = len(combos)
     combo_index = 0
 
-    for combo in combos:
+    for param_combo in combos:
+
+        # Add default params
+        if default_params_dict is not None:
+            for key, val in default_params_dict.items():
+                param_combo[key] = val
+
         combo_index += 1
-        param_combo = dict(zip(param_keys, combo))
         combo_key = "_".join(f"{key}-{val}" for key, val in param_combo.items())
         print(f"Processing parameter combination {combo_index}/{total_combos}: {combo_key}")
         results[combo_key] = []
@@ -181,10 +193,13 @@ def main():
     sample_tokens = datapoint_1['cif_tokens']
     # Optionally, for multi-phase experiments.
     sample_cif_2 = datapoint_2['cif_string'] if config.get("use_multi_phase", False) else None
+
     
     # Extract configuration parameters.
     model_path = config["model_path"]
     params_dict = config["params_dict"]
+    default_params_dict = config.get("default_params_dict", None)
+    combinatory = config.get("combinatory", False)
     batch_size = config.get("batch_size", 1)
     n_repeats = config.get("n_repeats", 1)
     max_new_tokens = config.get("max_new_tokens", 3076)
@@ -204,9 +219,11 @@ def main():
         sample_tokens,
         params_dict,
         model,
+        default_params_dict=default_params_dict,
         batch_size=batch_size,
         n_repeats=n_repeats,
         cif_sample_other=sample_cif_2,
+        combinatory=combinatory,
         add_composition=add_composition,
         add_spacegroup=add_spacegroup,
         max_new_tokens=max_new_tokens,

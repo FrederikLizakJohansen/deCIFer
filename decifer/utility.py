@@ -429,7 +429,7 @@ def pxrd_from_cif(
                 # Scale q to [-1, 1]
                 x_scaled = (2 * q_cont - (qmin + qmax)) / (qmax - qmin)
                 background = torch.zeros_like(q_cont)
-                chebychev_norm_coeffs = [1] + chebychev_norm_coeffs
+                chebychev_norm_coeffs = [0.0] + chebychev_norm_coeffs
                 for n in range(chebychev_order + 1):
                     # T_n(x) = cos(n * arccos(x))
                     # Clamp x to [-1, 1] to avoid NaNs.
