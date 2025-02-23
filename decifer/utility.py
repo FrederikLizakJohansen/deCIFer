@@ -318,7 +318,7 @@ def pxrd_from_cif(
     q_shift: float = 0.0,
     q_scale: float = 1.0,
     mask_ranges: Optional[List[Tuple[float, float]]] = None,
-    debug: bool = False
+    debug: bool = False,
 ):
     try:
         # Allow for multiple phases: if cif_string is not a list, wrap it in a list.
@@ -434,6 +434,8 @@ def pxrd_from_cif(
                     # T_n(x) = cos(n * arccos(x))
                     # Clamp x to [-1, 1] to avoid NaNs.
                     background += chebychev_norm_coeffs[n] * torch.cos(n * torch.acos(x_scaled.clamp(-1, 1)))
+                # Clamp background to not add negative background
+                background = torch.clamp(background, min=0.0)
                 phase_iq_cont += background
             
             # Add random noise if specified

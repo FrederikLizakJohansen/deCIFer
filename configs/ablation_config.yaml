@@ -7,15 +7,16 @@ params_dict:
   #q_scale: [0.7, 0.8, 1.2, 1.3] #[0.9, 0.95, 0.99, 1.0, 1.01, 1.05, 1.1]
   #mask_ranges: [[[8.0, 9.0]], [[7.0, 9.0]], [[6.0, 9.0]], [[5.0, 9.0]], [[2.0, 3.0]], [[2.0, 4.0]], [[2.0, 5.0]]]
   #preferred_orientation_range: [[0.9, 1.0], [0.5, 1.0], [0.1, 1.0]]
-  chebychev_norm_coeffs: [[-0.1, -0.2, 0.1], [-0.2, 0.0, 0.1], [-0.1, -0.2, 0.5], [0.1, 0.2, 0.3]]
+  #chebychev_norm_coeffs: [[-0.1, -0.2, 0.1], [-0.2, 0.0, 0.1], [-0.1, -0.2, 0.5], [0.1, 0.2, 0.3]]
+  phase_scales: [[0.0, 1.0], [1.0, 0.0], [0.5, 0.5], [0.1, 0.9], [0.9, 0.1]]
 default_params_dict:
-  chebychev_order: 3
+  #chebychev_order: 3
   base_fwhm: 0.1
 batch_size: 1
 n_repeats: 10
 max_new_tokens: 1000 #3076
 add_composition: true
 add_spacegroup: false
-use_multi_phase: false
+use_multi_phase: true
 combinatory: false
-output: "background_experimental_results_comp.pkl"
+output: "multiphase_experimental_results_comp.pkl"

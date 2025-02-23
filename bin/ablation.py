@@ -191,9 +191,6 @@ def main():
     
     sample_cif = datapoint_1['cif_string']
     sample_tokens = datapoint_1['cif_tokens']
-    # Optionally, for multi-phase experiments.
-    sample_cif_2 = datapoint_2['cif_string'] if config.get("use_multi_phase", False) else None
-
     
     # Extract configuration parameters.
     model_path = config["model_path"]
@@ -207,6 +204,8 @@ def main():
     top_k = config.get("top_k", None)
     add_composition = config.get("add_composition", False)
     add_spacegroup = config.get("add_spacegroup", False)
+    
+    sample_cif_2 = datapoint_2['cif_string'] if "phase_scales" in params_dict else None
     
     # Load the model.
     print(f"Loading model from {model_path} ...")
