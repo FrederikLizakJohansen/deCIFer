@@ -1,5 +1,6 @@
 #!/bin/bash
 #SBATCH -p gpu --gres=gpu:a100:1
+# #SBATCH -p gpu --gres=gpu:1
 #SBATCH --time 0-12:00:00
 #SBATCH --job-name=abl_decifer
 #SBATCH --array 0
