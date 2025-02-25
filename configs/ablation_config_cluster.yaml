@@ -1,4 +1,4 @@
-dataset_path: "../deCIFer/data/crystallm/full_new/test.h5"
+dataset_path: "../deCIFer/data/crystallm/full_new/serialized/test.h5"
 model_path: "../deCIFer/model__conditioned_mlp_augmentation__context_3076__robust/ckpt.pt"
 params_dict:
   particle_size: [1, 5, 10, 20, 25, 30, 35, 40, 45, 50, 100]
