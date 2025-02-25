@@ -19,6 +19,8 @@ from decifer.utility import (
     is_space_group_consistent, 
     is_atom_site_multiplicity_consistent, 
     bond_length_reasonableness_score,
+    space_group_symbol_to_number,
+    space_group_to_crystal_system,
 )
 from decifer.decifer_dataset import DeciferDataset
 from bin.evaluate import load_model_from_checkpoint, extract_prompt
@@ -182,12 +184,40 @@ def main():
     with open(args.config, "r") as f:
         config = yaml.safe_load(f)
     
-    # Use the dataset to pull a cif_sample and cif_tokens.
-    random.seed(100)
+    # Use the seed from the YAML config, defaulting to 100 if not provided.
+    seed = config.get("seed", 100)
+    random.seed(seed)
+    
     dataset_path = config["dataset_path"]
     dataset = DeciferDataset(dataset_path, ["cif_name", "cif_tokens", "xrd.q", "xrd.iq", "cif_string", "spacegroup"])
-    datapoint_1 = random.choice(dataset)
-    datapoint_2 = random.choice(dataset)
+    
+    # Optionally filter by a specific crystal system from the YAML config.
+    # The user should insert the crystal system name (e.g., "triclinic", "monoclinic", etc.)
+    target_system_name = config.get("crystal_system", None)
+    # Mapping from crystal system name to its corresponding system number (1-7).
+    system_name_to_number = {
+        "triclinic": 1,
+        "monoclinic": 2,
+        "orthorhombic": 3,
+        "tetragonal": 4,
+        "trigonal": 5,
+        "hexagonal": 6,
+        "cubic": 7,
+    }
+    
+    if target_system_name:
+        target_system_name_lower = target_system_name.lower()
+        if target_system_name_lower not in system_name_to_number:
+            raise ValueError(f"Unknown crystal system: {target_system_name}")
+        target_system_number = system_name_to_number[target_system_name_lower]
+        filtered_dataset = [d for d in dataset if space_group_to_crystal_system(space_group_symbol_to_number(d['spacegroup'])) == target_system_number]
+        if not filtered_dataset:
+            raise ValueError(f"No datapoints found for crystal system: {target_system_name}")
+        datapoint_1 = random.choice(filtered_dataset)
+        datapoint_2 = random.choice(filtered_dataset)
+    else:
+        datapoint_1 = random.choice(dataset)
+        datapoint_2 = random.choice(dataset)
     
     sample_cif = datapoint_1['cif_string']
     sample_tokens = datapoint_1['cif_tokens']

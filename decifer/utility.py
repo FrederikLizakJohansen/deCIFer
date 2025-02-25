@@ -344,11 +344,11 @@ def pxrd_from_cif(
                 # Determine two_theta_range based on qmin and qmax
                 max_q = ((4 * np.pi) / xrd_calculator.wavelength) * np.sin(np.radians(90))
                 if qmax >= max_q:
-                    two_theta_range = None
+                    two_theta_range = (0.0, 120.0) #None
                 else:
                     tth_min = np.degrees(2 * np.arcsin((qmin * xrd_calculator.wavelength) / (4 * np.pi)))
                     tth_max = np.degrees(2 * np.arcsin((qmax * xrd_calculator.wavelength) / (4 * np.pi)))
-                    two_theta_range = (tth_min, tth_max)
+                    two_theta_range = (tth_min, min(tth_max, 120.0))
                 
                 pattern = xrd_calculator.get_pattern(structure, two_theta_range=two_theta_range)
             except Exception as e:
@@ -437,6 +437,9 @@ def pxrd_from_cif(
                 # Clamp background to not add negative background
                 background = torch.clamp(background, min=0.0)
                 phase_iq_cont += background
+            
+            # Re-normalize after adding background
+            phase_iq_cont /= (phase_iq_cont.max() + 1e-16)
             
             # Add random noise if specified
             if noise is not None:
