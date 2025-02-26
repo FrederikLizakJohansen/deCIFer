@@ -33,7 +33,8 @@ PADDING_ID = tokenizer.padding_id
 START_ID = tokenizer.token_to_id["data_"]
 DECODE = tokenizer.decode
 
-def experiment(cif_sample, cif_tokens, params_dict, model, batch_size=1, n_repeats=1, cif_sample_other=None,
+def experiment(cif_sample, cif_tokens, params_dict, model, output_path, config, 
+               batch_size=1, n_repeats=1, cif_sample_other=None,
                combinatory = False, default_params_dict = None,
                add_composition=True, add_spacegroup=False,
                max_new_tokens=3076, temperature=1.0, top_k=None):
@@ -172,8 +173,12 @@ def experiment(cif_sample, cif_tokens, params_dict, model, batch_size=1, n_repea
                 }
                 results[combo_key].append(exp_result)
         print(f"  Completed generation for {batch_size} x {n_repeats} repeats.")
-    
-    return results
+
+        # Save the configuration and results.
+        print(f"  Saving results...", end="")
+        with open(output_path, "wb") as f:
+            pickle.dump({"config": config, "results": results}, f)
+        print(f"  DONE.")
 
 def main():
     parser = argparse.ArgumentParser(description="Run experiment and save results from config YAML.")
@@ -234,6 +239,7 @@ def main():
     top_k = config.get("top_k", None)
     add_composition = config.get("add_composition", False)
     add_spacegroup = config.get("add_spacegroup", False)
+    output_path = config.get("output", "experiment_results.pkl")
     
     sample_cif_2 = datapoint_2['cif_string'] if "phase_scales" in params_dict else None
     
@@ -243,11 +249,13 @@ def main():
     
     # Run the experiment.
     print("Running experiment...")
-    results = experiment(
+    experiment(
         sample_cif,
         sample_tokens,
         params_dict,
         model,
+        output_path=output_path,
+        config=config,
         default_params_dict=default_params_dict,
         batch_size=batch_size,
         n_repeats=n_repeats,
@@ -257,13 +265,9 @@ def main():
         add_spacegroup=add_spacegroup,
         max_new_tokens=max_new_tokens,
         temperature=temperature,
-        top_k=top_k
+        top_k=top_k,
     )
     
-    # Save the configuration and results.
-    output_path = config.get("output", "experiment_results.pkl")
-    with open(output_path, "wb") as f:
-        pickle.dump({"config": config, "results": results}, f)
     print(f"Experiment complete. Results saved to {output_path}")
 
 if __name__ == "__main__":
