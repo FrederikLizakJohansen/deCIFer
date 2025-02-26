@@ -16,9 +16,9 @@ batch_size: 1
 n_repeats: 10
 max_new_tokens: 2000 #3076
 add_composition: true
-add_spacegroup: false
+add_spacegroup: true
 use_multi_phase: false
 crystal_system: "cubic"
-seed: 101
+seed: 102
 combinatory: false
 output: "background_new_experimental_results_comp.pkl"
