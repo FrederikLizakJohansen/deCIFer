@@ -352,6 +352,7 @@ def pxrd_from_cif(
                 
                 pattern = xrd_calculator.get_pattern(structure, two_theta_range=two_theta_range)
             except Exception as e:
+                print("Here")
                 if debug:
                     print(f"Error processing {structure_name} (phase {phase_index}): {e}")
                 return None

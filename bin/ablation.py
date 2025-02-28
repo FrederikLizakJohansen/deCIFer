@@ -33,11 +33,23 @@ PADDING_ID = tokenizer.padding_id
 START_ID = tokenizer.token_to_id["data_"]
 DECODE = tokenizer.decode
 
-def experiment(cif_sample, cif_tokens, params_dict, model, output_path, config, 
-               batch_size=1, n_repeats=1, cif_sample_other=None,
-               combinatory = False, default_params_dict = None,
-               add_composition=True, add_spacegroup=False,
-               max_new_tokens=3076, temperature=1.0, top_k=None):
+def experiment(
+    cif_sample, 
+    cif_tokens, 
+    params_exp_dict, 
+    model, 
+    output_path, 
+    config, 
+    batch_size=1,
+    n_repeats=1,
+    cif_sample_other=None,
+    default_params_dict = None,
+    add_composition=True, 
+    add_spacegroup=False,
+    max_new_tokens=3076,
+    temperature=1.0, 
+    top_k=None
+):
     """
     Run an experiment by generating PXRD patterns and corresponding CIF outputs over a set of parameters.
     Uses batched generation (via generate_batched_reps) and a prompt extracted by extract_prompt,
@@ -46,7 +58,7 @@ def experiment(cif_sample, cif_tokens, params_dict, model, output_path, config,
     Args:
         cif_sample (str): The baseline CIF string.
         cif_tokens: Token sequence for the prompt.
-        params_dict (dict): Dictionary mapping parameter names to lists of values (for pxrd_from_cif).
+        params_exp_dict (dict): Dictionary mapping parameter names to lists of values (for pxrd_from_cif).
         model: The generative model with a generate_batched_reps() method.
         n_repeats (int): Number of repeats (batch size) per parameter combination.
         cif_sample_other (str, optional): Alternative CIF (for multi-phase experiments).
@@ -63,34 +75,27 @@ def experiment(cif_sample, cif_tokens, params_dict, model, output_path, config,
               generated CIF, generated structure, reference structure, structure matching result,
               peak similarity, RWP, WD, and validity.
     """
-    results = {}
-    param_keys = list(params_dict.keys())
     matcher = StructureMatcher(stol=0.5, angle_tol=10, ltol=0.3)
-    
-    # Generate combinations
-    if combinatory:
-        combos = [dict(zip(param_keys, values)) for values in product(*[params_dict[key] for key in param_keys])]
-    else:
-        combos = [{key: val} for key in param_keys for val in params_dict[key]]
 
-    total_combos = len(combos)
-    combo_index = 0
+    params_tuples = [(key, val) for key in params_exp_dict.keys() for val in params_exp_dict[key]]
+    #results = {key: {"param_values": {"value": None, "experiments": [], "best_experiment": None} for key in params_exp_dict.keys() for val in params_exp_dict[key]]}
+    results = {key: {value: {"experiments": [], "best_experiment": None} for value in params_exp_dict[key]} for key in params_exp_dict.keys()}
 
-    for param_combo in combos:
+    for i, (param_key, param_val) in enumerate(params_tuples):
+        params_dict = {param_key: param_val}
+        param_name = next(iter(params_dict.keys()))
 
         # Add default params
         if default_params_dict is not None:
             for key, val in default_params_dict.items():
-                param_combo[key] = val
+                params_dict[key] = val
 
-        combo_index += 1
-        combo_key = "_".join(f"{key}-{val}" for key, val in param_combo.items())
-        print(f"Processing parameter combination {combo_index}/{total_combos}: {combo_key}")
-        results[combo_key] = []
+        print(f"Processing parameter combination {i+1}/{len(params_tuples)}: {params_dict}")
+        #results[param_name] = {"all": [], "best": None}
         
         # Generate the reference PXRD.
         cif_input = [cif_sample, cif_sample_other] if cif_sample_other is not None else cif_sample
-        pxrd_ref = pxrd_from_cif(cif_input, debug=True, **param_combo)
+        pxrd_ref = pxrd_from_cif(cif_input, debug=True, **params_dict)
         
         # Build the conditional vector from the continuous PXRD intensity.
         cond_vec = torch.from_numpy(pxrd_ref['iq']).unsqueeze(0).to(model.device)
@@ -104,6 +109,8 @@ def experiment(cif_sample, cif_tokens, params_dict, model, output_path, config,
             add_spacegroup=add_spacegroup
         ).unsqueeze(0).repeat(batch_size, 1)
 
+        best_result = None
+        best_rwp = float("inf")
         for _ in range(n_repeats):
    
             # Batched generation.
@@ -117,7 +124,7 @@ def experiment(cif_sample, cif_tokens, params_dict, model, output_path, config,
                     top_k=top_k,
                 ).cpu().numpy()
             except Exception as e:
-                print(f"Error during batched generation for combination {combo_key}: {e}")
+                print(f"Error during batched generation for parameter {param_name}: {e}")
                 continue
             
             # Remove padding and decode each generated output.
@@ -138,14 +145,21 @@ def experiment(cif_sample, cif_tokens, params_dict, model, output_path, config,
                 except:
                     continue
                 
-                pxrd_gen = pxrd_from_cif(cif_string_gen, debug=True, **param_combo)
-                peak_similarity = np.corrcoef(pxrd_ref['iq'], pxrd_gen['iq'])[0, 1]
                 
-                # Compute RWP.
-                pxrd_ref_clean = pxrd_from_cif(cif_input, debug=True)
-                pxrd_gen_clean = pxrd_from_cif(cif_string_gen, debug=True)
-                rwp = np.sqrt(np.sum((pxrd_ref_clean['iq'] - pxrd_gen_clean['iq'])**2) / np.sum(pxrd_ref_clean['iq']**2))
+                # Compute peak sim and Rwp
+                if param_name in ["q_shift", "q_scale"]:
+                    pxrd_ref_clean = pxrd_from_cif(cif_sample, debug=True, **params_dict)
+                    pxrd_gen_clean = pxrd_from_cif(cif_string_gen, debug=True)
+                    pxrd_gen_matched = pxrd_gen_clean
+                    rwp = np.sqrt(np.sum((pxrd_ref['iq'] - pxrd_gen_clean['iq'])**2) / np.sum(pxrd_ref['iq']**2))
+                else:
+                    pxrd_ref_clean = pxrd_from_cif(cif_sample, debug=True)
+                    pxrd_gen_clean = pxrd_from_cif(cif_string_gen, debug=True)
+                    pxrd_gen_matched = pxrd_from_cif(cif_string_gen, debug=True, **params_dict)
+                    rwp = np.sqrt(np.sum((pxrd_ref_clean['iq'] - pxrd_gen_clean['iq'])**2) / np.sum(pxrd_ref_clean['iq']**2))
                 
+                peak_similarity = np.corrcoef(pxrd_ref['iq'], pxrd_gen_matched['iq'])[0, 1]
+
                 # Validity checks.
                 try:
                     form = is_formula_consistent(cif_string_gen)
@@ -157,10 +171,11 @@ def experiment(cif_sample, cif_tokens, params_dict, model, output_path, config,
                     val = False
                 
                 exp_result = {
-                    "params": param_combo,
-                    "repeat": i,
+                    "iteration": i,
                     "pxrd_ref": pxrd_ref,
-                    "pxrd_gen": pxrd_gen,
+                    "pxrd_ref_clean": pxrd_ref_clean,
+                    "pxrd_gen_clean": pxrd_gen_clean,
+                    "pxrd_gen_matched": pxrd_gen_matched,
                     "cond_vec": cond_vec[i],
                     "generated_cif": cif_string_gen,
                     "reference_cif": cif_sample,
@@ -171,7 +186,13 @@ def experiment(cif_sample, cif_tokens, params_dict, model, output_path, config,
                     "rwp": rwp,
                     "val": val,
                 }
-                results[combo_key].append(exp_result)
+                results[param_name][param_val]["experiments"].append(exp_result)
+
+                if rwp < best_rwp:
+                    best_rwp = rwp
+                    best_result = exp_result
+                    
+        results[param_name][param_val]["best_experiment"] = best_result
         print(f"  Completed generation for {batch_size} x {n_repeats} repeats.")
 
         # Save the configuration and results.
@@ -260,7 +281,6 @@ def main():
         batch_size=batch_size,
         n_repeats=n_repeats,
         cif_sample_other=sample_cif_2,
-        combinatory=combinatory,
         add_composition=add_composition,
         add_spacegroup=add_spacegroup,
         max_new_tokens=max_new_tokens,
