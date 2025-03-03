@@ -149,12 +149,19 @@ def experiment(
                 # Compute peak sim and Rwp
                 if param_name in ["q_shift", "q_scale"]:
                     pxrd_ref_clean = pxrd_from_cif(cif_sample, debug=True, **params_dict)
-                    pxrd_gen_clean = pxrd_from_cif(cif_string_gen, debug=True)
+                    if default_params_dict is not None:
+                        pxrd_gen_clean = pxrd_from_cif(cif_string_gen, debug=True, **default_params_dict)
+                    else:
+                        pxrd_gen_clean = pxrd_from_cif(cif_string_gen, debug=True)
                     pxrd_gen_matched = pxrd_gen_clean
                     rwp = np.sqrt(np.sum((pxrd_ref['iq'] - pxrd_gen_clean['iq'])**2) / np.sum(pxrd_ref['iq']**2))
                 else:
-                    pxrd_ref_clean = pxrd_from_cif(cif_sample, debug=True)
-                    pxrd_gen_clean = pxrd_from_cif(cif_string_gen, debug=True)
+                    if default_params_dict is not None:
+                        pxrd_ref_clean = pxrd_from_cif(cif_sample, debug=True, **default_params_dict)
+                        pxrd_gen_clean = pxrd_from_cif(cif_string_gen, debug=True, **default_params_dict)
+                    else:
+                        pxrd_ref_clean = pxrd_from_cif(cif_sample, debug=True)
+                        pxrd_gen_clean = pxrd_from_cif(cif_string_gen, debug=True)
                     pxrd_gen_matched = pxrd_from_cif(cif_string_gen, debug=True, **params_dict)
                     rwp = np.sqrt(np.sum((pxrd_ref_clean['iq'] - pxrd_gen_clean['iq'])**2) / np.sum(pxrd_ref_clean['iq']**2))
                 
