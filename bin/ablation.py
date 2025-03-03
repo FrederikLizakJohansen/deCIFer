@@ -79,7 +79,7 @@ def experiment(
 
     params_tuples = [(key, val) for key in params_exp_dict.keys() for val in params_exp_dict[key]]
     #results = {key: {"param_values": {"value": None, "experiments": [], "best_experiment": None} for key in params_exp_dict.keys() for val in params_exp_dict[key]]}
-    results = {key: {value: {"experiments": [], "best_experiment": None} for value in params_exp_dict[key]} for key in params_exp_dict.keys()}
+    results = {key: {str(value): {"experiments": [], "best_experiment": None} for value in params_exp_dict[key]} for key in params_exp_dict.keys()}
 
     for i, (param_key, param_val) in enumerate(params_tuples):
         params_dict = {param_key: param_val}
@@ -193,13 +193,13 @@ def experiment(
                     "rwp": rwp,
                     "val": val,
                 }
-                results[param_name][param_val]["experiments"].append(exp_result)
+                results[param_name][str(param_val)]["experiments"].append(exp_result)
 
                 if rwp < best_rwp:
                     best_rwp = rwp
                     best_result = exp_result
                     
-        results[param_name][param_val]["best_experiment"] = best_result
+        results[param_name][str(param_val)]["best_experiment"] = best_result
         print(f"  Completed generation for {batch_size} x {n_repeats} repeats.")
 
         # Save the configuration and results.
