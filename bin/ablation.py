@@ -88,7 +88,8 @@ def experiment(
         # Add default params
         if default_params_dict is not None:
             for key, val in default_params_dict.items():
-                params_dict[key] = val
+                if key != param_key: # Only change if the key is not part of the experiment
+                    params_dict[key] = val
 
         print(f"Processing parameter combination {i+1}/{len(params_tuples)}: {params_dict}")
         #results[param_name] = {"all": [], "best": None}
