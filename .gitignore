@@ -1,0 +1,43 @@
+# Ignore data
+data/ 
+logs/
+**/*.pkl.gz
+**/*.cif
+**/*.h5
+**/*.json
+**/*.log*
+
+# Ignore experiments
+experiments/
+experiments_old/
+cl_experiments/
+
+# Ignore notebook for testing
+notebooks_testing/
+
+# Ignore egg folders
+**/*.egg-info/
+
+# Ignore .npz files
+**/*.npz
+
+# Ignore pycache and notebook checkpoints
+**/__pycache__/
+**/.ipynb_checkpoints/
+
+# Ignore ckpt files and other pytorch files
+**/*.pt
+
+# Ignore images and csvs # TODO for now
+**/*.png
+**/*.jpg
+**/*.csv
+**/*.pdf
+
+# Ignore eval files
+**/*.parquet
+**/*.eval
+**/*.pkl
+
+# Ignore example cifs
+example_cifs/
