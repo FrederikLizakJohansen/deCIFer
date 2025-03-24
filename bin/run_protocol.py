@@ -40,7 +40,7 @@ def main(args):
             pipeline.run_experiment_protocol(
                 n_trials=args.n_trials,
                 protocol_name=name,
-                save_to=f"{target_file.split(".")[0]}_protocol_{name}.pkl", 
+                save_to=f"{target_file.split('.')[0]}_protocol_{name}.pkl", 
                 **cfg
             )
 
@@ -74,7 +74,7 @@ def main(args):
             pipeline.run_experiment_protocol(
                 n_trials=args.n_trials,
                 protocol_name=name,
-                save_to=f"{target_file.split(".")[0]}_protocol_{name}.pkl", 
+                save_to=f"{target_file.split('.')[0]}_protocol_{name}.pkl", 
                 **cfg
             )
 
@@ -109,7 +109,7 @@ def main(args):
             pipeline.run_experiment_protocol(
                 n_trials=args.n_trials,
                 protocol_name=name,
-                save_to=f"{target_file.split(".")[0]}_protocol_{name}.pkl", 
+                save_to=f"{target_file.split('.')[0]}_protocol_{name}.pkl", 
                 **cfg
             )
 
@@ -120,5 +120,5 @@ if __name__ == "__main__":
     argparser.add_argument("--debug-max", type=int, default=0)
     argparser.add_argument("--n-trials", type=int, default=25)
     args = argparser.parse_args()
-    args.debug_max = False if args.debug_max == 0 else args.debug_max
+    args.debug_max = None if args.debug_max == 0 else args.debug_max
     main(args)
