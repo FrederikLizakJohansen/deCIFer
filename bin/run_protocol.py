@@ -13,7 +13,7 @@ def main(args):
     """ Crystalline """
 
     # Ceria
-    pipeline.setup_folder("crystalline_CeO2_protocol")
+    pipeline.setup_folder(f"crystalline_CeO2_protocol_{args.suffix}")
     target_files = ["crystalline_CeO2_BM31.xye"]
     background_file = None
 
@@ -45,7 +45,7 @@ def main(args):
             )
 
     # Silicon
-    pipeline.setup_folder("crystalline_Si_protocol")
+    pipeline.setup_folder(f"crystalline_Si_protocol_{args.suffix}")
     target_files = ["Si_Mythen.xye"]
     background_file = None
 
@@ -79,7 +79,7 @@ def main(args):
             )
 
     # Fe2O3
-    pipeline.setup_folder("crystalline_Fe2O3_protocol")
+    pipeline.setup_folder(f"crystalline_Fe2O3_protocol_{args.suffix}")
     target_files = ["AFS012d_a850C.xy"]
     background_file = None
 
@@ -119,6 +119,7 @@ if __name__ == "__main__":
     argparser.add_argument("--zip-path", type=str, required=True)
     argparser.add_argument("--debug-max", type=int, default=0)
     argparser.add_argument("--n-trials", type=int, default=25)
+    argparser.add_argument("--suffix", type=str, default='default')
     args = argparser.parse_args()
     args.debug_max = None if args.debug_max == 0 else args.debug_max
     main(args)
