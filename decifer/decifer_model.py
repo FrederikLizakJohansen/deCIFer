@@ -690,7 +690,7 @@ class Decifer(nn.Module):
         precomputed_exclude_ids = torch.tensor(exclude_ids, device=self.device) if exclude_ids else None
 
         prev_id = None
-        generation_pbar = tqdm(desc="Generating custom sequence", leave=False, disable=disable_pbar)
+        generation_pbar = tqdm(desc="Generating custom sequence", leave=False, disable=disable_pbar, unit=' tokens', dynamic_ncols=True, )
 
         for i in range(max_new_tokens):
             

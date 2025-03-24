@@ -585,7 +585,7 @@ class DeciferPipeline:
         best_rwp = float("inf")
         best_pxrd = None
         
-        pbar_best = tqdm(total=len(results["gens"]), desc='Finding best structure...', leave=False)
+        pbar_best = tqdm(total=len(results["gens"]), desc='Finding best structure...', leave=False, dynamic_ncols=True)
         for res in results["gens"]:
             # Compute the PXRD from the generated CIF
             pxrd = pxrd_from_cif(res["cif_str"], base_fwhm=base_fwhm, particle_size=size_estimate)
@@ -620,7 +620,7 @@ class DeciferPipeline:
         second_best_rwp = float("inf")
         second_best_pxrd = None
         
-        pbar_second_best = tqdm(total=len(results["gens"]), desc='Finding second best structure...', leave=False)
+        pbar_second_best = tqdm(total=len(results["gens"]), desc='Finding second best structure...', leave=False, dynamic_ncols=True)
         for res in results["gens"]:
             # Use approximate string matching to skip candidates too similar to the best sample
             if is_approximately_same(res["cif_str"], best_result["cif_str"], threshold=second_best_threshold):
@@ -813,7 +813,7 @@ class DeciferPipeline:
         }
 
         # Run the generation trials
-        pbar_trials = tqdm(total=n_trials, desc=f'Running trials for protocol {protocol_name}', leave=True)
+        pbar_trials = tqdm(total=n_trials, desc=f'Running trials for protocol {protocol_name}', leave=True, dynamic_ncols=True)
         for _ in range(n_trials):
             gen_out = self.run_decifer_generation(
                 cond_array=self.exp_i,
