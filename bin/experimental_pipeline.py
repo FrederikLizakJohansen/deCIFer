@@ -620,27 +620,28 @@ class DeciferPipeline:
         second_best_rwp = float("inf")
         second_best_pxrd = None
         
-        pbar_second_best = tqdm(total=len(results["gens"]), desc='Finding second best structure...', leave=False, dynamic_ncols=True)
-        for res in results["gens"]:
-            # Use approximate string matching to skip candidates too similar to the best sample
-            if is_approximately_same(res["cif_str"], best_result["cif_str"], threshold=second_best_threshold):
+        if show_second_best:
+            pbar_second_best = tqdm(total=len(results["gens"]), desc='Finding second best structure...', leave=False, dynamic_ncols=True)
+            for res in results["gens"]:
+                # Use approximate string matching to skip candidates too similar to the best sample
+                if is_approximately_same(res["cif_str"], best_result["cif_str"], threshold=second_best_threshold):
+                    pbar_second_best.update(1)
+                    continue
+            
+                # Compute the PXRD from the generated CIF for the candidate
+                pxrd = pxrd_from_cif(res["cif_str"], base_fwhm=base_fwhm, particle_size=size_estimate)
+                i_pred_interpolated = np.interp(self.exp_q, pxrd["q"], pxrd["iq"])
+                rwp = np.sqrt(np.sum(np.square(self.exp_i - i_pred_interpolated)) / np.sum(np.square(self.exp_i)))
+                n_peaks = len(pxrd["q_disc"][0])
+                ranking_score = rwp + complexity_weight * n_peaks
+            
+                if ranking_score < second_best_ranking_score:
+                    second_best_rwp = rwp
+                    second_best_ranking_score = ranking_score
+                    second_best_result = res
+                    second_best_pxrd = pxrd
                 pbar_second_best.update(1)
-                continue
-        
-            # Compute the PXRD from the generated CIF for the candidate
-            pxrd = pxrd_from_cif(res["cif_str"], base_fwhm=base_fwhm, particle_size=size_estimate)
-            i_pred_interpolated = np.interp(self.exp_q, pxrd["q"], pxrd["iq"])
-            rwp = np.sqrt(np.sum(np.square(self.exp_i - i_pred_interpolated)) / np.sum(np.square(self.exp_i)))
-            n_peaks = len(pxrd["q_disc"][0])
-            ranking_score = rwp + complexity_weight * n_peaks
-        
-            if ranking_score < second_best_ranking_score:
-                second_best_rwp = rwp
-                second_best_ranking_score = ranking_score
-                second_best_result = res
-                second_best_pxrd = pxrd
-            pbar_second_best.update(1)
-        pbar_second_best.close()
+            pbar_second_best.close()
 
         # Plot experimental and predicted PXRD data
         fig, ax_data = plt.subplots(figsize=figsize, dpi=dpi)
