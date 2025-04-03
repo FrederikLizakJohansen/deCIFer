@@ -40,7 +40,7 @@ def main(args):
             pipeline.run_experiment_protocol(
                 n_trials=args.n_trials,
                 protocol_name=name,
-                save_to=f"{target_file.split(".")[0]}_protocol_{name}.pkl", 
+                save_to=f"{target_file.split('.')[0]}_protocol_{name}.pkl", 
                 **cfg
             )
 
@@ -74,7 +74,7 @@ def main(args):
             pipeline.run_experiment_protocol(
                 n_trials=args.n_trials,
                 protocol_name=name,
-                save_to=f"{target_file.split(".")[0]}_protocol_{name}.pkl", 
+                save_to=f"{target_file.split('.')[0]}_protocol_{name}.pkl", 
                 **cfg
             )
 
@@ -109,7 +109,7 @@ def main(args):
             pipeline.run_experiment_protocol(
                 n_trials=args.n_trials,
                 protocol_name=name,
-                save_to=f"{target_file.split(".")[0]}_protocol_{name}.pkl", 
+                save_to=f"{target_file.split('.')[0]}_protocol_{name}.pkl", 
                 **cfg
             )
 
