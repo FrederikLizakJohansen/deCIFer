@@ -134,7 +134,7 @@ class DeciferPipeline:
             n_points (int): Number of points to standardize onto.
         """
         # Set preparation configuration
-        self.prep_config: Dict[str, Union[str, float, int]] = {
+        self.prep_config: Dict[str, Optional[Union[str, float, int]]] = {
             "target_file": target_file,
             "background_file": background_file,
             "q_min_crop": q_min_crop,
@@ -145,9 +145,9 @@ class DeciferPipeline:
         # Preprocess and update the processed dataframe and signal arrays
         self.df_processed = self.preprocess_generic(**self.prep_config)
         self.exp_q = self.df_processed['Q'].values
-        self.exp_i = self.df_processed['intensity_crop_norm'].values
+        self.exp_i = self.df_processed['intensity_crop_normalized'].values
         self.raw_q = self.df_processed['Q'].values
-        self.raw_i = self.df_processed['intensity_norm']
+        self.raw_i = self.df_processed['intensity_normalized']
 
     def read_experimental_data(self, zip_path: str) -> pd.DataFrame:
         """
@@ -189,29 +189,6 @@ class DeciferPipeline:
 
                 folder = os.path.basename(os.path.dirname(fn))
                 base_name = os.path.basename(fn)
-                # Infer composition based on the folder and file name
-                # if folder.lower() == 'jens':
-                #     comp_str = get_jens_composition(base_name)
-                # elif folder.lower() == 'laura_irox':
-                #     if 'irox' in base_name.lower():
-                #         comp_str = 'IrOx'
-                #     elif 'iro2' in base_name.lower():
-                #         comp_str = 'IrO2'
-                #     else:
-                #         comp_str = 'Ir-based oxide'
-                # elif folder.lower() == 'nicolas':
-                #     subfolder = fn.split('/')[-2]
-                #     if 'fcc pure' in subfolder.lower():
-                #         comp_str = 'Pt (fcc)'
-                #     elif 'fcc+fct' in subfolder.lower():
-                #         comp_str = 'Pt (fcc+fct)'
-                #     else:
-                #         comp_str = 'Pt-based'
-                # elif folder.lower() == 'rebecca_ceo2':
-                #     comp_str = 'CeO2'
-                # else:
-                #comp_str = None
-
                 records: List[Tuple[float, float, Optional[float]]] = []
                 # Process each line in the file
                 for line in lines:
@@ -296,7 +273,6 @@ class DeciferPipeline:
         composition: Optional[str] = None,
         composition_ranges: Optional[Dict[str, Tuple[int, int]]] = None,
         spacegroup: Optional[str] = None,
-        do_plot: bool = False,
         exclusive_elements: Optional[List[str]] = None,
         temperature: Optional[float] = None,
         max_new_tokens: Optional[int] = None,
@@ -404,6 +380,14 @@ class DeciferPipeline:
         df_sel = self.df_exp[self.df_exp['source_file'].str.lower() == target_file.lower()].copy()
         theta_rad = np.radians(df_sel["angle"] / 2.0)
         df_sel["Q"] = (4.0 * np.pi / float(wavelength)) * np.sin(theta_rad)
+        
+        # Adjust cropping boundaries based on available Q values
+        actual_q_min = df_sel["Q"].min()
+        actual_q_max = df_sel["Q"].max()
+        if actual_q_min > q_min_crop:
+            q_min_crop = actual_q_min
+        if actual_q_max < q_max_crop:
+            q_max_crop = actual_q_max
 
         # 2. Background subtraction with scaling
         if background_file is not None:
@@ -423,28 +407,41 @@ class DeciferPipeline:
             df_sel["intensity_bg"] = df_sel["intensity"]
 
         # 3. Full signal normalization
-        maxI = df_sel["intensity_bg"].max(skipna=True)
-        df_sel["intensity_norm"] = df_sel["intensity_bg"] / maxI
+        max_val_sel = df_sel["intensity_bg"].max(skipna=True)
+        min_val_sel = df_sel["intensity_bg"].min(skipna=True)
+        df_sel["intensity_normalized"] = (df_sel["intensity_bg"] - min_val_sel) / (max_val_sel - min_val_sel)
 
-        # 4. Crop for baseline correction
-        df_crop_orig = df_sel[(df_sel["Q"] >= q_min_crop) & (df_sel["Q"] <= q_max_crop)].copy()
-        baseline = df_crop_orig["intensity_bg"].min(skipna=True)
-        df_crop_orig["intensity_corrected"] = df_crop_orig["intensity_bg"] - baseline
-        df_endpoints = pd.DataFrame({"Q": [0.0, 10.0], "intensity_corrected": [0, 0]})
-        df_crop = pd.concat([df_crop_orig[["Q", "intensity_corrected"]], df_endpoints], ignore_index=True)
-        df_crop.sort_values(by="Q", inplace=True)
+        # 4. Crop
+        df_crop_orig = df_sel[(df_sel["Q"] > q_min_crop) & (df_sel["Q"] < q_max_crop)].copy()
+
+        # Min max norm
+        max_val = df_crop_orig["intensity_normalized"].max(skipna=True)
+        min_val = df_crop_orig["intensity_normalized"].min(skipna=True)
+        df_crop_orig["intensity_normalized"] = (df_crop_orig["intensity_normalized"] - min_val) / (max_val - min_val)
+
+        # Move base
+        #baseline = df_crop_orig["intensity_norm"].min(skipna=True)
+        #df_crop_orig["intensity_corrected"] = df_crop_orig["intensity_bg"] - baseline
+        #df_endpoints = pd.DataFrame({"Q": [q_min_crop, q_max_crop], "intensity_corrected": [0, 0]})
+        #df_crop = pd.concat([df_crop_orig[["Q", "intensity_corrected"]], df_endpoints], ignore_index=True)
+        #df_crop.sort_values(by="Q", inplace=True)
 
         # 5. Normalize the cropped, baseline-corrected signal
-        max_val = df_crop_orig["intensity_corrected"].max(skipna=True)
-        df_crop["intensity_normalized"] = df_crop["intensity_corrected"] / max_val
+        #max_val = df_crop_orig["intensity_bg"].max(skipna=True)
+        #df_crop_orig["intensity_normalized"] = df_crop_orig["intensity_corrected"] / max_val
+        
+        # Add endpoints to zero
+        df_endpoints = pd.DataFrame({"Q": [q_min_crop, q_max_crop], "intensity_normalized": [0, 0]})
+        df_crop = pd.concat([df_crop_orig[["Q", "intensity_normalized"]], df_endpoints], ignore_index=True)
+        df_crop.sort_values(by="Q", inplace=True)
 
         # 6. Standardize signals onto a common Q grid
         Q_std = np.linspace(0, 10, n_points)
         df_final = pd.DataFrame({"Q": Q_std})
         df_final["intensity_original"] = np.interp(Q_std, df_sel["Q"], df_sel["intensity"])
         df_final["intensity_bg_subtracted"] = np.interp(Q_std, df_sel["Q"], df_sel["intensity_bg"])
-        df_final["intensity_norm"] = np.interp(Q_std, df_sel["Q"], df_sel["intensity_norm"])
-        df_final["intensity_crop_norm"] = np.interp(Q_std, df_crop["Q"], df_crop["intensity_normalized"])
+        df_final["intensity_normalized"] = np.interp(Q_std, df_sel["Q"], df_sel["intensity_normalized"])
+        df_final["intensity_crop_normalized"] = np.interp(Q_std, df_crop["Q"], df_crop["intensity_normalized"])
 
         # 7. Include background signals in the output (if provided)
         if background_file is not None:
@@ -547,6 +544,8 @@ class DeciferPipeline:
         show_estimation: bool = True,
         show_second_best: bool = False,
         second_best_threshold: float = 0.9,
+        q_min_crop: float = 0.0,
+        q_max_crop: float = 10.0,
     ) -> None:
         """
         Plots the experimental PXRD data and the predicted PXRD along with the corresponding structure.
@@ -589,8 +588,10 @@ class DeciferPipeline:
         for res in results["gens"]:
             # Compute the PXRD from the generated CIF
             pxrd = pxrd_from_cif(res["cif_str"], base_fwhm=base_fwhm, particle_size=size_estimate)
-            i_pred_interpolated = np.interp(self.exp_q, pxrd["q"], pxrd["iq"])
-            rwp = np.sqrt(np.sum(np.square(self.exp_i - i_pred_interpolated)) / np.sum(np.square(self.exp_i)))
+            q_std = self.exp_q[(self.exp_q >= q_min_crop) & (self.exp_q <= q_max_crop)]
+            i_std = self.exp_i[(self.exp_q >= q_min_crop) & (self.exp_q <= q_max_crop)]
+            i_pred_interpolated = np.interp(q_std, pxrd["q"], pxrd["iq"])
+            rwp = np.sqrt(np.sum(np.square(i_std - i_pred_interpolated)) / np.sum(np.square(i_std)))
             n_peaks = len(pxrd["q_disc"][0])
             ranking_score = rwp + complexity_weight * n_peaks
             if ranking_score < best_ranking_score:
@@ -620,27 +621,28 @@ class DeciferPipeline:
         second_best_rwp = float("inf")
         second_best_pxrd = None
         
-        pbar_second_best = tqdm(total=len(results["gens"]), desc='Finding second best structure...', leave=False, dynamic_ncols=True)
-        for res in results["gens"]:
-            # Use approximate string matching to skip candidates too similar to the best sample
-            if is_approximately_same(res["cif_str"], best_result["cif_str"], threshold=second_best_threshold):
+        if show_second_best:
+            pbar_second_best = tqdm(total=len(results["gens"]), desc='Finding second best structure...', leave=False, dynamic_ncols=True)
+            for res in results["gens"]:
+                # Use approximate string matching to skip candidates too similar to the best sample
+                if is_approximately_same(res["cif_str"], best_result["cif_str"], threshold=second_best_threshold):
+                    pbar_second_best.update(1)
+                    continue
+            
+                # Compute the PXRD from the generated CIF for the candidate
+                pxrd = pxrd_from_cif(res["cif_str"], base_fwhm=base_fwhm, particle_size=size_estimate)
+                i_pred_interpolated = np.interp(self.exp_q, pxrd["q"], pxrd["iq"])
+                rwp = np.sqrt(np.sum(np.square(self.exp_i - i_pred_interpolated)) / np.sum(np.square(self.exp_i)))
+                n_peaks = len(pxrd["q_disc"][0])
+                ranking_score = rwp + complexity_weight * n_peaks
+            
+                if ranking_score < second_best_ranking_score:
+                    second_best_rwp = rwp
+                    second_best_ranking_score = ranking_score
+                    second_best_result = res
+                    second_best_pxrd = pxrd
                 pbar_second_best.update(1)
-                continue
-        
-            # Compute the PXRD from the generated CIF for the candidate
-            pxrd = pxrd_from_cif(res["cif_str"], base_fwhm=base_fwhm, particle_size=size_estimate)
-            i_pred_interpolated = np.interp(self.exp_q, pxrd["q"], pxrd["iq"])
-            rwp = np.sqrt(np.sum(np.square(self.exp_i - i_pred_interpolated)) / np.sum(np.square(self.exp_i)))
-            n_peaks = len(pxrd["q_disc"][0])
-            ranking_score = rwp + complexity_weight * n_peaks
-        
-            if ranking_score < second_best_ranking_score:
-                second_best_rwp = rwp
-                second_best_ranking_score = ranking_score
-                second_best_result = res
-                second_best_pxrd = pxrd
-            pbar_second_best.update(1)
-        pbar_second_best.close()
+            pbar_second_best.close()
 
         # Plot experimental and predicted PXRD data
         fig, ax_data = plt.subplots(figsize=figsize, dpi=dpi)
@@ -862,7 +864,7 @@ class DeciferPipeline:
         Loads the experimental data, generation results, and configuration from a pickle file.
 
         Parameters:
-            input_file (str): Path to the input pickle file.
+            input_file (str): Path to the input pickle file.
         """
         with open(input_file, "rb") as f:
             data_loaded = pickle.load(f)
