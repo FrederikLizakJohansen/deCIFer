@@ -26,4 +26,4 @@ ARGS=("$@")
 # Display the arguments
 echo "Arguments passed: ${ARGS[*]}"
 
-python bin/run_protocol.py "${ARGS[@]}"
+PYTHONPATH=/home/cxt514/projects/deCIFer_ablation_study python bin/run_protocol.py "${ARGS[@]}"
