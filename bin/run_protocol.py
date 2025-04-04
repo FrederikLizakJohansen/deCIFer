@@ -12,37 +12,41 @@ def main(args):
 
     """ Crystalline """
 
-    # Ceria
-    pipeline.setup_folder(f"crystalline_CeO2_protocol_{args.suffix}")
-    target_files = ["crystalline_CeO2_BM31.xye"]
-    background_file = None
+    ## Ceria
+    # pipeline.setup_folder(f"crystalline_CeO2_protocol_{args.suffix}")
+    # target_files = ["crystalline_CeO2_BM31.xye"]
+    # background_file = None
 
-    wavelength=0.25448
-    q_min_crop=1.5
-    q_max_crop=8.0
+    # wavelength=0.25448
+    # q_min_crop=1.5
+    # q_max_crop=8.0
 
-    protocols = [
-        [{}, "none"],
-        [{"composition": "CexO2x", "composition_ranges": {"Ce": (1,4)}}, "CexO2x"],
-        [{"composition": "CexO2x", "composition_ranges": {"Ce": (1,4)}, "spacegroup": "Fm-3m_sg"}, "CexO2x_sg"],
-    ]
+    # protocols = [
+    #     [{}, "none"],
+    #     [{'spacegroup': "Fm-3m_sg"}, "Fm-3m"],
+    #     [{'crystal_systems':[7]}, "Cubic"],
+    #     [{"composition": "Ce1O2"}, "Ce1O2"],
+    #     [{"composition": "Ce2O4"}, "Ce2O4"],
+    #     [{"composition": "Ce4O8"}, "Ce4O8"],
+    #     [{"composition": "Ce4O8", "spacegroup": "Fm-3m_sg"}, "Ce4O8_Fm-3m"],
+    # ]
 
-    for target_file in target_files[:args.debug_max]:
-        pipeline.prepare_target_data(
-            target_file=target_file,
-            background_file=background_file,
-            wavelength=wavelength,
-            q_min_crop=q_min_crop,
-            q_max_crop=q_max_crop,
-        )
+    # for target_file in target_files[:args.debug_max]:
+    #     pipeline.prepare_target_data(
+    #         target_file=target_file,
+    #         background_file=background_file,
+    #         wavelength=wavelength,
+    #         q_min_crop=q_min_crop,
+    #         q_max_crop=q_max_crop,
+    #     )
 
-        for cfg, name in protocols:
-            pipeline.run_experiment_protocol(
-                n_trials=args.n_trials,
-                protocol_name=name,
-                save_to=f"{target_file.split('.')[0]}_protocol_{name}.pkl", 
-                **cfg
-            )
+    #    for cfg, name in protocols:
+    #         pipeline.run_experiment_protocol(
+    #             n_trials=args.n_trials,
+    #             protocol_name=name,
+    #             save_to=f"{target_file.split('.')[0]}_protocol_{name}.pkl", 
+    #             **cfg
+    #         )
 
     # Silicon
     pipeline.setup_folder(f"crystalline_Si_protocol_{args.suffix}")
@@ -55,10 +59,13 @@ def main(args):
 
     protocols = [
         [{}, "none"],
-        [{"composition": "Six", "composition_ranges": {"Si": (1,8)}}, "Six"],
+        [{'spacegroup': "Fm-3m_sg"}, "Fm-3m"],
+        [{'spacegroup': "Fd-3m_sg"}, "Fd-3m"],
+        [{'crystal_systems':[7]}, "Cubic"],
+        [{"composition": "Si4"}, "Si4"],
         [{"composition": "Si8"}, "Si8"],
-        [{"composition": "Six", "composition_ranges": {"Si": (1,4)}, "crystal_systems": [4,5,6,7]}, "Six_crystal"],
-        [{"composition": "Si1", "crystal_systems": [7]}, "Si1_cubic"],
+        [{"composition": "Si4", "spacegroup": "Fm-3m_sg"}, "Si4_Fm-3m"],
+        [{"composition": "Si8", "spacegroup": "Fd-3m_sg"}, "Si8_Fd-3m"],
     ]
 
     for target_file in target_files[:args.debug_max]:
@@ -84,17 +91,96 @@ def main(args):
     background_file = None
 
     wavelength=1.5406
-    q_min_crop=1
+    q_min_crop=0.5
     q_max_crop=8
 
     protocols = [
         [{}, "none"],
+        [{'crystal_systems':[1]}, "Trigonal"],
+        [{'crystal_systems':[7]}, "Cubic"],
+        [{'crystal_systems':[3]}, "Orthorhombic"],
+        [{'spacegroup': "R-3c_sg"}, "R-3c"],
+        [{'spacegroup': "Ia-3_sg"}, "Ia-3"],
+        [{'spacegroup': "Pna2_1_sg"}, "Pna2_1"],
         [{"composition": "Fe12O18"}, "Fe12O18"],
-        [{"composition": "Fe2xO3x", "composition_ranges": {"Fe": (1,4)}, "spacegroup": "R-3c_sg"}, "Fe2xO3x_sg"],
-        [{"composition": "Fe12O18", "spacegroup": "R-3c_sg"}, "Fe12O18_sg"],
-        [{"composition": "Six", "composition_ranges": {"Si": (1,4)}}, "Six"],
-        [{"composition": "Six", "composition_ranges": {"Si": (1,4)}, "spacegroup": "Fd-3m_sg"}, "Six_sg"],
+        [{"composition": "Fe32O48"}, "Fe32O48"],
+        [{"composition": "Fe16O24"}, "Fe16O24"],
+        [{"composition": "Fe12O18", "spacegroup": "R-3c_sg"}, "Fe12O18_R-3c"],
+        [{"composition": "Fe32O48", "spacegroup": "Ia-3_sg"}, "Fe12O18_Ia-3"],
+        [{"composition": "Fe16O24", "spacegroup": "Pna2_1_sg"}, "Fe12O18_Pna2_1"],
     ]
+
+    for target_file in target_files[:args.debug_max]:
+        pipeline.prepare_target_data(
+            target_file=target_file,
+            background_file=background_file,
+            wavelength=wavelength,
+            q_min_crop=q_min_crop,
+            q_max_crop=q_max_crop,
+        )
+
+        for cfg, name in protocols:
+            pipeline.run_experiment_protocol(
+                n_trials=args.n_trials,
+                protocol_name=name,
+                save_to=f"{target_file.split('.')[0]}_protocol_{name}.pkl", 
+                **cfg
+            )
+    
+    """ CeO2 particles """
+
+    # Ceria
+    pipeline.setup_folder(f"particles_CeO2_protocol_{args.suffix}")
+    target_files = [
+        "Hydrolyse_ID5_20min_3-56_boro_0p8.xy",
+        "Hydrolyse_ID6_20min_3-56_boro_0p8.xy",
+        "Hydrolyse_ID8_20min_3-56_boro_0p8.xy",
+        "Hydrolyse_ID10_20min_3-56_boro_0p8.xy",
+    ]
+    background_file = "boroglass_0p8_empty_VCT_72h.xy"
+
+    wavelength=0.5594075
+    q_min_crop=1.5
+    q_max_crop=8.0
+
+    protocols = [
+        [{}, "none"],
+        [{'spacegroup': "Fm-3m_sg"}, "Fm-3m"],
+        [{'crystal_systems':[7]}, "Cubic"],
+        [{"composition": "Ce1O2"}, "Ce1O2"],
+        [{"composition": "Ce2O4"}, "Ce2O4"],
+        [{"composition": "Ce4O8"}, "Ce4O8"],
+        [{"composition": "Ce4O8", "spacegroup": "Fm-3m_sg"}, "Ce4O8_Fm-3m"],
+    ]
+
+    for target_file in target_files[:args.debug_max]:
+        pipeline.prepare_target_data(
+            target_file=target_file,
+            background_file=background_file,
+            wavelength=wavelength,
+            q_min_crop=q_min_crop,
+            q_max_crop=q_max_crop,
+        )
+
+        for cfg, name in protocols:
+            pipeline.run_experiment_protocol(
+                n_trials=args.n_trials,
+                protocol_name=name,
+                save_to=f"{target_file.split('.')[0]}_protocol_{name}.pkl", 
+                **cfg
+            )
+    
+    target_files = [
+        "scan-4907_mean.xy",
+        "scan-4911_mean.xy",
+        "scan-4912_mean.xy",
+        "scan-4919_mean.xy",
+    ]
+    background_file = "scan-4903_mean.xy"
+
+    wavelength=None # Already in Q
+    q_min_crop=1.5
+    q_max_crop=8.0
 
     for target_file in target_files[:args.debug_max]:
         pipeline.prepare_target_data(

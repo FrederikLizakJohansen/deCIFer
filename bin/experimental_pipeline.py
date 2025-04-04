@@ -119,7 +119,7 @@ class DeciferPipeline:
         background_file: Optional[str] = None,
         q_min_crop: float = 0.0,
         q_max_crop: float = 10.0,
-        wavelength: Union[float, str] = 'CuKa',
+        wavelength: Optional[Union[float, str]] = None,
         n_points: int = 1000
     ) -> None:
         """
@@ -355,7 +355,7 @@ class DeciferPipeline:
     def preprocess_generic(
         self,
         target_file: str,
-        wavelength: Union[float, str] = 0.25448,
+        wavelength: Optional[Union[float, str]] = None,
         q_min_crop: float = 1.0,
         q_max_crop: float = 8.0,
         n_points: int = 1000,
@@ -378,8 +378,12 @@ class DeciferPipeline:
         """
         # 1. Filter for sample and compute Q
         df_sel = self.df_exp[self.df_exp['source_file'].str.lower() == target_file.lower()].copy()
-        theta_rad = np.radians(df_sel["angle"] / 2.0)
-        df_sel["Q"] = (4.0 * np.pi / float(wavelength)) * np.sin(theta_rad)
+
+        if wavelength is not None:
+            theta_rad = np.radians(df_sel["angle"] / 2.0)
+            df_sel["Q"] = (4.0 * np.pi / float(wavelength)) * np.sin(theta_rad)
+        else:
+            df_sel["Q"] = df_sel["angle"]
         
         # Adjust cropping boundaries based on available Q values
         actual_q_min = df_sel["Q"].min()
@@ -392,8 +396,11 @@ class DeciferPipeline:
         # 2. Background subtraction with scaling
         if background_file is not None:
             bg_df = self.df_exp[self.df_exp['source_file'].str.lower() == background_file.lower()].copy()
-            theta_rad_bg = np.radians(bg_df["angle"] / 2.0)
-            bg_df["Q"] = (4.0 * np.pi / float(wavelength)) * np.sin(theta_rad_bg)
+            if wavelength is not None:
+                theta_rad_bg = np.radians(bg_df["angle"] / 2.0)
+                bg_df["Q"] = (4.0 * np.pi / float(wavelength)) * np.sin(theta_rad_bg)
+            else:
+                bg_df["Q"] = bg_df["sel"]
             bg_df.sort_values(by="Q", inplace=True)
             df_sel["background_intensity"] = np.interp(df_sel["Q"], bg_df["Q"], bg_df["intensity"])
             valid = df_sel["background_intensity"] > 0
