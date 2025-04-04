@@ -400,7 +400,7 @@ class DeciferPipeline:
                 theta_rad_bg = np.radians(bg_df["angle"] / 2.0)
                 bg_df["Q"] = (4.0 * np.pi / float(wavelength)) * np.sin(theta_rad_bg)
             else:
-                bg_df["Q"] = bg_df["sel"]
+                bg_df["Q"] = bg_df["angle"]
             bg_df.sort_values(by="Q", inplace=True)
             df_sel["background_intensity"] = np.interp(df_sel["Q"], bg_df["Q"], bg_df["intensity"])
             valid = df_sel["background_intensity"] > 0
