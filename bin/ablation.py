@@ -142,6 +142,7 @@ def experiment(
                     
                     structure_gen = Structure.from_str(cif_string_gen, fmt="cif")
                     structure_ref = Structure.from_str(cif_sample, fmt="cif")
+                    # TODO ADD THE SHIFT TO THE STRUCTURE SOMEHOW
                     structure_match = matcher.fit(structure_ref, structure_gen)
                 except:
                     continue

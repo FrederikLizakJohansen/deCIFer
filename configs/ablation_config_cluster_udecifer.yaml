@@ -1,5 +1,5 @@
 dataset_path: "../deCIFer/data/crystallm/full_new/serialized/test.h5"
-model_path: "../deCIFer/model__conditioned_mlp_augmentation__context_3076__robust_full_trainingcurves/ckpt.pt"
+model_path: "../deCIFer/model__nocond__context_3076__robust_full_trainingcurves/ckpt.pt"
 params_dict:
   #q_scale: [0.1, 0.5, 0.8, 0.9, 0.95, 0.975, 0.99, 1.0, 1.01, 1.025, 1.05, 1.1, 1.2, 1.5, 1.9]
   #peak_asymmetry: [-1.0, -0.5, -0.2, -0.1, -0.05, -0.01, 0.0, 0.01, 0.05, 0.1, 0.2, 0.5, 1.0]
@@ -32,10 +32,10 @@ default_params_dict:
 batch_size: 10
 n_repeats: 1
 max_new_tokens: 3076
-add_composition: true
+add_composition: True
 add_spacegroup: false
 crystal_system: "cubic"
 seed: 102 #105 #102
 use_multi_phase: false
 combinatory: false
-output: "ablation_scaling_shift_asymmetry_size_noise_mask_preferred_chebychev_phase_cubic_xsmall.pkl"
+output: "ablation_scaling_shift_asymmetry_size_noise_mask_preferred_chebychev_phase_cubic_xsmall_nocond.pkl"

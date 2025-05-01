@@ -1,7 +1,7 @@
 #!/bin/bash
-# #SBATCH -p gpu --gres=gpu:a100:1
-#SBATCH -p gpu --gres=gpu:titanrtx:1
-#SBATCH --time 0-20:00:00
+#SBATCH -p gpu --gres=gpu:a100:1
+# #SBATCH -p gpu --gres=gpu:titanrtx:1
+#SBATCH --time 1-00:00:00
 #SBATCH --job-name=exp_decifer
 #SBATCH --array 0
 #SBATCH --cpus-per-task=3
@@ -26,4 +26,4 @@ ARGS=("$@")
 # Display the arguments
 echo "Arguments passed: ${ARGS[*]}"
 
-PYTHONPATH=/home/cxt514/projects/deCIFer_ablation_study python bin/run_protocol.py "${ARGS[@]}"
+python bin/run_protocol.py "${ARGS[@]}"

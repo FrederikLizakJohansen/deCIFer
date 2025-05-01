@@ -1,7 +1,7 @@
 #!/bin/bash
-# #SBATCH -p gpu --gres=gpu:a100:1
-#SBATCH -p gpu --gres=gpu:titanrtx:1
-#SBATCH --time 0-20:00:00
+#SBATCH -p gpu --gres=gpu:a100:1
+# #SBATCH -p gpu --gres=gpu:titanrtx:1
+#SBATCH --time 1-00:00:00
 #SBATCH --job-name=abl_decifer
 #SBATCH --array 0
 #SBATCH --cpus-per-task=3
