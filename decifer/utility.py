@@ -313,6 +313,7 @@ def pxrd_from_cif(
     peak_redaction_prob: Optional[float] = None,
     chebychev_order: int = 0,
     chebychev_norm_coeffs: Optional[List[float]] = None,
+    chebychev_scale: float = 1.0,
     preferred_orientation_range: Optional[Tuple[float, float]] = None,
     phase_scales: Optional[List[float]] = None,
     q_shift: float = 0.0,
@@ -434,7 +435,7 @@ def pxrd_from_cif(
                 for n in range(chebychev_order + 1):
                     # T_n(x) = cos(n * arccos(x))
                     # Clamp x to [-1, 1] to avoid NaNs.
-                    background += chebychev_norm_coeffs[n] * torch.cos(n * torch.acos(x_scaled.clamp(-1, 1)))
+                    background += chebychev_norm_coeffs[n] * torch.cos(n * torch.acos(x_scaled.clamp(-1, 1))) * chebychev_scale
                 # Clamp background to not add negative background
                 background = torch.clamp(background, min=0.0)
                 phase_iq_cont += background

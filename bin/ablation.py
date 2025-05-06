@@ -48,7 +48,7 @@ def experiment(
     add_spacegroup=False,
     max_new_tokens=3076,
     temperature=1.0, 
-    top_k=None
+    top_k=None,
 ):
     """
     Run an experiment by generating PXRD patterns and corresponding CIF outputs over a set of parameters.
