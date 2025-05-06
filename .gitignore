@@ -6,6 +6,7 @@ logs/
 **/*.h5
 **/*.json
 **/*.log*
+**/*.zip
 
 # Ignore experiments
 experiments/
