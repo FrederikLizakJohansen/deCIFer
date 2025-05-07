@@ -142,8 +142,8 @@ def experiment(
                     
                     structure_gen = Structure.from_str(cif_string_gen, fmt="cif")
                     structure_ref = Structure.from_str(cif_sample, fmt="cif")
-                    # TODO ADD THE SHIFT TO THE STRUCTURE SOMEHOW
-                    structure_match = matcher.fit(structure_ref, structure_gen)
+                    structure_rmsd = matcher.get_rms_dist(structure_ref, structure_gen)
+                    structure_match = True if structure_rmsd is not None else False
                 except:
                     continue
                 
@@ -191,6 +191,7 @@ def experiment(
                     "generated_structure": structure_gen,
                     "reference_structure": structure_ref,
                     "structure_match": structure_match,
+                    "structure_rmsd": structure_rmsd,
                     "peak_similarity": peak_similarity,
                     "rwp": rwp,
                     "val": val,
