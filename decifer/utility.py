@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 from pymatgen.analysis.local_env import CrystalNN
-from pymatgen.core import Composition, Structure
+from pymatgen.core import Composition, Lattice, Structure
 from pymatgen.io.cif import CifParser, CifBlock
 from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
 from pymatgen.symmetry.groups import SpaceGroup
@@ -317,7 +317,9 @@ def pxrd_from_cif(
     preferred_orientation_range: Optional[Tuple[float, float]] = None,
     phase_scales: Optional[List[float]] = None,
     q_shift: float = 0.0,
-    q_scale: float = 1.0,
+    q_pre_scale_abc: Optional[List[float]] = None,
+    q_pre_scale_uniform: Optional[float] = None,
+    q_post_scale: float = 1.0,
     mask_ranges: Optional[List[Tuple[float, float]]] = None,
     debug: bool = False,
 ):
@@ -340,6 +342,16 @@ def pxrd_from_cif(
         for phase_index, cif in enumerate(cif_list):
             try:
                 structure = Structure.from_str(cif, fmt="cif")
+                if q_pre_scale_abc is not None:
+                    lattice_matrix = structure.lattice.matrix.copy()
+                    lattice_matrix[0] *= q_pre_scale_abc[0]
+                    lattice_matrix[1] *= q_pre_scale_abc[1]
+                    lattice_matrix[2] *= q_pre_scale_abc[2]
+                    structure = Structure(Lattice(lattice_matrix), structure.species, structure.frac_coords)
+                elif q_pre_scale_uniform is not None:
+                    lattice_matrix = structure.lattice.matrix.copy() * q_pre_scale_uniform
+                    structure = Structure(Lattice(lattice_matrix), structure.species, structure.frac_coords)
+
                 xrd_calculator = XRDCalculator(wavelength=wavelength)
                 
                 # Determine two_theta_range based on qmin and qmax
@@ -374,7 +386,7 @@ def pxrd_from_cif(
                 redaction_mask = (torch.rand_like(iq_disc) > peak_redaction_prob).float()
                 iq_disc *= redaction_mask
 
-            q_disc = (q_disc + q_shift) * q_scale
+            q_disc = (q_disc + q_shift) * q_post_scale
 
             # Save discrete peaks for output
             q_disc_list.append(q_disc)

@@ -6,7 +6,7 @@ import random
 from itertools import product
 import torch
 import numpy as np
-from pymatgen.core import Structure
+from pymatgen.core import Lattice, Structure
 from pymatgen.analysis.structure_matcher import StructureMatcher
 
 # Import necessary modules from your decifer package.
@@ -142,14 +142,29 @@ def experiment(
                     
                     structure_gen = Structure.from_str(cif_string_gen, fmt="cif")
                     structure_ref = Structure.from_str(cif_sample, fmt="cif")
+                    ref_param_val = params_dict[param_name]
+                    if param_name == "q_pre_scale_abc":
+                        lattice_matrix = structure_ref.lattice.matrix.copy()
+                        lattice_matrix[0] *= ref_param_val[0]
+                        lattice_matrix[1] *= ref_param_val[1]
+                        lattice_matrix[2] *= ref_param_val[2]
+                        structure_ref = Structure(Lattice(lattice_matrix), structure_ref.species, structure_ref.frac_coords)
+                    elif param_name == "q_pre_scale_uniform":
+                        lattice_matrix = structure_ref.lattice.matrix.copy() * ref_param_val
+                        structure_ref = Structure(Lattice(lattice_matrix), structure_ref.species, structure_ref.frac_coords)
+
+                    ref_lattice_lens = structure_ref.lattice.abc
+                    ref_lattice_angs = structure_ref.lattice.angles
+                    gen_lattice_lens = structure_gen.lattice.abc
+                    gen_lattice_angs = structure_gen.lattice.angles
                     structure_rmsd = matcher.get_rms_dist(structure_ref, structure_gen)
                     structure_match = True if structure_rmsd is not None else False
-                except:
+                except Exception as e:
+                    raise e
                     continue
                 
-                
                 # Compute peak sim and Rwp
-                if param_name in ["q_shift", "q_scale"]:
+                if param_name in ["q_shift", "q_post_scale", "q_pre_scale_abc", "q_pre_scale_uniform"]:
                     pxrd_ref_clean = pxrd_from_cif(cif_sample, debug=True, **params_dict)
                     if default_params_dict is not None:
                         pxrd_gen_clean = pxrd_from_cif(cif_string_gen, debug=True, **default_params_dict)
@@ -195,6 +210,10 @@ def experiment(
                     "peak_similarity": peak_similarity,
                     "rwp": rwp,
                     "val": val,
+                    "reference_lattice_lengths": ref_lattice_lens,
+                    "reference_lattice_angles": ref_lattice_angs,
+                    "generated_lattice_lenghts": gen_lattice_lens,
+                    "generated_lattice_angles": gen_lattice_angs,
                 }
                 results[param_name][str(param_val)]["experiments"].append(exp_result)
 
