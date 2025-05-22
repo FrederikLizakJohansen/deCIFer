@@ -160,7 +160,6 @@ def experiment(
                     structure_rmsd = matcher.get_rms_dist(structure_ref, structure_gen)
                     structure_match = True if structure_rmsd is not None else False
                 except Exception as e:
-                    raise e
                     continue
                 
                 # Compute peak sim and Rwp
