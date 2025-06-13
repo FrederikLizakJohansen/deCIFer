@@ -1,5 +1,5 @@
 dataset_path: "../../phd_projects/deCIFer/data/crystallm/full/serialized/test.h5"
-model_path: "../../phd_projects/deCIFer/experiments/model__conditioned_mlp_augmentation__context_3076__robust_full_trainingcurves/ckpt.pt"
+model_path: "../../phd_projects/deCIFer/experiments/model__nocond__context_3076__robust/ckpt.pt"
 params_dict:
   #q_pre_scale_abc: [[1.0, 1.0, 0.95], [1.0, 1.0, 0.975], [1.0, 1.0, 0.99], [1.0, 1.0, 1.0], [1.0, 1.0, 1.01], [1.0, 1.0, 1.025], [1.0, 1.0, 1.05]]
   q_pre_scale_uniform: [0.8, 0.9, 0.95, 0.975, 0.99, 1.0, 1.01, 1.025, 1.05, 1.1, 1.2]
@@ -35,8 +35,7 @@ max_new_tokens: 3076
 add_composition: true
 add_spacegroup: false
 crystal_system: "cubic"
-target_elements: ["Fe", "O"]
-seed: 42 #102
+seed: 102
 use_multi_phase: false
 combinatory: false
-output: "ablation_mainfig_cubic_local_small_FeO.pkl"
+output: "ablation_mainfig_cubic_local_small_nocond.pkl"

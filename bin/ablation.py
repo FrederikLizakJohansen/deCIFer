@@ -245,10 +245,41 @@ def main():
     dataset_path = config["dataset_path"]
     dataset = DeciferDataset(dataset_path, ["cif_name", "cif_tokens", "xrd.q", "xrd.iq", "cif_string", "spacegroup"])
     
-    # Optionally filter by a specific crystal system from the YAML config.
-    # The user should insert the crystal system name (e.g., "triclinic", "monoclinic", etc.)
+    # # Optionally filter by a specific crystal system from the YAML config.
+    # # The user should insert the crystal system name (e.g., "triclinic", "monoclinic", etc.)
+    # target_system_name = config.get("crystal_system", None)
+    # # Mapping from crystal system name to its corresponding system number (1-7).
+    # system_name_to_number = {
+    #     "triclinic": 1,
+    #     "monoclinic": 2,
+    #     "orthorhombic": 3,
+    #     "tetragonal": 4,
+    #     "trigonal": 5,
+    #     "hexagonal": 6,
+    #     "cubic": 7,
+    # }
+    
+    # if target_system_name:
+    #     target_system_name_lower = target_system_name.lower()
+    #     if target_system_name_lower not in system_name_to_number:
+    #         raise ValueError(f"Unknown crystal system: {target_system_name}")
+    #     target_system_number = system_name_to_number[target_system_name_lower]
+    #     filtered_dataset = [d for d in dataset if space_group_to_crystal_system(space_group_symbol_to_number(d['spacegroup'])) == target_system_number]
+    #     if not filtered_dataset:
+    #         raise ValueError(f"No datapoints found for crystal system: {target_system_name}")
+    #     datapoint_1 = random.choice(filtered_dataset)
+    #     datapoint_2 = random.choice(filtered_dataset)
+    # else:
+    #     datapoint_1 = random.choice(dataset)
+    #     datapoint_2 = random.choice(dataset)
+
+    import re
+
+    # Start with the full dataset
+    filtered_dataset = dataset
+
+    # Step 1: Filter by crystal system (if specified)
     target_system_name = config.get("crystal_system", None)
-    # Mapping from crystal system name to its corresponding system number (1-7).
     system_name_to_number = {
         "triclinic": 1,
         "monoclinic": 2,
@@ -258,22 +289,52 @@ def main():
         "hexagonal": 6,
         "cubic": 7,
     }
-    
+
     if target_system_name:
         target_system_name_lower = target_system_name.lower()
         if target_system_name_lower not in system_name_to_number:
             raise ValueError(f"Unknown crystal system: {target_system_name}")
         target_system_number = system_name_to_number[target_system_name_lower]
-        filtered_dataset = [d for d in dataset if space_group_to_crystal_system(space_group_symbol_to_number(d['spacegroup'])) == target_system_number]
-        if not filtered_dataset:
-            raise ValueError(f"No datapoints found for crystal system: {target_system_name}")
-        datapoint_1 = random.choice(filtered_dataset)
-        datapoint_2 = random.choice(filtered_dataset)
-    else:
-        datapoint_1 = random.choice(dataset)
-        datapoint_2 = random.choice(dataset)
+        filtered_dataset = [
+            d for d in filtered_dataset
+            if space_group_to_crystal_system(space_group_symbol_to_number(d['spacegroup'])) == target_system_number
+        ]
+
+    # Step 2: Filter by exact element set using fast regex
+    target_elements = config.get("target_elements", None)  # e.g., ["Fe", "O"]
+    if target_elements:
+        target_elements_set = set(target_elements)
+
+        element_pattern = re.compile(r"_chemical_formula_sum\s+['\"]?([\w\d\s\(\)\.\-]+)['\"]?", re.IGNORECASE)
+
+        def matches_exact_elements(cif_str, target_set):
+            match = element_pattern.search(cif_str)
+            if not match:
+                return False
+            formula_str = match.group(1)
+            tokens = formula_str.split()
+            found_elements = set()
+            for token in tokens:
+                match_elem = re.match(r"([A-Z][a-z]?)", token)
+                if match_elem:
+                    found_elements.add(match_elem.group(1))
+            return found_elements == target_set
+
+        filtered_dataset = [
+            d for d in filtered_dataset
+            if matches_exact_elements(d['cif_string'], target_elements_set)
+        ]
+
+    # Final check
+    if not filtered_dataset:
+        raise ValueError("No CIFs found matching the specified crystal system and element set.")
+
+    # Pick datapoints
+    datapoint_1 = random.choice(filtered_dataset)
+    datapoint_2 = random.choice(filtered_dataset)
     
     sample_cif = datapoint_1['cif_string']
+    print(sample_cif)
     sample_tokens = datapoint_1['cif_tokens']
     
     # Extract configuration parameters.

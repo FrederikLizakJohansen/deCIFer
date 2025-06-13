@@ -1,10 +1,10 @@
 dataset_path: "../../phd_projects/deCIFer/data/crystallm/full/serialized/test.h5"
 model_path: "../../phd_projects/deCIFer/experiments/model__conditioned_mlp_augmentation__context_3076__robust_full_trainingcurves/ckpt.pt"
 params_dict:
-  #q_pre_scale_abc: [[1.0, 1.0, 0.95], [1.0, 1.0, 0.975], [1.0, 1.0, 0.99], [1.0, 1.0, 1.0], [1.0, 1.0, 1.01], [1.0, 1.0, 1.025], [1.0, 1.0, 1.05]]
   q_pre_scale_uniform: [0.8, 0.9, 0.95, 0.975, 0.99, 1.0, 1.01, 1.025, 1.05, 1.1, 1.2]
-  peak_asymmetry: [0.0, 0.01, 0.05, 0.1, 0.2, 0.5, 1.0]
-  particle_size: [1, 5, 10, 20, 25, 30, 35, 40, 45, 50, 75, 100]
+  q_pre_scale_abc: [[1.0, 1.0, 0.8], [1.0, 1.0, 0.95], [1.0, 1.0, 0.975], [1.0, 1.0, 0.99], [1.0, 1.0, 1.0], [1.0, 1.0, 1.01], [1.0, 1.0, 1.025], [1.0, 1.0, 1.05], [1.0, 1.0, 1.1]]
+  #peak_asymmetry: [0.0, 0.01, 0.05, 0.1, 0.2, 0.5, 1.0]
+  #particle_size: [1, 5, 10, 20, 25, 30, 35, 40, 45, 50, 75, 100]
   #q_post_scale: [0.95, 0.975, 0.99, 1.0, 1.01, 1.025, 1.05]
   #q_shift: [-0.5, -0.25, -0.1, -0.05, -0.01, 0.0, 0.01, 0.05, 0.1, 0.25, 0.5]
   #peak_asymmetry: [-1.0, -0.5, -0.2, -0.1, -0.05, -0.01, 0.0, 0.01, 0.05, 0.1, 0.2, 0.5, 1.0]
@@ -34,9 +34,8 @@ n_repeats: 10
 max_new_tokens: 3076
 add_composition: true
 add_spacegroup: false
-crystal_system: "cubic"
-target_elements: ["Fe", "O"]
-seed: 42 #102
+crystal_system: "trigonal"
+seed: 102
 use_multi_phase: false
 combinatory: false
-output: "ablation_mainfig_cubic_local_small_FeO.pkl"
+output: "ablation_mainfig_trigonal_local_small.pkl"
