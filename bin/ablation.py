@@ -300,34 +300,50 @@ def main():
             if space_group_to_crystal_system(space_group_symbol_to_number(d['spacegroup'])) == target_system_number
         ]
 
-    # Step 2: Filter by exact element set using fast regex
+    # Step 2: Filter by element content (symbol match + optional count)
     target_elements = config.get("target_elements", None)  # e.g., ["Fe", "O"]
-    if target_elements:
-        target_elements_set = set(target_elements)
+    element_match_mode = config.get("element_match_mode", "exact").lower()  # "exact" or "contains"
+    element_count = config.get("element_count", None)  # e.g., 2 for binaries
 
+    if target_elements or element_count is not None:
+        target_elements_set = set(target_elements) if target_elements else None
         element_pattern = re.compile(r"_chemical_formula_sum\s+['\"]?([\w\d\s\(\)\.\-]+)['\"]?", re.IGNORECASE)
 
-        def matches_exact_elements(cif_str, target_set):
-            match = element_pattern.search(cif_str)
-            if not match:
-                return False
-            formula_str = match.group(1)
+        def extract_elements_from_formula(formula_str):
             tokens = formula_str.split()
             found_elements = set()
             for token in tokens:
                 match_elem = re.match(r"([A-Z][a-z]?)", token)
                 if match_elem:
                     found_elements.add(match_elem.group(1))
-            return found_elements == target_set
+            return found_elements
+
+        def element_match_ok(cif_str):
+            match = element_pattern.search(cif_str)
+            if not match:
+                return False
+            found_elements = extract_elements_from_formula(match.group(1))
+
+            # Apply element set matching
+            if target_elements_set:
+                if element_match_mode == "exact" and found_elements != target_elements_set:
+                    return False
+                elif element_match_mode == "contains" and not target_elements_set.issubset(found_elements):
+                    return False
+
+            # Apply element count constraint
+            if element_count is not None and len(found_elements) != element_count:
+                return False
+
+            return True
 
         filtered_dataset = [
-            d for d in filtered_dataset
-            if matches_exact_elements(d['cif_string'], target_elements_set)
+            d for d in filtered_dataset if element_match_ok(d['cif_string'])
         ]
 
     # Final check
     if not filtered_dataset:
-        raise ValueError("No CIFs found matching the specified crystal system and element set.")
+        raise ValueError("No CIFs found matching the specified filters.")
 
     # Pick datapoints
     datapoint_1 = random.choice(filtered_dataset)
@@ -335,6 +351,7 @@ def main():
     
     sample_cif = datapoint_1['cif_string']
     print(sample_cif)
+    #break
     sample_tokens = datapoint_1['cif_tokens']
     
     # Extract configuration parameters.

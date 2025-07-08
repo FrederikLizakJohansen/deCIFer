@@ -35,7 +35,10 @@ max_new_tokens: 3076
 add_composition: true
 add_spacegroup: false
 crystal_system: "trigonal"
-seed: 102
+target_elements: ["O"]
+element_match_mode: "contains"  # or "exact"
+element_count: 2
+seed: 100 #102
 use_multi_phase: false
 combinatory: false
 output: "ablation_mainfig_trigonal_local_small.pkl"
