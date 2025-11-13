@@ -1,14 +1,18 @@
-[![Static Badge](https://img.shields.io/badge/arXiv-2502.02189-brightgreen?style=flat)](https://arxiv.org/abs/2502.02189)
+[![Static Badge](https://img.shields.io/badge/arXiv-2502.02189-brightgreen?style=flat)](https://arxiv.org/abs/2502.02189) [![Download Checkpoint](https://img.shields.io/badge/Model%20Checkpoint-582%20MB-blue?style=flat)](https://sid.erda.dk/share_redirect/epnX85vrEP)
 
 <img src="deCIFer_logo.png" alt="logo" height="200"/>
 
 # deCIFer: Crystal Structure Prediction from Powder Diffraction Data
 
+**Download pretrained (C=3076) model checkpoint (~582 MB zipped):**  
+➡️ **[deCIFer_v1 Checkpoint (.zip)](https://sid.erda.dk/share_redirect/epnX85vrEP)**  
+The zip contains `ckpt.pt` (≈635 MB uncompressed).
+
 ## Table of Contents
 1. [Setup](#setup)
 2. [Data Preparation](#data-preparation)
 3. [Training](#training)
-4. [Evaluation Pipeline](#evaluation)
+4. [Evaluation Pipeline](#evaluation-pipeline)
 5. [CIF Generation Consistency Experiment](#cif-generation-consistency-experiment)
 6. [License](#license)
 
