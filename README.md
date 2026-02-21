@@ -300,7 +300,7 @@ This section covers the scripts and notebook used in a follow-up paper that appl
 
 The experimental PXRD data and precomputed result pickles used in the paper can be downloaded from:
 
-➡️ **[Experimental data & results (.zip)](<SHARED_LINK>)**
+➡️ **[Experimental data & results (.zip)](https://www.erda.dk/archives/808f676c6b43aefbe0f423ab3df30312/published-archive.html)**
 
 The ZIP contains `.xy`/`.xye` scan files (two-column or three-column: angle/Q, intensity, optional error) and a `pkl-files/` folder of precomputed pickle outputs required by the figure notebook.
 
