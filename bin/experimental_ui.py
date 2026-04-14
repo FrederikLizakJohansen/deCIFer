@@ -1141,10 +1141,21 @@ def main() -> None:
             unsafe_allow_html=True,
         )
 
-        device_options = ["cuda", "cpu"] if torch.cuda.is_available() else ["cpu"]
-        persisted_device = persisted.get("device", device_options[0])
-        device_index = device_options.index(persisted_device) if persisted_device in device_options else 0
+        device_options = ["cuda", "cpu"]
+        cuda_ok = torch.cuda.is_available()
+        persisted_device = persisted.get("device", "cuda" if cuda_ok else "cpu")
+        device_index = device_options.index(persisted_device) if persisted_device in device_options else (0 if cuda_ok else 1)
         device = st.selectbox("Device", options=device_options, index=device_index, key="device_select")
+        if device == "cuda" and not cuda_ok:
+            st.markdown(pill("CUDA not detected by torch", "warn"), unsafe_allow_html=True)
+            st.caption(
+                f"`torch.__version__ = {torch.__version__}` · "
+                f"`cuda.is_available() = False`. "
+                "Likely a CPU-only torch build — reinstall with a CUDA wheel "
+                "(see pytorch.org/get-started) or fix the CUDA runtime."
+            )
+        elif device == "cuda":
+            st.caption(f"CUDA {torch.version.cuda} · {torch.cuda.get_device_name(0)}")
 
         st.markdown("---")
         st.markdown("#### Sessions")
