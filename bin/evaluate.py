@@ -5,6 +5,8 @@ import os
 import sys
 import argparse
 import multiprocessing as mp
+import pickle
+import __main__
 from queue import Empty
 from queue import Empty
 from glob import glob
@@ -120,9 +122,18 @@ def extract_prompt_batch(sequences, device, add_composition=True, add_spacegroup
 
 # Function to load model from a checkpoint
 def load_model_from_checkpoint(ckpt_path, device):
+    # Older checkpoints may have pickled TrainConfig from a script execution context,
+    # which records the class under __main__. Make that name resolvable here.
+    if not hasattr(__main__, "TrainConfig"):
+        __main__.TrainConfig = TrainConfig
     
     # Checkpoint
-    checkpoint = torch.load(ckpt_path, map_location=device)  # Load checkpoint
+    try:
+        checkpoint = torch.load(ckpt_path, map_location=device)
+    except pickle.UnpicklingError as exc:
+        # PyTorch 2.6 changed torch.load default weights_only=True. Older deCIFer
+        # checkpoints can include OmegaConf metadata and need the legacy behavior.
+        checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
     state_dict = checkpoint.get("best_model_state", checkpoint.get("best_model"))
     
     model_args = checkpoint["model_args"]

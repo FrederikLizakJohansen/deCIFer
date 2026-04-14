@@ -1,6 +1,7 @@
 import os
+import sys
 import zipfile
-from typing import Optional, List, Tuple, Union, Dict, Any
+from typing import Callable, Optional, List, Tuple, Union, Dict, Any
 import pickle
 
 import numpy as np
@@ -8,27 +9,49 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle, Patch
 import torch
+from torch.nn import functional as F
 from pymatgen.core import Structure
 from pymatgen.core import Structure as PMGStructure
 from pymatgen.io.ase import AseAtomsAdaptor
 from pymatgen.symmetry.groups import SpaceGroup
+
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(THIS_DIR)
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 # Minimal imports from your modules (adjust paths as needed):
 from bin.evaluate import load_model_from_checkpoint
 from bin.train import TrainConfig
 from decifer.tokenizer import Tokenizer
 from decifer.utility import (
-    pxrd_from_cif,
     replace_symmetry_loop_with_P1,
     extract_space_group_symbol,
     reinstate_symmetry_loop,
     space_group_to_crystal_system,
-    space_group_symbol_to_number
+    space_group_symbol_to_number,
+    extract_data_formula,
+    generate_continuous_xrd_from_cif,
 )
 from tqdm.auto import tqdm
 
 from ase.visualize.plot import plot_atoms
 from ase.data import colors, atomic_numbers
+
+
+def pxrd_from_cif(cif_string: str, base_fwhm: float = 0.05, **kwargs) -> Optional[Dict[str, Any]]:
+    return generate_continuous_xrd_from_cif(
+        cif_string,
+        qmin=0.0,
+        qmax=10.0,
+        qstep=0.01,
+        fwhm_range=(base_fwhm, base_fwhm),
+        eta_range=(0.5, 0.5),
+        noise_range=None,
+        intensity_scale_range=None,
+        mask_prob=None,
+        **kwargs,
+    )
 
 
 class DeciferPipeline:
@@ -37,7 +60,7 @@ class DeciferPipeline:
     and plot the results alongside PXRD predictions.
     """
 
-    def __init__(self, model_path: str, zip_path: str, device: str = "cuda",
+    def __init__(self, model_path: str, zip_path: Optional[str] = None, device: str = "cuda",
                  temperature: float = 1.0, max_new_tokens: int = 3000, results_output_folder='./') -> None:
         """
         Initialize the DeciferPipeline with the model, experimental data and default parameters.
@@ -93,6 +116,7 @@ class DeciferPipeline:
         # Model and generation parameters
         self.device: str = device
         self.model: Optional[torch.nn.Module] = self.load_custom_model(model_path)
+        self.model_condition_size: Optional[int] = getattr(getattr(self.model, "config", None), "condition_size", None)
         self.temperature: float = temperature
         self.max_new_tokens: int = max_new_tokens
 
@@ -100,13 +124,71 @@ class DeciferPipeline:
         self.setup_folder(results_output_folder)
 
         # Setup experimental data and placeholders for processed data and results
-        self.df_exp: pd.DataFrame = self.read_experimental_data(zip_path)
+        self.df_exp: pd.DataFrame = self.read_experimental_data(zip_path) if zip_path else pd.DataFrame()
         self.df_processed: Optional[pd.DataFrame] = None
         self.results: Optional[Dict[str, Any]] = None
         self.exp_i: Optional[np.ndarray] = None
         self.exp_q: Optional[np.ndarray] = None
         self.raw_i: Optional[np.ndarray] = None
         self.raw_q: Optional[np.ndarray] = None
+
+    @staticmethod
+    def _read_xy_records(lines: List[str]) -> List[Tuple[float, float, Optional[float]]]:
+        records: List[Tuple[float, float, Optional[float]]] = []
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            try:
+                if len(parts) == 2:
+                    angle, intensity = parts
+                    records.append((float(angle), float(intensity), None))
+                elif len(parts) >= 3:
+                    angle, intensity, error = parts[:3]
+                    records.append((float(angle), float(intensity), float(error)))
+            except ValueError:
+                # Skip headers and metadata rows such as "Q I sigma".
+                continue
+        return records
+
+    @classmethod
+    def read_experimental_file(
+        cls,
+        file_content: Union[str, bytes],
+        source_file: str,
+        source_folder: str = "uploaded",
+    ) -> pd.DataFrame:
+        if isinstance(file_content, bytes):
+            text = file_content.decode("utf-8")
+        else:
+            text = file_content
+        records = cls._read_xy_records(text.splitlines())
+        df = pd.DataFrame(records, columns=['angle', 'intensity', 'error'])
+        if df.empty:
+            raise ValueError(f"No diffraction records could be parsed from {source_file}.")
+        df['source_file'] = source_file
+        df['source_folder'] = source_folder
+        return df
+
+    def load_experimental_file(
+        self,
+        file_content: Union[str, bytes],
+        source_file: str,
+        source_folder: str = "uploaded",
+    ) -> pd.DataFrame:
+        self.df_exp = self.read_experimental_file(
+            file_content=file_content,
+            source_file=source_file,
+            source_folder=source_folder,
+        )
+        self.df_processed = None
+        self.results = None
+        self.exp_i = None
+        self.exp_q = None
+        self.raw_i = None
+        self.raw_q = None
+        return self.df_exp
 
     def setup_folder(self, path: str) -> None:
         if not os.path.exists(path):
@@ -176,16 +258,7 @@ class DeciferPipeline:
 
                 folder = os.path.basename(os.path.dirname(fn))
                 base_name = os.path.basename(fn)
-                records: List[Tuple[float, float, Optional[float]]] = []
-                # Process each line in the file
-                for line in lines:
-                    parts = line.split()
-                    if len(parts) == 2:
-                        angle, intensity = parts
-                        records.append((float(angle), float(intensity), None))
-                    elif len(parts) == 3:
-                        angle, intensity, error = parts
-                        records.append((float(angle), float(intensity), float(error)))
+                records = self._read_xy_records(lines)
 
                 df_temp = pd.DataFrame(records, columns=['angle', 'intensity', 'error'])
                 df_temp['source_file'] = base_name
@@ -254,6 +327,81 @@ class DeciferPipeline:
         # Reinstate the symmetry loop if the space group is not P 1
         return reinstate_symmetry_loop(c, sg) if sg != "P 1" else c
 
+    def build_generation_prompt(
+        self,
+        composition: Optional[str] = None,
+        spacegroup: Optional[str] = None,
+    ) -> torch.Tensor:
+        prompt_str = "data_"
+        if composition:
+            prompt_str = f"data_{composition}\n"
+        if spacegroup:
+            if not composition:
+                raise ValueError("A composition is required when conditioning on a space group.")
+            prompt_str += f"_symmetry_space_group_name_H-M {spacegroup}\n"
+        prompt_tokens = self.ENCODE(self.TOKENIZE(prompt_str))
+        return torch.tensor(prompt_tokens, dtype=torch.long).unsqueeze(0).to(self.model.device)
+
+    @torch.no_grad()
+    def generate_with_callback(
+        self,
+        prompt: torch.Tensor,
+        cond_array: torch.Tensor,
+        max_new_tokens: int,
+        temperature: float,
+        token_callback: Optional[Callable[[int, int, str, str], None]] = None,
+        should_stop_all_callback: Optional[Callable[[], bool]] = None,
+        should_abort_current_callback: Optional[Callable[[], bool]] = None,
+        allowed_spacegroup_token_ids: Optional[List[int]] = None,
+    ) -> Tuple[torch.Tensor, str]:
+        idx = prompt
+        prev_id = None
+        awaiting_spacegroup_value = False
+        allowed_spacegroup_token_ids_set = set(allowed_spacegroup_token_ids or [])
+        space_token_id = self.TOKENIZER.token_to_id[" "]
+
+        for step_idx in range(max_new_tokens):
+            if should_stop_all_callback is not None and should_stop_all_callback():
+                return idx, "stopped"
+            if should_abort_current_callback is not None and should_abort_current_callback():
+                return idx, "aborted"
+
+            idx_cond = idx if idx.size(1) <= self.model.config.block_size else idx[:, -self.model.config.block_size:]
+            logits, _ = self.model(
+                idx_cond,
+                cond_vec=cond_array,
+                start_indices_batch=[[0]],
+            )
+            logits = logits[:, -1, :] / temperature
+            if awaiting_spacegroup_value and allowed_spacegroup_token_ids_set:
+                allowed_ids = list(allowed_spacegroup_token_ids_set | {space_token_id})
+                allowed_mask = torch.full_like(logits, float("-inf"))
+                allowed_mask[:, allowed_ids] = 0.0
+                logits = logits + allowed_mask
+            probs = F.softmax(logits, dim=-1)
+            idx_next = torch.multinomial(probs, num_samples=1)
+            idx = torch.cat((idx, idx_next), dim=1)
+
+            token_id = idx_next.item()
+            partial_text = self.DECODE(idx[0].tolist())
+            token_text = self.DECODE([token_id])
+            if token_callback is not None:
+                token_callback(step_idx + 1, max_new_tokens, token_text, partial_text)
+
+            if token_id == self.SPACEGROUP_ID:
+                awaiting_spacegroup_value = True
+            elif awaiting_spacegroup_value and token_id in allowed_spacegroup_token_ids_set:
+                awaiting_spacegroup_value = False
+
+            if prev_id is not None and prev_id == self.NEWLINE_ID and token_id == self.NEWLINE_ID:
+                break
+            if token_id == self.PADDING_ID:
+                idx = idx[:, :-1]
+                break
+            prev_id = token_id
+
+        return idx, "completed"
+
     def run_decifer_generation(
         self,
         cond_array: Union[torch.Tensor, np.ndarray],
@@ -263,8 +411,11 @@ class DeciferPipeline:
         exclusive_elements: Optional[List[str]] = None,
         temperature: Optional[float] = None,
         max_new_tokens: Optional[int] = None,
-        crystal_systems: Optional[List[str]] = None
-    ) -> Optional[Tuple[str, Structure]]:
+        crystal_systems: Optional[List[str]] = None,
+        token_callback: Optional[Callable[[int, int, str, str], None]] = None,
+        should_stop_all_callback: Optional[Callable[[], bool]] = None,
+        should_abort_current_callback: Optional[Callable[[], bool]] = None,
+    ) -> Dict[str, Any]:
         """
         Generates a CIF string from the provided condition vector and returns the CIF and its corresponding structure.
 
@@ -292,6 +443,16 @@ class DeciferPipeline:
         # Ensure condition array is a torch.Tensor and adjust dimensions
         if not isinstance(cond_array, torch.Tensor):
             cond_array = torch.tensor(cond_array)
+        cond_array = cond_array.flatten()
+
+        if self.model_condition_size is not None and cond_array.numel() != self.model_condition_size:
+            q_src = np.linspace(0.0, 10.0, cond_array.numel())
+            q_dst = np.linspace(0.0, 10.0, self.model_condition_size)
+            cond_array = torch.tensor(
+                np.interp(q_dst, q_src, cond_array.detach().cpu().numpy()),
+                dtype=torch.float32,
+            )
+
         cond_array = cond_array.unsqueeze(0).to(self.model.device).float()
 
         # Determine inactive elements if exclusive elements are provided
@@ -307,37 +468,77 @@ class DeciferPipeline:
                 active_spacegroups.extend(self.get_space_group_symbols(cs, include=True))
         else:
             active_spacegroups = None
+        allowed_spacegroup_token_ids = None
+        if active_spacegroups:
+            allowed_spacegroup_token_ids = [
+                self.TOKENIZER.token_to_id[f"{sg}_sg"]
+                for sg in active_spacegroups
+                if f"{sg}_sg" in self.TOKENIZER.token_to_id
+            ]
 
-        # Create prompt tokens for generation
-        prompt = torch.tensor([self.START_ID]).unsqueeze(0).to(self.model.device)
-        if composition:
-            comp_str = f"data_{composition}\n"
-            c_tokens = self.ENCODE(self.TOKENIZE(comp_str))
-            prompt = torch.tensor(c_tokens).unsqueeze(0).to(self.model.device)
+        prompt = self.build_generation_prompt(
+            composition=composition,
+            spacegroup=spacegroup,
+        )
 
-        # Generate new tokens using the model's custom generate function
-        out = self.model.generate_custom(
-            idx=prompt,
+        out, generation_status = self.generate_with_callback(
+            prompt=prompt,
+            cond_array=cond_array,
             max_new_tokens=max_new_tokens,
-            cond_vec=cond_array,
-            start_indices_batch=[[0]],
-            composition_string=composition,
-            composition_ranges=composition_ranges,
-            spacegroup_string=spacegroup,
-            exclude_elements=inactive_elements_list,
             temperature=temperature,
-            disable_pbar=False,
-            include_spacegroups=active_spacegroups,
-        ).cpu().numpy()
+            token_callback=token_callback,
+            should_stop_all_callback=should_stop_all_callback,
+            should_abort_current_callback=should_abort_current_callback,
+            allowed_spacegroup_token_ids=allowed_spacegroup_token_ids,
+        )
+        if generation_status != "completed":
+            return {"success": False, "status": generation_status}
+
+        out = out.cpu().numpy()
         cif_raw: str = self.DECODE(out[0])
 
         try:
             # Fix the symmetry in the generated CIF string and convert it to a Structure object
             cif_fixed = self.fix_symmetry_in_cif(cif_raw)
             structure = Structure.from_str(cif_fixed, fmt="cif")
-            return cif_fixed, structure
-        except Exception as e:
-            return None
+            return {
+                "success": True,
+                "status": "completed",
+                "cif_str": cif_fixed,
+                "struct": structure,
+            }
+        except Exception:
+            return {
+                "success": False,
+                "status": "invalid",
+                "partial_cif": cif_raw,
+            }
+
+    def summarize_generation(self, cif_str: str) -> Dict[str, Optional[Union[str, int, float]]]:
+        summary: Dict[str, Optional[Union[str, int, float]]] = {
+            "formula": None,
+            "spacegroup": None,
+            "spacegroup_number": None,
+            "crystal_system": None,
+            "n_atoms": None,
+        }
+        try:
+            summary["formula"] = extract_data_formula(cif_str)
+        except Exception:
+            pass
+        try:
+            sg = extract_space_group_symbol(cif_str)
+            summary["spacegroup"] = sg
+            summary["spacegroup_number"] = space_group_symbol_to_number(sg)
+            summary["crystal_system"] = space_group_to_crystal_system(sg)
+        except Exception:
+            pass
+        try:
+            structure = Structure.from_str(cif_str, fmt="cif")
+            summary["n_atoms"] = len(structure)
+        except Exception:
+            pass
+        return summary
 
     def preprocess_generic(
         self,
@@ -757,6 +958,10 @@ class DeciferPipeline:
         crystal_systems: Optional[List[str]] = None,
         save_to: Optional[str] = None,
         protocol_name: Optional[str] = None,
+        progress_callback: Optional[Callable[[int, int, Dict[str, Any]], None]] = None,
+        token_callback: Optional[Callable[[int, int, int, int, str, str], None]] = None,
+        should_stop_all_callback: Optional[Callable[[], bool]] = None,
+        should_abort_current_callback: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Any]:
         """
         Runs multiple generation trials and collects all results.
@@ -799,7 +1004,11 @@ class DeciferPipeline:
 
         # Run the generation trials
         pbar_trials = tqdm(total=n_trials, desc=f'Running trials for protocol {protocol_name}', leave=True, dynamic_ncols=True)
-        for _ in range(n_trials):
+        for trial_idx in range(n_trials):
+            if should_stop_all_callback is not None and should_stop_all_callback():
+                break
+
+            generation_result: Dict[str, Any] = {"success": False}
             gen_out = self.run_decifer_generation(
                 cond_array=self.exp_i,
                 composition=composition,
@@ -809,19 +1018,29 @@ class DeciferPipeline:
                 temperature=temperature,
                 max_new_tokens=max_new_tokens,
                 crystal_systems=crystal_systems,
+                token_callback=(
+                    None if token_callback is None else
+                    lambda step_idx, token_total, token_text, partial_text, trial_idx=trial_idx:
+                        token_callback(trial_idx + 1, n_trials, step_idx, token_total, token_text, partial_text)
+                ),
+                should_stop_all_callback=should_stop_all_callback,
+                should_abort_current_callback=should_abort_current_callback,
             )
-            if gen_out is not None:
-                cif_str, struct = gen_out
 
-                results["gens"].append({
-                    "cif_str": cif_str,
-                    "struct": struct,
-                })
+            generation_result = dict(gen_out)
+            if generation_result.get("success"):
+                generation_result["summary"] = self.summarize_generation(generation_result["cif_str"])
+                results["gens"].append(generation_result)
+            if progress_callback is not None:
+                progress_callback(trial_idx + 1, n_trials, generation_result)
             pbar_trials.update(1)
+            if generation_result.get("status") == "stopped":
+                break
 
         self.results = results
         if save_to:
             self.save_pickle(save_to)
+        return results
 
     def save_pickle(self, output_file: str) -> None:
         """
@@ -858,4 +1077,3 @@ class DeciferPipeline:
         self.raw_i = data_loaded.get("raw_i", None)
         self.prep_config = data_loaded.get("prep_config", None)
         print(f"Data loaded from {input_file}")
-
