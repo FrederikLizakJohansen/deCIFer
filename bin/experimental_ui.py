@@ -293,7 +293,7 @@ def make_overlay_figure(exp_q, exp_i, generations: List[Dict[str, Any]], q_min: 
     )
     palette = ["#f43f5e", "#f97316", "#eab308", "#84cc16", "#10b981", "#06b6d4", "#8b5cf6", "#ec4899"]
     for idx, gen in enumerate(generations):
-        pxrd = _compute_pxrd_cached(gen.get("cif_str", ""), float(q_min), float(q_max))
+        pxrd = _compute_pxrd_cached(gen.get("cif_str", ""), float(q_min), float(q_max), 0.05, 0.5)
         if pxrd is None:
             continue
         disc_mask = (pxrd["q_disc"] >= q_min) & (pxrd["q_disc"] <= q_max)
@@ -312,6 +312,89 @@ def make_overlay_figure(exp_q, exp_i, generations: List[Dict[str, Any]], q_min: 
     fig.update_xaxes(title_text="Q (Å⁻¹)", range=[q_min, q_max])
     fig.update_yaxes(title_text="Intensity (stacked tick marks below)")
     return _apply_layout(fig, height=420, title="Overlay: experimental vs all valid structures")
+
+
+def make_rietveld_figure(
+    exp_q: np.ndarray,
+    exp_i: np.ndarray,
+    calc_i: np.ndarray,
+    scale: float,
+    q_min: float,
+    q_max: float,
+    label: str,
+    rwp: float,
+) -> go.Figure:
+    exp_q = np.asarray(exp_q)
+    exp_i = np.asarray(exp_i)
+    calc = scale * np.asarray(calc_i)
+    mask = (exp_q >= q_min) & (exp_q <= q_max)
+    diff = exp_i - calc
+    # Offset difference curve below zero so it reads like a standard Rietveld plot.
+    diff_offset = -0.35 * max(np.max(exp_i[mask]) if mask.any() else 1.0, 1e-6)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=exp_q[mask], y=exp_i[mask], mode="lines",
+        name="Observed", line=dict(color=EXP_COLOR, width=2.2),
+        fill="tozeroy", fillcolor="rgba(14,165,233,0.08)",
+    ))
+    fig.add_trace(go.Scatter(
+        x=exp_q[mask], y=calc[mask], mode="lines",
+        name="Calculated", line=dict(color=GEN_COLOR, width=1.8, dash="dash"),
+    ))
+    fig.add_trace(go.Scatter(
+        x=exp_q[mask], y=diff[mask] + diff_offset, mode="lines",
+        name="Difference", line=dict(color="#475569", width=1.2),
+    ))
+    fig.add_hline(y=diff_offset, line=dict(color="#cbd5e1", width=1, dash="dot"))
+    fig.add_annotation(
+        x=q_max, y=diff_offset, xanchor="right", yanchor="top",
+        text=f"<b>Rwp = {rwp:.3f}</b>", showarrow=False,
+        font=dict(color="#334155", size=12),
+        bgcolor="rgba(255,255,255,0.85)", bordercolor="#cbd5e1", borderwidth=1, borderpad=4,
+    )
+    fig.update_xaxes(title_text="Q (Å⁻¹)", range=[q_min, q_max])
+    fig.update_yaxes(title_text="Intensity")
+    return _apply_layout(fig, height=400, title=f"Rietveld-style fit · {label}")
+
+
+def make_rwp_ranking_figure(ranked: List[Dict[str, Any]]) -> go.Figure:
+    if not ranked:
+        return go.Figure()
+    labels = [f"{r['rank']}. {r['label']}" for r in ranked]
+    rwps = [r["rwp"] for r in ranked]
+    rmin, rmax = min(rwps), max(rwps)
+    def _color(rwp: float) -> str:
+        # Green → amber → red by relative Rwp.
+        if rmax - rmin < 1e-9:
+            t = 0.0
+        else:
+            t = (rwp - rmin) / (rmax - rmin)
+        # Interpolate between #10b981 (emerald) and #ef4444 (red) through #f59e0b (amber).
+        stops = [(0.0, (16, 185, 129)), (0.5, (245, 158, 11)), (1.0, (239, 68, 68))]
+        for (t0, c0), (t1, c1) in zip(stops, stops[1:]):
+            if t <= t1:
+                u = (t - t0) / max(t1 - t0, 1e-9)
+                r = int(c0[0] + u * (c1[0] - c0[0]))
+                g = int(c0[1] + u * (c1[1] - c0[1]))
+                b = int(c0[2] + u * (c1[2] - c0[2]))
+                return f"rgb({r},{g},{b})"
+        return "rgb(239,68,68)"
+    colors = [_color(r) for r in rwps]
+    fig = go.Figure(go.Bar(
+        x=rwps, y=labels, orientation="h",
+        marker=dict(color=colors, line=dict(color="white", width=1)),
+        text=[f"{r:.3f}" for r in rwps],
+        textposition="outside",
+        hovertemplate="%{y}<br>Rwp = %{x:.4f}<extra></extra>",
+    ))
+    fig.update_yaxes(autorange="reversed", title_text="")
+    fig.update_xaxes(title_text="Rwp (lower is better)")
+    height = max(260, 28 * len(ranked) + 80)
+    return _apply_layout(fig, height=height, title="Rwp ranking")
+
+
+def _medal(rank: int) -> str:
+    return {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"#{rank}")
 
 
 def get_job_state() -> GenerationJobState:
@@ -456,21 +539,52 @@ def make_signal_figure(df_processed: pd.DataFrame) -> go.Figure:
     return _apply_layout(fig, height=360)
 
 
-@st.cache_data(show_spinner=False, max_entries=512)
-def _compute_pxrd_cached(cif_str: str, q_min: float, q_max: float) -> Optional[Dict[str, Any]]:
+@st.cache_data(show_spinner=False, max_entries=1024)
+def _compute_pxrd_cached(cif_str: str, q_min: float, q_max: float, fwhm: float, eta: float) -> Optional[Dict[str, Any]]:
     try:
         return generate_continuous_xrd_from_cif(
             cif_str,
             qmin=q_min, qmax=q_max, qstep=0.01,
-            fwhm_range=(0.05, 0.05), eta_range=(0.5, 0.5),
+            fwhm_range=(fwhm, fwhm), eta_range=(eta, eta),
             noise_range=None, intensity_scale_range=None, mask_prob=None,
         )
     except Exception:
         return None
 
 
+def scherrer_fwhm_q(size_nm: float, shape_factor: float = 0.9) -> float:
+    """Scherrer FWHM in Q (Å⁻¹). β_Q = 2π K / L, with L in Å (L_Å = 10·L_nm)."""
+    size_nm = max(float(size_nm), 1e-3)
+    return float(2.0 * np.pi * shape_factor / (10.0 * size_nm))
+
+
+def effective_fwhm_q(size_nm: float, instr_fwhm: float = 0.0) -> float:
+    return scherrer_fwhm_q(size_nm) + max(float(instr_fwhm), 0.0)
+
+
+@st.cache_data(show_spinner=False, max_entries=2048)
+def _compute_calc_on_grid(cif_str: str, exp_q_tuple: tuple, q_min: float, q_max: float, fwhm: float, eta: float) -> Optional[np.ndarray]:
+    pxrd = _compute_pxrd_cached(cif_str, q_min, q_max, fwhm, eta)
+    if pxrd is None:
+        return None
+    exp_q = np.asarray(exp_q_tuple, dtype=float)
+    return np.interp(exp_q, pxrd["q"], pxrd["iq"], left=0.0, right=0.0)
+
+
+def compute_rwp(exp_i: np.ndarray, calc_i: np.ndarray) -> "tuple[float, float]":
+    exp_i = np.asarray(exp_i, dtype=float)
+    calc_i = np.asarray(calc_i, dtype=float)
+    w = 1.0 / np.clip(exp_i, 1e-4, None)  # Rietveld-style Poisson weights on normalized data
+    denom_scale = float(np.sum(w * calc_i * calc_i))
+    scale = float(np.sum(w * exp_i * calc_i) / max(denom_scale, 1e-12))
+    diff = exp_i - scale * calc_i
+    num = float(np.sum(w * diff * diff))
+    den = float(np.sum(w * exp_i * exp_i))
+    return float(np.sqrt(num / max(den, 1e-12))), scale
+
+
 def make_generation_figure(exp_q, exp_i, cif_str: str, q_min: float, q_max: float) -> Optional[go.Figure]:
-    pxrd = _compute_pxrd_cached(cif_str, float(q_min), float(q_max))
+    pxrd = _compute_pxrd_cached(cif_str, float(q_min), float(q_max), 0.05, 0.5)
     if pxrd is None:
         return None
 
@@ -982,6 +1096,145 @@ def render_job_status(job: GenerationJobState, exp_q, exp_i, q_min: float, q_max
                         st.plotly_chart(overlay_fig, width="stretch")
         else:
             st.caption("No valid structures to overlay yet.")
+
+    # Rwp ranking
+    st.markdown("##### Rank by fit (Rwp)")
+    all_structs: List[Dict[str, Any]] = []
+    for g in groups_snapshot:
+        for i, gen in enumerate(g["generations"], start=1):
+            all_structs.append({
+                "run": g["name"], "run_id": g["id"], "idx": i, "gen": gen,
+            })
+    if not all_structs:
+        st.caption("Nothing to rank yet.")
+        return
+
+    rank_toggle = st.toggle("🏆 Enable Rwp ranking", value=False, key="rank_toggle")
+    if not rank_toggle:
+        st.caption("Compute Rwp against the experimental pattern using a pseudo-Voigt profile with user-controlled crystallite size and mixing.")
+        return
+
+    ctl = st.columns([1, 1, 1, 1])
+    size_nm = ctl[0].number_input(
+        "Crystallite size (nm)", min_value=0.5, max_value=1000.0,
+        value=float(st.session_state.get("fit_size_nm", 50.0)),
+        step=1.0, key="fit_size_nm",
+        help="Scherrer: FWHM_Q = 2πK/L (K=0.9). Smaller size = broader peaks.",
+    )
+    instr_fwhm = ctl[1].number_input(
+        "Instrumental FWHM (Å⁻¹)", min_value=0.0, max_value=1.0,
+        value=float(st.session_state.get("fit_instr_fwhm", 0.0)),
+        step=0.005, format="%.3f", key="fit_instr_fwhm",
+        help="Added to the Scherrer FWHM. 0.0 = pure size broadening.",
+    )
+    eta = ctl[2].slider(
+        "Pseudo-Voigt η", min_value=0.0, max_value=1.0,
+        value=float(st.session_state.get("fit_eta", 0.5)),
+        step=0.05, key="fit_eta",
+        help="0 = Gaussian, 1 = Lorentzian.",
+    )
+    top_n = ctl[3].number_input(
+        "Show top N", min_value=1, max_value=max(1, len(all_structs)),
+        value=min(10, len(all_structs)), step=1, key="fit_top_n",
+    )
+
+    fwhm_eff = effective_fwhm_q(size_nm, instr_fwhm)
+    st.caption(
+        f"Effective FWHM_Q ≈ **{fwhm_eff:.4f} Å⁻¹**  ·  "
+        f"Scherrer contribution {scherrer_fwhm_q(size_nm):.4f}  +  instrumental {instr_fwhm:.4f}"
+    )
+
+    # Compute ranks
+    exp_q_arr = np.asarray(exp_q, dtype=float)
+    exp_i_arr = np.asarray(exp_i, dtype=float)
+    exp_mask = (exp_q_arr >= q_min) & (exp_q_arr <= q_max)
+    exp_q_t = tuple(exp_q_arr[exp_mask].tolist())  # cache key
+    exp_i_fit = exp_i_arr[exp_mask]
+
+    with st.spinner("Computing Rwp…"):
+        ranked_raw = []
+        for entry in all_structs:
+            calc = _compute_calc_on_grid(
+                entry["gen"].get("cif_str", ""),
+                exp_q_t, float(q_min), float(q_max),
+                float(fwhm_eff), float(eta),
+            )
+            if calc is None or not np.isfinite(calc).all() or calc.max() <= 0:
+                continue
+            rwp, scale = compute_rwp(exp_i_fit, calc)
+            if not np.isfinite(rwp):
+                continue
+            summary = entry["gen"].get("summary", {})
+            formula = summary.get("formula") or "?"
+            spg = summary.get("spacegroup") or "—"
+            ranked_raw.append({
+                **entry,
+                "rwp": rwp, "scale": scale, "calc": calc,
+                "label": f"{entry['run']} #{entry['idx']} · {formula} · {spg}",
+                "formula": formula, "spacegroup": spg,
+            })
+
+    if not ranked_raw:
+        st.warning("Could not compute Rwp for any structure.")
+        return
+
+    ranked_raw.sort(key=lambda r: r["rwp"])
+    for i, r in enumerate(ranked_raw, start=1):
+        r["rank"] = i
+    ranked = ranked_raw[: int(top_n)]
+
+    rank_cols = st.columns([1.1, 1])
+    with rank_cols[0]:
+        st.plotly_chart(make_rwp_ranking_figure(ranked), width="stretch")
+    with rank_cols[1]:
+        # Leaderboard with medals
+        leaderboard_html = ["<div style='font-family:Inter, system-ui, sans-serif'>"]
+        for r in ranked[:10]:
+            badge_color = {1: "#f59e0b", 2: "#94a3b8", 3: "#b45309"}.get(r["rank"], ACCENT)
+            leaderboard_html.append(
+                f"<div style='display:flex;align-items:center;gap:10px;padding:8px 10px;"
+                f"border:1px solid #e2e8f0;border-radius:8px;margin-bottom:6px;background:#fff'>"
+                f"<div style='font-size:1.1rem;min-width:30px;color:{badge_color};font-weight:700'>{_medal(r['rank'])}</div>"
+                f"<div style='flex:1'>"
+                f"<div style='font-weight:600;font-size:0.9rem;color:#0f172a'>{r['formula']}</div>"
+                f"<div style='color:{MUTED};font-size:0.78rem'>{r['run']} #{r['idx']} · {r['spacegroup']}</div>"
+                f"</div>"
+                f"<div style='font-weight:700;color:{badge_color};font-variant-numeric:tabular-nums'>{r['rwp']:.3f}</div>"
+                f"</div>"
+            )
+        leaderboard_html.append("</div>")
+        st.markdown("".join(leaderboard_html), unsafe_allow_html=True)
+
+    # Rietveld plot for a chosen rank
+    pick_labels = [f"{_medal(r['rank'])}  Rwp {r['rwp']:.3f}  ·  {r['label']}" for r in ranked]
+    pick_key = "fit_pick_label"
+    if pick_key not in st.session_state or st.session_state[pick_key] not in pick_labels:
+        st.session_state[pick_key] = pick_labels[0]
+    chosen_label = st.selectbox("Inspect structure", pick_labels, key=pick_key)
+    chosen = ranked[pick_labels.index(chosen_label)]
+
+    rietveld_fig = make_rietveld_figure(
+        exp_q_arr[exp_mask], exp_i_fit,
+        chosen["calc"], chosen["scale"],
+        float(q_min), float(q_max),
+        chosen["label"], chosen["rwp"],
+    )
+    st.plotly_chart(rietveld_fig, width="stretch")
+
+    # Export ranking as CSV
+    rank_rows = pd.DataFrame([
+        {
+            "rank": r["rank"], "rwp": r["rwp"], "run": r["run"],
+            "index_in_run": r["idx"], "formula": r["formula"],
+            "spacegroup": r["spacegroup"], "scale": r["scale"],
+        } for r in ranked_raw
+    ])
+    st.download_button(
+        "⬇ Ranking (.csv)",
+        data=rank_rows.to_csv(index=False).encode("utf-8"),
+        file_name=f"rwp_ranking_size{size_nm:.0f}nm_eta{eta:.2f}.csv",
+        mime="text/csv", key="dl_rwp_csv",
+    )
 
 
 # ---------------------------------------------------------------------------
