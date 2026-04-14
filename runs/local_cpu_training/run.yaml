@@ -1,0 +1,57 @@
+workflow: train
+created_at_utc: '2026-04-05T15:53:45.035244+00:00'
+config:
+  out_dir: /home/frederik/phd/papers/deCIFer-tmlr/deCIFer/runs/local_cpu_training
+  eval_interval: 10
+  log_interval: 1
+  eval_iters_train: 2
+  eval_iters_val: 2
+  eval_only: false
+  always_save_checkpoint: false
+  init_from: resume
+  dataset: /home/frederik/phd/papers/deCIFer-tmlr/deCIFer/data/perov_5/full
+  gradient_accumulation_steps: 10
+  batch_size: 12
+  cond_size: 1000
+  accumulative_pbar: false
+  num_workers_dataloader: 0
+  block_size: 512
+  vocab_size: 372
+  n_layer: 2
+  n_head: 2
+  n_embd: 128
+  dropout: 0.0
+  bias: false
+  boundary_masking: true
+  condition: true
+  condition_embedder_hidden_layers:
+  - 512
+  qmin: 0.0
+  qmax: 10.0
+  qstep: 0.01
+  wavelength: CuKa
+  fwhm_range_min: 0.01
+  fwhm_range_max: 0.05
+  eta_range_min: 0.5
+  eta_range_max: 0.5
+  noise_range_min: 0.0
+  noise_range_max: 0.01
+  intensity_scale_range_min: 1.0
+  intensity_scale_range_max: 1.0
+  mask_prob: 0.0
+  learning_rate: 0.001
+  max_iters: 1000
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.99
+  grad_clip: 1.0
+  decay_lr: true
+  warmup_iters: 10
+  lr_decay_iters: 100
+  min_lr: 1.0e-05
+  device: cpu
+  dtype: float32
+  compile: false
+  validate: true
+  seed: 1337
+  early_stopping_patience: 20

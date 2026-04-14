@@ -602,7 +602,7 @@ def serialize(root, num_workers, seed, ignore_data_split=False):
             cif_names, strat_keys, test_size = test_size, stratify = strat_keys, random_state = seed,
         )
         cif_names_train, cif_names_val = train_test_split(
-            cif_names_temp, test_size = test_size, stratify = strat_keys_temp, random_state = seed,
+            cif_names_temp, test_size = val_size, stratify = strat_keys_temp, random_state = seed,
         )
     
         for cif_names, split_name in zip([cif_names_train, cif_names_val, cif_names_test], ['train', 'val', 'test']):

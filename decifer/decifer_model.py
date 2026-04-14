@@ -7,9 +7,9 @@ CrystaLLM: https://github.com/lantunes/CrystaLLM/blob/main/crystallm/_model.py
 """
 
 import math
+import sys
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Union
-from h5py._hl.files import sys
 from tqdm.auto import tqdm
 
 import torch
@@ -94,16 +94,17 @@ class CausalSelfAttention(nn.Module):
 
         #causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash and not return_attn:
+            dropout_p = self.dropout if self.training else 0.0
             if attention_bias is not None:
                 # Expand attention_bias to match the number of heads
                 attention_bias = attention_bias.unsqueeze(1) # Shape (B, 1, T, T)
                 attention_bias = attention_bias.expand(B, self.n_head, T, T)  # Expand to (B, n_head, T, T)
                 y = torch.nn.functional.scaled_dot_product_attention(
-                    q, k, v, attn_mask=attention_bias, dropout_p=self.dropout
+                    q, k, v, attn_mask=attention_bias, dropout_p=dropout_p
                 )
             else:
                 y = torch.nn.functional.scaled_dot_product_attention(
-                    q, k, v, attn_mask=None, dropout_p=self.dropout, is_causal=True,
+                    q, k, v, attn_mask=None, dropout_p=dropout_p, is_causal=True,
                 )
         else:
             # manual implementation of attention
@@ -597,7 +598,7 @@ class Decifer(nn.Module):
         prev_id = None
             
         for id in idx[0]:
-            token = tokenizer.id_to_token[id.item()]
+            token = self.tokenizer.id_to_token[id.item()]
             for char in token:
                 sys.stdout.write(char)
                 sys.stdout.flush()
@@ -624,7 +625,7 @@ class Decifer(nn.Module):
                 break
 
             # Decode and print
-            token_next = tokenizer.id_to_token[idx_next[0].item()]
+            token_next = self.tokenizer.id_to_token[idx_next[0].item()]
             for char in token_next:
                 sys.stdout.write(char)
                 sys.stdout.flush()

@@ -1,0 +1,57 @@
+# Minimal CPU-friendly training config.
+# Update `dataset` to point at your prepared dataset root.
+# The training code will resolve:
+# - serialized/train.h5
+# - serialized/val.h5
+# - serialized/test.h5
+
+out_dir: "runs/local_cpu_training"
+dataset: "data/your_dataset_root"
+init_from: "scratch"
+
+device: "cpu"
+dtype: "float32"
+compile: false
+validate: true
+condition: true
+boundary_masking: true
+
+batch_size: 1
+gradient_accumulation_steps: 1
+num_workers_dataloader: 0
+block_size: 512
+
+n_layer: 2
+n_head: 2
+n_embd: 128
+dropout: 0.0
+
+eval_interval: 10
+eval_iters_train: 2
+eval_iters_val: 2
+log_interval: 1
+max_iters: 100
+learning_rate: 1.0e-3
+warmup_iters: 10
+lr_decay_iters: 100
+min_lr: 1.0e-5
+weight_decay: 0.1
+beta1: 0.9
+beta2: 0.99
+grad_clip: 1.0
+early_stopping_patience: 20
+
+qmin: 0.0
+qmax: 10.0
+qstep: 0.01
+fwhm_range_min: 0.01
+fwhm_range_max: 0.05
+noise_range_min: 0.0
+noise_range_max: 0.01
+eta_range_min: 0.5
+eta_range_max: 0.5
+intensity_scale_range_min: 1.0
+intensity_scale_range_max: 1.0
+mask_prob: 0.0
+
+seed: 1337

@@ -1,0 +1,30 @@
+workflow: evaluate
+created_at_utc: '2026-04-05T16:29:45.979274+00:00'
+config:
+  model_ckpt: /home/frederik/phd/papers/deCIFer-tmlr/deCIFer/runs/local_cpu_training_2/ckpt.pt
+  root: ./
+  num_workers: 1
+  dataset_path: /home/frederik/phd/papers/deCIFer-tmlr/deCIFer/data/perov_5/full
+  dataset_split: val
+  out_folder: /home/frederik/phd/papers/deCIFer-tmlr/deCIFer/runs/local_cpu_eval_2
+  debug_max: 8
+  debug: false
+  add_composition: true
+  add_spacegroup: false
+  max_new_tokens: 512
+  dataset_name: val-preview
+  model_name: local-cpu-2
+  num_reps: 1
+  override: true
+  condition: true
+  temperature: 1
+  top_k: null
+  add_noise: null
+  add_broadening: null
+  default_fwhm: 0.05
+  clean_fwhm: 0.05
+  qmin: 0.0
+  qmax: 10.0
+  qstep: 0.01
+  wavelength: CuKa
+  eta: 0.5

@@ -1,0 +1,31 @@
+# Validation-preview evaluation config matched to the local CPU training config.
+# Update `dataset_path` to the same dataset root used for training.
+# By default this evaluates the validation split and writes a small local preview run.
+
+model_ckpt: "runs/local_cpu_training/ckpt.pt"
+dataset_path: "data/your_dataset_root"
+dataset_split: "val"
+
+out_folder: "runs/local_cpu_eval"
+dataset_name: "val-preview"
+model_name: "local-cpu"
+
+num_workers: 1
+debug_max: 8
+num_reps: 1
+
+add_composition: true
+add_spacegroup: false
+condition: true
+max_new_tokens: 512
+temperature: 1.0
+top_k: null
+override: true
+
+default_fwhm: 0.05
+clean_fwhm: 0.05
+qmin: 0.0
+qmax: 10.0
+qstep: 0.01
+wavelength: "CuKa"
+eta: 0.5
