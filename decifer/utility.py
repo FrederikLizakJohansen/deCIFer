@@ -174,6 +174,41 @@ def discrete_to_continuous_xrd(
 
     return {'q': q_cont, 'iq': iq_cont}
 
+def pxrd_from_cif(
+    cif_string,
+    structure_name: str = 'null',
+    wavelength: str = 'CuKa',
+    qmin: float = 0.0,
+    qmax: float = 10.0,
+    qstep: float = 0.01,
+    base_fwhm: float = 0.05,
+    eta: float = 0.5,
+    noise: Optional[float] = None,
+    random_mask_prob: Optional[float] = None,
+    debug: bool = False,
+    **_ignored,
+):
+    """Back-compat shim for the old ``pxrd_from_cif`` API.
+
+    Delegates to ``generate_continuous_xrd_from_cif`` using single-valued
+    ranges. Legacy-only kwargs (particle_size, peak_asymmetry, chebychev_*,
+    preferred_orientation_range, phase_scales, q_shift, q_scale, mask_ranges,
+    peak_redaction_prob) are accepted and ignored.
+    """
+    return generate_continuous_xrd_from_cif(
+        cif_string,
+        structure_name=structure_name,
+        wavelength=wavelength,
+        qmin=qmin, qmax=qmax, qstep=qstep,
+        fwhm_range=(base_fwhm, base_fwhm),
+        eta_range=(eta, eta),
+        noise_range=None if noise is None else (noise, noise),
+        intensity_scale_range=None,
+        mask_prob=random_mask_prob,
+        debug=debug,
+    )
+
+
 def generate_continuous_xrd_from_cif(
     cif_string,
     structure_name: str = 'null',
