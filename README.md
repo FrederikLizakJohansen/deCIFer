@@ -477,10 +477,10 @@ All figures from the paper are reproduced by standalone Python scripts (no noteb
 To regenerate the complete figure set in one go:
 
 ```bash
-python revision-final-figures/generate_all_updated_figures.py
+python figure-scripts/generate_all_updated_figures.py
 ```
 
-This writes all figures (PDF/PNG) to `revision-final-figures/generated/`, organized as:
+This writes all figures (PDF/PNG) to `figure-scripts/generated/`, organized as:
 - `generated/experimental/` — experimental-results figures: the main selected-conditions figure and the per-material appendix figures.
 - `generated/analysis/` — synthetic-artefact ablation figures, robustness summaries with confidence intervals, and the FeO₂ polymorph overview.
 - `generated/ranking-sensitivity/` — R_wp ranking-sensitivity figures.
@@ -491,11 +491,11 @@ Individual figures can also be generated directly from the underlying scripts:
 |---|---|
 | `experimental_appendix_figures.py` | Per-material experimental appendix figures (extended conditioning settings) |
 | `selected_conditions_figure.py` | Main experimental figure (PXRD only / + composition / + space group) |
-| `bin/experimental_results_figure.py` | Combined experimental-results figure |
-| `bin/ablation_figure_exports.py` | Synthetic-artefact ablation figures (scaling, asymmetry, broadening, noise, background, masking, ...) |
-| `bin/robustness_figure_exports.py` | Robustness summaries (ΔMR and ΔRD with bootstrap confidence intervals) |
-| `bin/polymorph_figure_exports.py` | FeO₂ polymorph PXRD and structure overview |
-| `bin/rwp_ranking_sensitivity.py` | R_wp ranking-sensitivity analysis and plots |
+| `experimental_results_figure.py` | Combined experimental-results figure |
+| `ablation_figure_exports.py` | Synthetic-artefact ablation figures (scaling, asymmetry, broadening, noise, background, masking, ...) |
+| `robustness_figure_exports.py` | Robustness summaries (ΔMR and ΔRD with bootstrap confidence intervals) |
+| `polymorph_figure_exports.py` | FeO₂ polymorph PXRD and structure overview |
+| `rwp_ranking_sensitivity.py` | R_wp ranking-sensitivity analysis and plots |
 
 Each script supports `--help` for available options (e.g., selecting individual figures or changing the output directory).
 
