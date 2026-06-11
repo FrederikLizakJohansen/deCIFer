@@ -54,6 +54,18 @@ def main() -> None:
     run(
         [
             python,
+            "revision-final-figures/selected-conditions-v2/selected_conditions_v2.py",
+            "--output",
+            str(
+                OUTPUT_ROOT
+                / "experimental"
+                / "selected_conditions_v2.pdf"
+            ),
+        ]
+    )
+    run(
+        [
+            python,
             "bin/experimental_results_figure.py",
             "--output-dir",
             str(OUTPUT_ROOT / "experimental"),
