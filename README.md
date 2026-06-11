@@ -15,28 +15,40 @@ The zip contains `ckpt.pt` (≈635 MB uncompressed).
 4. [Evaluation Pipeline](#evaluation-pipeline)
 5. [CIF Generation Consistency Experiment](#cif-generation-consistency-experiment)
 6. [Artefact Robustness & Experimental Data (TRW-CSP)](#artefact-robustness--experimental-data-trw-csp)
-7. [License](#license)
+7. [Troubleshooting](#troubleshooting)
+8. [License](#license)
 
 ## Setup
 We recommend using **Python 3.9**, as deCIFer was developed and tested with this version. Other versions may work but have not been verified.
 
 1. **Clone the repository**:
 ```bash
-git clone https://github.com/XXXX/deCIFer.git
+git clone https://github.com/FrederikLizakJohansen/deCIFer.git
 cd deCIFer
 ```
 
-2. **Install deCIFer using setup.py.** We recommend an isolated environment (e.g., with Conda or venv):
+2. **Create and activate an isolated environment.** To avoid conflicts with local installations, we strongly recommend installing into a fresh virtual environment, e.g. with Conda:
+```bash
+conda create -n decifer python=3.9
+conda activate decifer
+```
+or with venv:
+```bash
+python3.9 -m venv .venv
+source .venv/bin/activate
+```
+
+3. **Install deCIFer using setup.py**:
 ```bash
 pip install -e .
 ```
 
-3. **Ensure that you have PyTorch installed:**
+4. **Ensure that you have PyTorch installed:**
 Follow the instructions on the official PyTorch website to install the appropriate version for your system: PyTorch Installation Guide. (https://pytorch.org/get-started/locally/)
 
-4. **Install other dependencies**:
+5. **Install other dependencies**:
 ```bash
-pip install numpy pandas matplotlib seaborn pyYAML tqdm omegaconf h5py pymatgen periodictable scikit-learn notebook
+pip install numpy pandas matplotlib seaborn pyYAML tqdm omegaconf h5py pymatgen periodictable scikit-learn
 ```
 
 ## Data Preparation
@@ -51,7 +63,26 @@ python bin/prepare_dataset.py --data-dir data/noma/ --name noma-1k --debug-max 1
   - `--data-dir <path>`: Path to the directory containing raw CIF and PXRD data.
   - `--name <str>`: Identifier for the dataset (used to create an organized structure).
   - `--debug-max <int>`: Limits processing to the first `N` samples (useful for debugging).
-  - `--raw-from-gzip`: If raw CIFs are stored in a `.gz` archive, extract them before processing. (This is the case for the NOMA dataset, depeding on how the data is downloaded)
+  - `--raw-from-gzip`: Read the raw CIFs from a single gzipped pickle archive instead of individual `.cif` files. (This is the case for the NOMA dataset, depending on how the data is downloaded.) See [Expected input layout](#expected-input-layout) below.
+
+### Expected input layout
+
+`prepare_dataset.py` supports two input formats for the directory passed via `--data-dir`:
+
+- **Without `--raw-from-gzip`** (default): individual CIF files are expected in a `raw/` subdirectory:
+```bash
+data/noma/
+├── raw/
+│   ├── structure_0001.cif
+│   ├── structure_0002.cif
+│   └── ...
+```
+- **With `--raw-from-gzip`**: exactly **one** `*.pkl.gz` archive (a gzipped pickle containing the collection of raw CIFs) is expected directly in the data directory:
+```bash
+data/noma/
+├── noma.pkl.gz
+```
+If more than one `*.pkl.gz` file is present in the directory, the script stops with `AssertionError: from_gzip flag is raised, but more than one gzip file found in directory`. In that case, keep only the archive you want to process in the directory (or move the others elsewhere), or extract the CIFs into `raw/` and run without `--raw-from-gzip`.
 
 - **Processing steps**:
   - `--preprocess`: Parses and cleans CIF files.
@@ -294,7 +325,7 @@ Each generated CIF is analyzed for structural and diffraction consistency. The f
 
 ## Artefact Robustness & Experimental Data (TRW-CSP)
 
-This section covers the scripts and notebook used in a follow-up paper that applies deCIFer to real-world synchrotron PXRD data and tests its robustness to common measurement artefacts (noise, peak broadening, Q-shift, multi-phase contributions, etc.).
+This section covers the scripts used in a follow-up paper that applies deCIFer to real-world synchrotron PXRD data and tests its robustness to common measurement artefacts (noise, peak broadening, Q-shift, multi-phase contributions, etc.).
 
 ### Experimental Data
 
@@ -302,7 +333,7 @@ The experimental PXRD data and precomputed result pickles used in the paper can 
 
 ➡️ **[Experimental data & results (.zip)](https://www.erda.dk/archives/808f676c6b43aefbe0f423ab3df30312/published-archive.html)**
 
-The ZIP contains `.xy`/`.xye` scan files (two-column or three-column: angle/Q, intensity, optional error) and a `pkl-files/` folder of precomputed pickle outputs required by the figure notebook.
+The ZIP contains `.xy`/`.xye` scan files (two-column or three-column: angle/Q, intensity, optional error) and a `pkl-files/` folder of precomputed pickle outputs required by the figure scripts.
 
 ---
 
@@ -441,18 +472,42 @@ pipeline.run_experiment_protocol(
 
 ### Generating Figures
 
-The notebook `gen-figures-TRW-CSP-PXRD.ipynb` reproduces all figures from the paper. It expects precomputed pickle files in a `pkl-files/` directory; these are included in the shared data download above.
+All figures from the paper are reproduced by standalone Python scripts (no notebook required). The scripts expect the precomputed pickle files in a `pkl-files/` directory; these are included in the shared data download above.
+
+To regenerate the complete figure set in one go:
 
 ```bash
-jupyter notebook gen-figures-TRW-CSP-PXRD.ipynb
+python revision-final-figures/generate_all_updated_figures.py
 ```
 
-The notebook is organized into sections mirroring the paper:
-- **Ablation / artefact tests** — loads ablation pickle files and plots robustness curves and structure examples.
-- **Robustness analysis** — sweeps over distortion parameters across crystal systems (cubic, hexagonal, trigonal FeO₂ polymorphs).
-- **Experimental results** — visualizes deCIFer predictions against real CeO₂ synchrotron data, including PXRD overlays and unit cell renderings.
+This writes all figures (PDF/PNG) to `revision-final-figures/generated/`, organized as:
+- `generated/experimental/` — experimental-results figures: the main selected-conditions figure and the per-material appendix figures.
+- `generated/analysis/` — synthetic-artefact ablation figures, robustness summaries with confidence intervals, and the FeO₂ polymorph overview.
+- `generated/ranking-sensitivity/` — R_wp ranking-sensitivity figures.
+
+Individual figures can also be generated directly from the underlying scripts:
+
+| Script | Output |
+|---|---|
+| `experimental_appendix_figures.py` | Per-material experimental appendix figures (extended conditioning settings) |
+| `selected_conditions_figure.py` | Main experimental figure (PXRD only / + composition / + space group) |
+| `bin/experimental_results_figure.py` | Combined experimental-results figure |
+| `bin/ablation_figure_exports.py` | Synthetic-artefact ablation figures (scaling, asymmetry, broadening, noise, background, masking, ...) |
+| `bin/robustness_figure_exports.py` | Robustness summaries (ΔMR and ΔRD with bootstrap confidence intervals) |
+| `bin/polymorph_figure_exports.py` | FeO₂ polymorph PXRD and structure overview |
+| `bin/rwp_ranking_sensitivity.py` | R_wp ranking-sensitivity analysis and plots |
+
+Each script supports `--help` for available options (e.g., selecting individual figures or changing the output directory).
 
 ---
+
+## Troubleshooting
+
+- **`AssertionError: from_gzip flag is raised, but more than one gzip file found in directory`** — `--raw-from-gzip` expects exactly one `*.pkl.gz` archive in the directory passed via `--data-dir`. Remove or relocate any additional `.pkl.gz` files, or extract the CIFs into a `raw/` subdirectory and run without `--raw-from-gzip`. See [Expected input layout](#expected-input-layout).
+- **`Cannot locate any files in <dir>`** — without `--raw-from-gzip`, the script looks for `*.cif` files inside a `raw/` subdirectory of `--data-dir`, not in the directory itself.
+- **`ModuleNotFoundError` / import errors** — make sure the environment is activated and that both `pip install -e .` (step 3) and the additional dependencies (step 5) were installed in that same environment. deCIFer was developed and tested with Python 3.9.
+- **PyTorch / CUDA errors** — install the PyTorch build matching your CUDA version from the [official selector](https://pytorch.org/get-started/locally/). The CPU-only build works for inference with the pretrained checkpoint, but training is impractical without a GPU.
+- **Out-of-memory during generation** — reduce `--batch_size` (or `batch_size` in the YAML config) and/or `--max-new-tokens`.
 
 ## License
 deCIFer is released under the **MIT License**.
