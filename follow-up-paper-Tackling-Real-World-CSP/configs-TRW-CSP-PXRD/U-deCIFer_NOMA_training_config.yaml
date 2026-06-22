@@ -1,0 +1,43 @@
+# CONFIG YAML
+
+out_dir: 'U-deCIFer_model' # output directory for model checkpoint
+eval_interval: 250  # how often to evaluate against the validation set
+eval_iters_train: 200 # how many iterations for evaluating training loss
+eval_iters_val: 200 # how many iterations for evaluating validation loss
+log_interval: 1  # how often to print to the console (1 = every iteration)
+init_from: 'scratch' # intialise from ["scratch", "resume"]
+
+device: 'cuda' # device
+dtype: 'float16' # device dtype
+
+always_save_checkpoint: True # always save checkpoint
+
+validate: True # validate with a validation set
+
+dataset: 'data/noma/full' # path to dataset, can be to subset or full dataset
+batch_size: 32 # batch size
+block_size: 3076 # context window
+
+n_layer: 8 # n_layers
+n_head: 8 # n_head
+n_embd: 512 # n_embed
+dropout: 0.0 # dropout
+
+learning_rate: 1e-3 # learning rate (AdamW)
+gradient_accumulation_steps: 40  # used to simulate larger batch sizes
+max_iters: 50_000 # max number of epochs
+lr_decay_iters: 50_000 # learning reate decay
+min_lr: 1e-6 # min learning rate
+beta2: 0.99 # beta2
+
+warmup_iters: 100 # warmup iterations
+
+early_stopping_patience: 100 # early stopping patience (epochs)
+
+fwhm_range_min: 0.001 # min. for the FWHM range
+fwhm_range_max: 0.10 # max. for the FWHM range
+noise_range_min: 0.001 # min. for the uniform sampling of std. for additive noise
+noise_range_max: 0.05 # max. for the uniform sampling of std. for additive noise
+
+condition: False # Disable conditioning (U-deCIFer)
+boundary_masking: True # Enable boundary masking, to avoid cross contamination between CIFs.
