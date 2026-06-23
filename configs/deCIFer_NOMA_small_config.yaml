@@ -1,0 +1,44 @@
+# Small deCIFer config for testing — reduced model size and shorter training run
+# Not intended for research use; use deCIFer_NOMA_training_config.yaml for full training
+
+out_dir: 'deCIFer_model_small'
+eval_interval: 100
+eval_iters_train: 50
+eval_iters_val: 50
+log_interval: 1
+init_from: 'scratch'
+
+device: 'cuda'
+dtype: 'float16'
+
+always_save_checkpoint: True
+
+validate: True
+
+dataset: 'data/noma'
+batch_size: 8
+block_size: 3076
+
+n_layer: 4
+n_head: 4
+n_embd: 128
+dropout: 0.0
+
+learning_rate: 1e-3
+gradient_accumulation_steps: 10
+max_iters: 5_000
+lr_decay_iters: 5_000
+min_lr: 1e-6
+beta2: 0.99
+
+warmup_iters: 50
+
+early_stopping_patience: 50
+
+fwhm_range_min: 0.001
+fwhm_range_max: 0.10
+noise_range_min: 0.001
+noise_range_max: 0.05
+
+condition: True
+boundary_masking: True
