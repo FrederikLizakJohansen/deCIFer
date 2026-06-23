@@ -85,7 +85,7 @@ def main() -> None:
             "--plot-style",
             "paper",
             "--input-dir",
-            str(REPO_ROOT / "final-figures" / "revision" / "ranking-sensitivity-paper-fe-tau"),
+            str(REPO_ROOT / "TRW-CSP-PXRD-data" / "ranking-sensitivity"),
             "--output-dir",
             str(OUTPUT_ROOT / "ranking-sensitivity"),
         ]

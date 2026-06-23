@@ -81,20 +81,24 @@ TRW-CSP-PXRD-data/
 │   ├── crystalline_CeO2.xye
 │   ├── nanoparticle_CeO2.xy
 │   └── Fe2O3.xy
-└── pickles/                 # Precomputed result pickles
-    ├── crystalline_CeO2.pkl     # experimental protocol results, CeO2
-    ├── crystalline_Si.pkl       # experimental protocol results, Si
-    ├── crystalline_Fe2O3.pkl    # experimental protocol results, Fe2O3
-    ├── particles_CeO2.pkl       # experimental protocol results, nanoparticle CeO2
-    ├── particles_CeO2_ID5.pkl   # alternative nanoparticle CeO2 run
-    ├── ablation_mainfig_cubic_large.pkl          # deCIFer cubic ablation (main text)
-    ├── ablation_mainfig_cubic_large_nocond.pkl   # U-deCIFer cubic ablation (main text)
-    ├── ablation_mainfig_hexagonal_large_FeO.pkl
-    ├── ablation_mainfig_hexagonal_large_nocond_FeO.pkl
-    ├── ablation_mainfig_trigonal_large_FeO.pkl
-    ├── ablation_mainfig_trigonal_large_nocond_FeO.pkl
-    ├── ablation_appendix_*.pkl  # extended appendix ablation runs
-    └── ...
+├── pickles/                 # Precomputed result pickles
+│   ├── crystalline_CeO2.pkl     # experimental protocol results, CeO2
+│   ├── crystalline_Si.pkl       # experimental protocol results, Si
+│   ├── crystalline_Fe2O3.pkl    # experimental protocol results, Fe2O3
+│   ├── particles_CeO2.pkl       # experimental protocol results, nanoparticle CeO2
+│   ├── particles_CeO2_ID5.pkl   # alternative nanoparticle CeO2 run
+│   ├── ablation_mainfig_cubic_large.pkl          # deCIFer cubic ablation (main text)
+│   ├── ablation_mainfig_cubic_large_nocond.pkl   # U-deCIFer cubic ablation (main text)
+│   ├── ablation_mainfig_hexagonal_large_FeO.pkl
+│   ├── ablation_mainfig_hexagonal_large_nocond_FeO.pkl
+│   ├── ablation_mainfig_trigonal_large_FeO.pkl
+│   ├── ablation_mainfig_trigonal_large_nocond_FeO.pkl
+│   ├── ablation_appendix_*.pkl  # extended appendix ablation runs
+│   └── ...
+└── ranking-sensitivity/     # Precomputed R_wp ranking-sensitivity scores
+    ├── ranking_sensitivity_scores.csv
+    ├── ranking_sensitivity_summary.csv
+    └── ranking_sensitivity_case_metrics.csv
 ```
 
 `pickles/` contains the final results from all experiments reported in the paper. It does not contain the NOMA dataset. Reproducing figures only requires these pickles. Running new ablations requires the NOMA dataset (see below).
