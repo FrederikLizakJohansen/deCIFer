@@ -76,14 +76,14 @@ No further preparation is needed. Skip to [Training](#training) or [Evaluation](
 
 **Option B -- raw CIFs:**
 
-Download `noma_cifs_raw.pkl.gz` and place it at `data/noma/noma_cifs_raw.pkl.gz`. Then follow the preparation steps below. When running `prepare_dataset.py`, pass `--name noma` so the output lands at `data/noma/serialized/`.
+Download `noma_cifs_raw.pkl.gz` and place it at `data/noma_cifs_raw.pkl.gz`. Then follow the preparation steps below. Run `prepare_dataset.py` with `--data-dir data/ --name noma` so the output lands at `data/noma/serialized/`.
 
 ### Preparing from raw CIFs
 
 Before training or evaluation, the dataset must be preprocessed into a structured format that deCIFer can use. This includes **parsing CIF files**, **computing XRD patterns**, **tokenizing CIFs**, and **serializing the processed data into HDF5 format**.
 To prepare a dataset, use the `prepare_dataset.py` script with the desired options. Here is an example:
 ```bash
-python bin/prepare_dataset.py --data-dir data/noma/ --name noma-1k --debug-max 1000 --all --raw-from-gzip
+python bin/prepare_dataset.py --data-dir data/ --name noma --all --raw-from-gzip
 ```
 ### Arguments:
 

@@ -171,11 +171,11 @@ No further preparation is needed. The ablation configs already point to `data/no
 
 **Option B -- raw CIFs:**
 
-Download `noma_cifs_raw.pkl.gz` from the [archive](https://www.erda.dk/archives/b7342461e7c932bd99e8273c6a49e97b/published-archive.html), place it at `data/noma/noma_cifs_raw.pkl.gz`, then run:
+Download `noma_cifs_raw.pkl.gz` from the [archive](https://www.erda.dk/archives/b7342461e7c932bd99e8273c6a49e97b/published-archive.html), place it at `data/noma_cifs_raw.pkl.gz`, then run:
 
 ```bash
 python bin/prepare_dataset.py \
-  --data-dir data/noma/ \
+  --data-dir data/ \
   --name noma \
   --all \
   --raw-from-gzip
