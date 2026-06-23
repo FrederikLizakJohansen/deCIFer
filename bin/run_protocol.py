@@ -24,12 +24,9 @@ def main(args):
     ]
     
     target_files = [
-        "scan-4907_mean.xy",
-        "scan-4911_mean.xy",
-        "scan-4912_mean.xy",
-        "scan-4919_mean.xy",
+        "nanoparticle_CeO2.xy",
     ]
-    background_file = "scan-4903_mean.xy"
+    background_file = None
 
     wavelength=None # Already in Q
     q_min_crop=1.5
