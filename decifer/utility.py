@@ -297,6 +297,36 @@ def generate_continuous_xrd_from_cif(
 
     return {'q': q_cont.numpy(), 'iq': iq_cont.numpy(), 'q_disc': q_disc.numpy(), 'iq_disc': iq_disc.numpy()}
 
+
+def pxrd_from_cif(
+    cif_string,
+    structure_name: str = 'null',
+    wavelength: str = 'CuKa',
+    qmin: float = 0.0,
+    qmax: float = 10.0,
+    qstep: float = 0.01,
+    base_fwhm: float = 0.05,
+    eta: float = 0.5,
+    noise: Optional[float] = None,
+    random_mask_prob: Optional[float] = None,
+    debug: bool = False,
+    **_ignored,
+):
+    """Wrapper around generate_continuous_xrd_from_cif with a simpler single-value API."""
+    return generate_continuous_xrd_from_cif(
+        cif_string,
+        structure_name=structure_name,
+        wavelength=wavelength,
+        qmin=qmin, qmax=qmax, qstep=qstep,
+        fwhm_range=(base_fwhm, base_fwhm),
+        eta_range=(eta, eta),
+        noise_range=None if noise is None else (noise, noise),
+        intensity_scale_range=None,
+        mask_prob=random_mask_prob,
+        debug=debug,
+    )
+
+
 def get_atomic_props_block(composition, oxi=False):
     noble_vdw_radii = {
         "He": 1.40,
