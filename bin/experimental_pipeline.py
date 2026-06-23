@@ -176,7 +176,7 @@ class DeciferPipeline:
 
         def _read_dir(directory: Path):
             for filepath in sorted(directory.rglob('*')):
-                if filepath.suffix not in ('.xy', '.xye'):
+                if not filepath.is_file() or filepath.suffix not in ('.xy', '.xye'):
                     continue
                 lines = filepath.read_text(encoding='utf-8').splitlines()
                 records = _parse_lines(lines)
@@ -190,7 +190,7 @@ class DeciferPipeline:
         else:
             try:
                 zf = zipfile.ZipFile(zip_path, 'r')
-            except OSError:
+            except (OSError, zipfile.BadZipFile):
                 _read_dir(p)
                 return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
             with zf as z:
