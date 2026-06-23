@@ -4,7 +4,48 @@
 
 This folder contains the scripts, configs, and notebooks for the follow-up paper that evaluates deCIFer on real-world synchrotron PXRD data and tests its robustness to common measurement artefacts.
 
-All scripts must be run from the **repo root**, not from inside this folder. See the main [README](../README.md) for setup and installation.
+All scripts must be run from the **repo root**, not from inside this folder.
+
+---
+
+## Setup
+
+We recommend Python 3.9. Other versions may work but have not been verified.
+
+**1. Clone the repository:**
+
+```bash
+git clone https://github.com/FrederikLizakJohansen/deCIFer.git
+cd deCIFer
+```
+
+**2. Create and activate a virtual environment:**
+
+```bash
+conda create -n decifer python=3.9
+conda activate decifer
+```
+
+or with venv:
+
+```bash
+python3.9 -m venv .venv
+source .venv/bin/activate
+```
+
+**3. Install PyTorch** for your system from [pytorch.org](https://pytorch.org/get-started/locally/). Example for CUDA 12.1:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+```
+
+**4. Install deCIFer and its dependencies:**
+
+```bash
+pip install -e .
+```
+
+This installs the `decifer` package in editable mode along with all required dependencies (numpy, pymatgen, h5py, etc.).
 
 ---
 
