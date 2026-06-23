@@ -14,7 +14,7 @@ always_save_checkpoint: True # always save checkpoint
 
 validate: True # validate with a validation set
 
-dataset: 'data/noma/full' # path to dataset, can be to subset or full dataset
+dataset: 'data/noma' # path to dataset directory (expects serialized/train.h5 etc. inside)
 batch_size: 32 # batch size
 block_size: 3076 # context window
 
