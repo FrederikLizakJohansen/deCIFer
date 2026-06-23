@@ -190,7 +190,7 @@ class DeciferPipeline:
         else:
             try:
                 zf = zipfile.ZipFile(zip_path, 'r')
-            except IsADirectoryError:
+            except OSError:
                 _read_dir(p)
                 return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
             with zf as z:
