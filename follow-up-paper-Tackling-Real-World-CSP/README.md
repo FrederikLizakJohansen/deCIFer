@@ -205,12 +205,20 @@ All configs use `batch_size: 10` for multi-GPU runs. Results are saved as pickle
 
 ### Running the experimental PXRD protocols
 
-`bin/run_protocol.py` runs deCIFer on the CeO2 nanoparticle scans from the paper under several conditioning protocols. The raw scans are in `TRW-CSP-PXRD-data/exp-data/`.
+`bin/run_protocol.py` runs deCIFer on the CeO2 nanoparticle scans from the paper under several conditioning protocols. The raw scans are in `TRW-CSP-PXRD-data/exp-data/`. The `--zip-path` argument accepts either a `.zip` file or a plain folder containing `.xy` / `.xye` files:
 
 ```bash
+# Using the extracted folder (after unzipping TRW-CSP-PXRD-data.zip)
 python bin/run_protocol.py \
   --model-path deCIFer_model/ckpt.pt \
   --zip-path TRW-CSP-PXRD-data/exp-data/ \
+  --n-trials 25 \
+  --suffix run1
+
+# Using the zip file directly
+python bin/run_protocol.py \
+  --model-path deCIFer_model/ckpt.pt \
+  --zip-path TRW-CSP-PXRD-data.zip \
   --n-trials 25 \
   --suffix run1
 ```

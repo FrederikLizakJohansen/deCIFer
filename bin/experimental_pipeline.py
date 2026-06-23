@@ -1,5 +1,6 @@
 import os
 import zipfile
+from pathlib import Path
 from typing import Optional, List, Tuple, Union, Dict, Any
 import pickle
 
@@ -151,46 +152,53 @@ class DeciferPipeline:
 
     def read_experimental_data(self, zip_path: str) -> pd.DataFrame:
         """
-        Reads and combines all .xy or .xye files in the ZIP archive,
-        maps them to their compositions, and returns a single DataFrame.
+        Reads and combines all .xy or .xye files from a ZIP archive or a directory.
 
         Parameters:
-            zip_path (str): Path to the ZIP file containing experimental data.
+            zip_path (str): Path to a ZIP file or a directory containing experimental data.
 
         Returns:
             pd.DataFrame: Combined experimental data.
         """
 
         frames: List[pd.DataFrame] = []
-        # Process each file in the ZIP archive
-        with zipfile.ZipFile(zip_path, 'r') as z:
-            for info in z.infolist():
-                if info.is_dir():
+        p = Path(zip_path)
+
+        def _parse_lines(lines):
+            records: List[Tuple[float, float, Optional[float]]] = []
+            for line in lines:
+                parts = line.split()
+                if len(parts) == 2:
+                    records.append((float(parts[0]), float(parts[1]), None))
+                elif len(parts) == 3:
+                    records.append((float(parts[0]), float(parts[1]), float(parts[2])))
+            return records
+
+        if p.is_dir():
+            for filepath in sorted(p.rglob('*')):
+                if filepath.suffix not in ('.xy', '.xye'):
                     continue
-                fn = info.filename
-                if not (fn.endswith('.xy') or fn.endswith('.xye')):
-                    continue
-
-                with z.open(fn) as f:
-                    lines = f.read().decode('utf-8').splitlines()
-
-                folder = os.path.basename(os.path.dirname(fn))
-                base_name = os.path.basename(fn)
-                records: List[Tuple[float, float, Optional[float]]] = []
-                # Process each line in the file
-                for line in lines:
-                    parts = line.split()
-                    if len(parts) == 2:
-                        angle, intensity = parts
-                        records.append((float(angle), float(intensity), None))
-                    elif len(parts) == 3:
-                        angle, intensity, error = parts
-                        records.append((float(angle), float(intensity), float(error)))
-
+                lines = filepath.read_text(encoding='utf-8').splitlines()
+                records = _parse_lines(lines)
                 df_temp = pd.DataFrame(records, columns=['angle', 'intensity', 'error'])
-                df_temp['source_file'] = base_name
-                df_temp['source_folder'] = folder
+                df_temp['source_file'] = filepath.name
+                df_temp['source_folder'] = filepath.parent.name
                 frames.append(df_temp)
+        else:
+            with zipfile.ZipFile(zip_path, 'r') as z:
+                for info in z.infolist():
+                    if info.is_dir():
+                        continue
+                    fn = info.filename
+                    if not (fn.endswith('.xy') or fn.endswith('.xye')):
+                        continue
+                    with z.open(fn) as f:
+                        lines = f.read().decode('utf-8').splitlines()
+                    records = _parse_lines(lines)
+                    df_temp = pd.DataFrame(records, columns=['angle', 'intensity', 'error'])
+                    df_temp['source_file'] = os.path.basename(fn)
+                    df_temp['source_folder'] = os.path.basename(os.path.dirname(fn))
+                    frames.append(df_temp)
 
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
