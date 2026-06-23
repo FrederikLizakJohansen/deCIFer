@@ -1,0 +1,2 @@
+# Allow the pre-computed ranking-sensitivity CSVs to be committed
+!*.csv

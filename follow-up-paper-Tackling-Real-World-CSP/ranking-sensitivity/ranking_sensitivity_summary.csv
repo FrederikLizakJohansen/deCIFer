@@ -1,0 +1,217 @@
+case_key,material_key,material_title,condition_key,condition_label,protocol_path,setting_label,top1_candidate_index,top1_matches_baseline,top5_overlap_with_baseline,top10_overlap_with_baseline,spearman_vs_baseline
+ceo2_crystalline__none,ceo2_crystalline,Crystalline CeO2,none,None,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_none.pkl,"f0.03
+e0.3",30,True,5,10,0.9999999999999999
+ceo2_crystalline__none,ceo2_crystalline,Crystalline CeO2,none,None,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_none.pkl,"f0.03
+e0.5",30,True,5,10,0.9999628942486084
+ceo2_crystalline__none,ceo2_crystalline,Crystalline CeO2,none,None,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_none.pkl,"f0.03
+e0.7",30,True,5,10,0.9998886827458254
+ceo2_crystalline__none,ceo2_crystalline,Crystalline CeO2,none,None,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_none.pkl,"f0.05
+e0.3",30,True,3,7,0.9905380333951762
+ceo2_crystalline__none,ceo2_crystalline,Crystalline CeO2,none,None,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_none.pkl,"f0.05
+e0.5",30,True,3,7,0.9913914656771798
+ceo2_crystalline__none,ceo2_crystalline,Crystalline CeO2,none,None,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_none.pkl,"f0.05
+e0.7",30,True,3,7,0.9919604205318491
+ceo2_crystalline__none,ceo2_crystalline,Crystalline CeO2,none,None,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_none.pkl,"f0.08
+e0.3",69,False,2,4,0.9803092145949288
+ceo2_crystalline__none,ceo2_crystalline,Crystalline CeO2,none,None,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_none.pkl,"f0.08
+e0.5",69,False,2,4,0.9801731601731603
+ceo2_crystalline__none,ceo2_crystalline,Crystalline CeO2,none,None,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_none.pkl,"f0.08
+e0.7",69,False,2,4,0.9802844774273345
+ceo2_crystalline__comp,ceo2_crystalline,Crystalline CeO2,comp,Comp,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_Ce4O8.pkl,"f0.03
+e0.3",39,True,5,10,0.9999999999999999
+ceo2_crystalline__comp,ceo2_crystalline,Crystalline CeO2,comp,Comp,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_Ce4O8.pkl,"f0.03
+e0.5",39,True,5,10,0.9999759975997599
+ceo2_crystalline__comp,ceo2_crystalline,Crystalline CeO2,comp,Comp,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_Ce4O8.pkl,"f0.03
+e0.7",39,True,5,10,0.9999519951995199
+ceo2_crystalline__comp,ceo2_crystalline,Crystalline CeO2,comp,Comp,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_Ce4O8.pkl,"f0.05
+e0.3",55,False,5,10,0.9997719771977197
+ceo2_crystalline__comp,ceo2_crystalline,Crystalline CeO2,comp,Comp,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_Ce4O8.pkl,"f0.05
+e0.5",55,False,5,10,0.9997719771977197
+ceo2_crystalline__comp,ceo2_crystalline,Crystalline CeO2,comp,Comp,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_Ce4O8.pkl,"f0.05
+e0.7",55,False,5,10,0.9997719771977197
+ceo2_crystalline__comp,ceo2_crystalline,Crystalline CeO2,comp,Comp,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_Ce4O8.pkl,"f0.08
+e0.3",55,False,5,10,0.9993759375937593
+ceo2_crystalline__comp,ceo2_crystalline,Crystalline CeO2,comp,Comp,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_Ce4O8.pkl,"f0.08
+e0.5",55,False,5,10,0.9993759375937593
+ceo2_crystalline__comp,ceo2_crystalline,Crystalline CeO2,comp,Comp,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_Ce4O8.pkl,"f0.08
+e0.7",55,False,5,10,0.9989918991899188
+ceo2_crystalline__comp_spg,ceo2_crystalline,Crystalline CeO2,comp_spg,Comp + SG,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_Ce4O8_Fm-3m.pkl,"f0.03
+e0.3",88,True,5,10,0.9999999999999999
+ceo2_crystalline__comp_spg,ceo2_crystalline,Crystalline CeO2,comp_spg,Comp + SG,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_Ce4O8_Fm-3m.pkl,"f0.03
+e0.5",88,True,5,10,0.9999999999999999
+ceo2_crystalline__comp_spg,ceo2_crystalline,Crystalline CeO2,comp_spg,Comp + SG,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_Ce4O8_Fm-3m.pkl,"f0.03
+e0.7",88,True,5,9,0.99996399639964
+ceo2_crystalline__comp_spg,ceo2_crystalline,Crystalline CeO2,comp_spg,Comp + SG,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_Ce4O8_Fm-3m.pkl,"f0.05
+e0.3",81,False,5,9,0.9999519951995199
+ceo2_crystalline__comp_spg,ceo2_crystalline,Crystalline CeO2,comp_spg,Comp + SG,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_Ce4O8_Fm-3m.pkl,"f0.05
+e0.5",81,False,5,9,0.9999159915991598
+ceo2_crystalline__comp_spg,ceo2_crystalline,Crystalline CeO2,comp_spg,Comp + SG,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_Ce4O8_Fm-3m.pkl,"f0.05
+e0.7",81,False,5,9,0.9998919891989198
+ceo2_crystalline__comp_spg,ceo2_crystalline,Crystalline CeO2,comp_spg,Comp + SG,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_Ce4O8_Fm-3m.pkl,"f0.08
+e0.3",20,False,5,9,0.9998319831983197
+ceo2_crystalline__comp_spg,ceo2_crystalline,Crystalline CeO2,comp_spg,Comp + SG,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_Ce4O8_Fm-3m.pkl,"f0.08
+e0.5",20,False,5,9,0.9998319831983197
+ceo2_crystalline__comp_spg,ceo2_crystalline,Crystalline CeO2,comp_spg,Comp + SG,experimental_protocols/crystalline_CeO2_protocol_titanrtx/crystalline_CeO2_BM31_protocol_Ce4O8_Fm-3m.pkl,"f0.08
+e0.7",20,False,5,9,0.9997719771977197
+si_crystalline__none,si_crystalline,Crystalline Si,none,None,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_none.pkl,"f0.03
+e0.3",63,True,5,10,0.9999999999999999
+si_crystalline__none,si_crystalline,Crystalline Si,none,None,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_none.pkl,"f0.03
+e0.5",63,True,5,10,0.9998079807980798
+si_crystalline__none,si_crystalline,Crystalline Si,none,None,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_none.pkl,"f0.03
+e0.7",63,True,5,10,0.9997239723972396
+si_crystalline__none,si_crystalline,Crystalline Si,none,None,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_none.pkl,"f0.05
+e0.3",63,True,3,6,0.9888028802880288
+si_crystalline__none,si_crystalline,Crystalline Si,none,None,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_none.pkl,"f0.05
+e0.5",63,True,3,6,0.9889588958895887
+si_crystalline__none,si_crystalline,Crystalline Si,none,None,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_none.pkl,"f0.05
+e0.7",63,True,3,6,0.9895829582958295
+si_crystalline__none,si_crystalline,Crystalline Si,none,None,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_none.pkl,"f0.08
+e0.3",90,False,2,6,0.9823462346234622
+si_crystalline__none,si_crystalline,Crystalline Si,none,None,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_none.pkl,"f0.08
+e0.5",90,False,2,6,0.9822622262226222
+si_crystalline__none,si_crystalline,Crystalline Si,none,None,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_none.pkl,"f0.08
+e0.7",90,False,2,6,0.9814821482148214
+si_crystalline__comp,si_crystalline,Crystalline Si,comp,Comp,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_Si8.pkl,"f0.03
+e0.3",78,True,5,10,0.9999999999999999
+si_crystalline__comp,si_crystalline,Crystalline Si,comp,Comp,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_Si8.pkl,"f0.03
+e0.5",78,True,5,10,0.9999399939993997
+si_crystalline__comp,si_crystalline,Crystalline Si,comp,Comp,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_Si8.pkl,"f0.03
+e0.7",51,False,5,9,0.9996999699969996
+si_crystalline__comp,si_crystalline,Crystalline Si,comp,Comp,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_Si8.pkl,"f0.05
+e0.3",0,False,3,7,0.9965676567656764
+si_crystalline__comp,si_crystalline,Crystalline Si,comp,Comp,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_Si8.pkl,"f0.05
+e0.5",0,False,3,7,0.9965676567656764
+si_crystalline__comp,si_crystalline,Crystalline Si,comp,Comp,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_Si8.pkl,"f0.05
+e0.7",0,False,3,7,0.9965676567656764
+si_crystalline__comp,si_crystalline,Crystalline Si,comp,Comp,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_Si8.pkl,"f0.08
+e0.3",62,False,3,6,0.9898349834983498
+si_crystalline__comp,si_crystalline,Crystalline Si,comp,Comp,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_Si8.pkl,"f0.08
+e0.5",62,False,3,6,0.9898349834983498
+si_crystalline__comp,si_crystalline,Crystalline Si,comp,Comp,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_Si8.pkl,"f0.08
+e0.7",62,False,3,6,0.9898349834983498
+si_crystalline__comp_spg,si_crystalline,Crystalline Si,comp_spg,Comp + SG,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_Si8_Fd-3m.pkl,"f0.03
+e0.3",94,True,5,10,0.9999999999999999
+si_crystalline__comp_spg,si_crystalline,Crystalline Si,comp_spg,Comp + SG,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_Si8_Fd-3m.pkl,"f0.03
+e0.5",94,True,5,10,0.9998919891989198
+si_crystalline__comp_spg,si_crystalline,Crystalline Si,comp_spg,Comp + SG,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_Si8_Fd-3m.pkl,"f0.03
+e0.7",14,False,5,10,0.9996879687968797
+si_crystalline__comp_spg,si_crystalline,Crystalline Si,comp_spg,Comp + SG,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_Si8_Fd-3m.pkl,"f0.05
+e0.3",68,False,1,7,0.9863426342634262
+si_crystalline__comp_spg,si_crystalline,Crystalline Si,comp_spg,Comp + SG,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_Si8_Fd-3m.pkl,"f0.05
+e0.5",68,False,1,7,0.9863426342634262
+si_crystalline__comp_spg,si_crystalline,Crystalline Si,comp_spg,Comp + SG,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_Si8_Fd-3m.pkl,"f0.05
+e0.7",68,False,1,7,0.9856825682568257
+si_crystalline__comp_spg,si_crystalline,Crystalline Si,comp_spg,Comp + SG,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_Si8_Fd-3m.pkl,"f0.08
+e0.3",84,False,0,5,0.9604320432043204
+si_crystalline__comp_spg,si_crystalline,Crystalline Si,comp_spg,Comp + SG,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_Si8_Fd-3m.pkl,"f0.08
+e0.5",84,False,0,5,0.9604320432043204
+si_crystalline__comp_spg,si_crystalline,Crystalline Si,comp_spg,Comp + SG,experimental_protocols/crystalline_Si_protocol_titanrtx/Si_Mythen_protocol_Si8_Fd-3m.pkl,"f0.08
+e0.7",84,False,0,5,0.9604320432043204
+fe2o3_crystalline__none,fe2o3_crystalline,Crystalline Fe2O3,none,None,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_none.pkl,"f0.03
+e0.3",30,True,5,10,1.0
+fe2o3_crystalline__none,fe2o3_crystalline,Crystalline Fe2O3,none,None,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_none.pkl,"f0.03
+e0.5",30,True,5,10,1.0
+fe2o3_crystalline__none,fe2o3_crystalline,Crystalline Fe2O3,none,None,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_none.pkl,"f0.03
+e0.7",30,True,5,10,1.0
+fe2o3_crystalline__none,fe2o3_crystalline,Crystalline Fe2O3,none,None,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_none.pkl,"f0.05
+e0.3",30,True,5,10,0.9999566520969548
+fe2o3_crystalline__none,fe2o3_crystalline,Crystalline Fe2O3,none,None,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_none.pkl,"f0.05
+e0.5",30,True,5,10,0.9999422027959398
+fe2o3_crystalline__none,fe2o3_crystalline,Crystalline Fe2O3,none,None,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_none.pkl,"f0.05
+e0.7",30,True,5,10,0.9999422027959398
+fe2o3_crystalline__none,fe2o3_crystalline,Crystalline Fe2O3,none,None,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_none.pkl,"f0.08
+e0.3",30,True,5,10,0.9998844055918794
+fe2o3_crystalline__none,fe2o3_crystalline,Crystalline Fe2O3,none,None,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_none.pkl,"f0.08
+e0.5",30,True,5,10,0.9998844055918794
+fe2o3_crystalline__none,fe2o3_crystalline,Crystalline Fe2O3,none,None,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_none.pkl,"f0.08
+e0.7",30,True,5,10,0.9998844055918794
+fe2o3_crystalline__comp,fe2o3_crystalline,Crystalline Fe2O3,comp,Comp,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_Fe12O18.pkl,"f0.03
+e0.3",90,True,5,10,0.9999999999999999
+fe2o3_crystalline__comp,fe2o3_crystalline,Crystalline Fe2O3,comp,Comp,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_Fe12O18.pkl,"f0.03
+e0.5",90,True,5,10,0.9998639455782312
+fe2o3_crystalline__comp,fe2o3_crystalline,Crystalline Fe2O3,comp,Comp,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_Fe12O18.pkl,"f0.03
+e0.7",90,True,5,10,0.9997897340754484
+fe2o3_crystalline__comp,fe2o3_crystalline,Crystalline Fe2O3,comp,Comp,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_Fe12O18.pkl,"f0.05
+e0.3",90,True,5,9,0.9951267779839207
+fe2o3_crystalline__comp,fe2o3_crystalline,Crystalline Fe2O3,comp,Comp,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_Fe12O18.pkl,"f0.05
+e0.5",90,True,5,9,0.995621521335807
+fe2o3_crystalline__comp,fe2o3_crystalline,Crystalline Fe2O3,comp,Comp,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_Fe12O18.pkl,"f0.05
+e0.7",90,True,5,9,0.9958936301793444
+fe2o3_crystalline__comp,fe2o3_crystalline,Crystalline Fe2O3,comp,Comp,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_Fe12O18.pkl,"f0.08
+e0.3",90,True,4,9,0.9911069882498453
+fe2o3_crystalline__comp,fe2o3_crystalline,Crystalline Fe2O3,comp,Comp,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_Fe12O18.pkl,"f0.08
+e0.5",90,True,4,9,0.9917625231910946
+fe2o3_crystalline__comp,fe2o3_crystalline,Crystalline Fe2O3,comp,Comp,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_Fe12O18.pkl,"f0.08
+e0.7",90,True,4,9,0.9920470006184291
+fe2o3_crystalline__comp_spg,fe2o3_crystalline,Crystalline Fe2O3,comp_spg,Comp + SG,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_Fe12O18_R-3c.pkl,"f0.03
+e0.3",84,True,5,10,0.9999999999999999
+fe2o3_crystalline__comp_spg,fe2o3_crystalline,Crystalline Fe2O3,comp_spg,Comp + SG,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_Fe12O18_R-3c.pkl,"f0.03
+e0.5",84,True,5,10,0.9997479747974796
+fe2o3_crystalline__comp_spg,fe2o3_crystalline,Crystalline Fe2O3,comp_spg,Comp + SG,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_Fe12O18_R-3c.pkl,"f0.03
+e0.7",84,True,5,10,0.9993039303930392
+fe2o3_crystalline__comp_spg,fe2o3_crystalline,Crystalline Fe2O3,comp_spg,Comp + SG,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_Fe12O18_R-3c.pkl,"f0.05
+e0.3",84,True,4,7,0.9785658565856584
+fe2o3_crystalline__comp_spg,fe2o3_crystalline,Crystalline Fe2O3,comp_spg,Comp + SG,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_Fe12O18_R-3c.pkl,"f0.05
+e0.5",84,True,4,6,0.982094209420942
+fe2o3_crystalline__comp_spg,fe2o3_crystalline,Crystalline Fe2O3,comp_spg,Comp + SG,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_Fe12O18_R-3c.pkl,"f0.05
+e0.7",84,True,4,6,0.9827782778277826
+fe2o3_crystalline__comp_spg,fe2o3_crystalline,Crystalline Fe2O3,comp_spg,Comp + SG,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_Fe12O18_R-3c.pkl,"f0.08
+e0.3",84,True,3,6,0.9174197419741974
+fe2o3_crystalline__comp_spg,fe2o3_crystalline,Crystalline Fe2O3,comp_spg,Comp + SG,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_Fe12O18_R-3c.pkl,"f0.08
+e0.5",84,True,3,6,0.9173837383738372
+fe2o3_crystalline__comp_spg,fe2o3_crystalline,Crystalline Fe2O3,comp_spg,Comp + SG,experimental_protocols/crystalline_Fe2O3_protocol_titanrtx/AFS012d_a850C_protocol_Fe12O18_R-3c.pkl,"f0.08
+e0.7",84,True,3,6,0.913207320732073
+ceo2_particle__none,ceo2_particle,Nanocrystalline CeO2,none,None,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_none.pkl,"f0.02
+tau=none",64,True,5,10,0.9999999999999999
+ceo2_particle__none,ceo2_particle,Nanocrystalline CeO2,none,None,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_none.pkl,"f0.02
+tau=10",64,True,5,10,0.9994871660004208
+ceo2_particle__none,ceo2_particle,Nanocrystalline CeO2,none,None,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_none.pkl,"f0.02
+tau=20",64,True,5,10,0.9997633073848095
+ceo2_particle__none,ceo2_particle,Nanocrystalline CeO2,none,None,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_none.pkl,"f0.05
+tau=none",64,True,5,10,0.9999868504102671
+ceo2_particle__none,ceo2_particle,Nanocrystalline CeO2,none,None,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_none.pkl,"f0.05
+tau=10",64,True,5,10,0.9993556701030928
+ceo2_particle__none,ceo2_particle,Nanocrystalline CeO2,none,None,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_none.pkl,"f0.05
+tau=20",64,True,5,10,0.9996844098464126
+ceo2_particle__none,ceo2_particle,Nanocrystalline CeO2,none,None,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_none.pkl,"f0.08
+tau=none",64,True,5,10,0.9999342520513359
+ceo2_particle__none,ceo2_particle,Nanocrystalline CeO2,none,None,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_none.pkl,"f0.08
+tau=10",64,True,5,10,0.9993425205133598
+ceo2_particle__none,ceo2_particle,Nanocrystalline CeO2,none,None,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_none.pkl,"f0.08
+tau=20",64,True,5,10,0.9996318114874816
+ceo2_particle__comp,ceo2_particle,Nanocrystalline CeO2,comp,Comp,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_Ce4O8.pkl,"f0.02
+tau=none",22,True,5,10,0.9999999999999999
+ceo2_particle__comp,ceo2_particle,Nanocrystalline CeO2,comp,Comp,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_Ce4O8.pkl,"f0.02
+tau=10",22,True,5,10,0.9982379549758046
+ceo2_particle__comp,ceo2_particle,Nanocrystalline CeO2,comp,Comp,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_Ce4O8.pkl,"f0.02
+tau=20",22,True,5,10,0.9993030717441614
+ceo2_particle__comp,ceo2_particle,Nanocrystalline CeO2,comp,Comp,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_Ce4O8.pkl,"f0.05
+tau=none",22,True,5,10,0.9998290553334735
+ceo2_particle__comp,ceo2_particle,Nanocrystalline CeO2,comp,Comp,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_Ce4O8.pkl,"f0.05
+tau=10",22,True,5,10,0.9980933094887439
+ceo2_particle__comp,ceo2_particle,Nanocrystalline CeO2,comp,Comp,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_Ce4O8.pkl,"f0.05
+tau=20",22,True,5,10,0.9992899221544287
+ceo2_particle__comp,ceo2_particle,Nanocrystalline CeO2,comp,Comp,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_Ce4O8.pkl,"f0.08
+tau=none",22,True,5,10,0.9997370082053438
+ceo2_particle__comp,ceo2_particle,Nanocrystalline CeO2,comp,Comp,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_Ce4O8.pkl,"f0.08
+tau=10",22,True,5,10,0.9979092152324847
+ceo2_particle__comp,ceo2_particle,Nanocrystalline CeO2,comp,Comp,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_Ce4O8.pkl,"f0.08
+tau=20",22,True,5,10,0.9992110246160318
+ceo2_particle__comp_spg,ceo2_particle,Nanocrystalline CeO2,comp_spg,Comp + SG,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_Ce4O8_Fm-3m.pkl,"f0.02
+tau=none",59,True,5,10,0.9999999999999999
+ceo2_particle__comp_spg,ceo2_particle,Nanocrystalline CeO2,comp_spg,Comp + SG,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_Ce4O8_Fm-3m.pkl,"f0.02
+tau=10",59,True,2,2,0.5741991341991342
+ceo2_particle__comp_spg,ceo2_particle,Nanocrystalline CeO2,comp_spg,Comp + SG,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_Ce4O8_Fm-3m.pkl,"f0.02
+tau=20",59,True,4,7,0.956573902288188
+ceo2_particle__comp_spg,ceo2_particle,Nanocrystalline CeO2,comp_spg,Comp + SG,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_Ce4O8_Fm-3m.pkl,"f0.05
+tau=none",59,True,4,9,0.9897093382807667
+ceo2_particle__comp_spg,ceo2_particle,Nanocrystalline CeO2,comp_spg,Comp + SG,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_Ce4O8_Fm-3m.pkl,"f0.05
+tau=10",59,True,2,2,0.552430426716141
+ceo2_particle__comp_spg,ceo2_particle,Nanocrystalline CeO2,comp_spg,Comp + SG,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_Ce4O8_Fm-3m.pkl,"f0.05
+tau=20",59,True,3,3,0.9246382189239332
+ceo2_particle__comp_spg,ceo2_particle,Nanocrystalline CeO2,comp_spg,Comp + SG,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_Ce4O8_Fm-3m.pkl,"f0.08
+tau=none",59,True,4,9,0.9844279529993816
+ceo2_particle__comp_spg,ceo2_particle,Nanocrystalline CeO2,comp_spg,Comp + SG,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_Ce4O8_Fm-3m.pkl,"f0.08
+tau=10",59,True,1,2,0.5252690166975881
+ceo2_particle__comp_spg,ceo2_particle,Nanocrystalline CeO2,comp_spg,Comp + SG,experimental_protocols/particles_CeO2_protocol_titanrtx/Hydrolyse_ID10_20min_3-56_boro_0p8_protocol_Ce4O8_Fm-3m.pkl,"f0.08
+tau=20",59,True,3,3,0.8688435374149659
