@@ -1,12 +1,12 @@
-[![Static Badge](https://img.shields.io/badge/arXiv-2502.02189-brightgreen?style=flat)](https://arxiv.org/abs/2502.02189) [![Download Checkpoint](https://img.shields.io/badge/Model%20Checkpoint-582%20MB-blue?style=flat)](https://sid.erda.dk/share_redirect/epnX85vrEP)
+[![Static Badge](https://img.shields.io/badge/arXiv-2502.02189-brightgreen?style=flat)](https://arxiv.org/abs/2502.02189) [![Download Checkpoint](https://img.shields.io/badge/Data%20Archive-ERDA-blue?style=flat)](https://www.erda.dk/archives/b7342461e7c932bd99e8273c6a49e97b/published-archive.html)
 
 <img src="deCIFer_logo.png" alt="logo" height="200"/>
 
 # deCIFer: Crystal Structure Prediction from Powder Diffraction Data
 
-**Download pretrained (C=3076) model checkpoint (~582 MB zipped):**  
-➡️ **[deCIFer_v1 Checkpoint (.zip)](https://sid.erda.dk/share_redirect/epnX85vrEP)**  
-The zip contains `ckpt.pt` (≈635 MB uncompressed).
+**Downloads (model checkpoints, NOMA dataset, experimental data):**  
+➡️ **[deCIFer Data Archive](https://www.erda.dk/archives/b7342461e7c932bd99e8273c6a49e97b/published-archive.html)**  
+Download `decifer_v1_ckpt.pt` for the pretrained deCIFer checkpoint. See [Data Preparation](#data-preparation) for the NOMA dataset options.
 
 ## Table of Contents
 1. [Setup](#setup)
@@ -51,6 +51,35 @@ pip install numpy pandas matplotlib seaborn pyYAML tqdm omegaconf h5py pymatgen 
 ```
 
 ## Data Preparation
+
+### Downloading the NOMA dataset
+
+All files are available from the frozen archive:
+
+➡️ **[deCIFer Data Archive](https://www.erda.dk/archives/b7342461e7c932bd99e8273c6a49e97b/published-archive.html)**
+
+The NOMA dataset is assembled from [Materials Project](https://materialsproject.org/), [OQMD](https://oqmd.org/), and [NOMAD](https://nomad-lab.eu/). Two download options are available:
+
+**Option A -- pre-serialized (recommended):**
+
+Download `noma.zip` and extract it at the repo root. It should produce:
+
+```
+data/noma/
+└── serialized/
+    ├── train.h5
+    ├── val.h5
+    └── test.h5
+```
+
+No further preparation is needed. Skip to [Training](#training) or [Evaluation](#evaluation).
+
+**Option B -- raw CIFs:**
+
+Download `noma_cifs_raw.pkl.gz` and place it at `data/noma/noma_cifs_raw.pkl.gz`. Then follow the preparation steps below. When running `prepare_dataset.py`, pass `--name noma` so the output lands at `data/noma/serialized/`.
+
+### Preparing from raw CIFs
+
 Before training or evaluation, the dataset must be preprocessed into a structured format that deCIFer can use. This includes **parsing CIF files**, **computing XRD patterns**, **tokenizing CIFs**, and **serializing the processed data into HDF5 format**.
 To prepare a dataset, use the `prepare_dataset.py` script with the desired options. Here is an example:
 ```bash

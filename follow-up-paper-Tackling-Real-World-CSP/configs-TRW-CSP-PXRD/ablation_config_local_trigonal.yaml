@@ -1,4 +1,4 @@
-dataset_path: "data/noma/full/serialized/test.h5"
+dataset_path: "data/noma/serialized/test.h5"
 model_path: "deCIFer_model/ckpt.pt"
 params_dict:
   q_pre_scale_uniform: [0.8, 0.9, 0.95, 0.975, 0.99, 1.0, 1.01, 1.025, 1.05, 1.1, 1.2]

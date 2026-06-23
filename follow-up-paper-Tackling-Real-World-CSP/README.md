@@ -17,11 +17,21 @@ follow-up-paper-Tackling-Real-World-CSP/
 └── gen-figures-TRW-CSP-PXRD.ipynb  # Interactive notebook (same figures as scripts)
 ```
 
-### Data download
+### Downloads
 
-➡️ **[Experimental data & results (.zip)](https://www.erda.dk/archives/808f676c6b43aefbe0f423ab3df30312/published-archive.html)**
+All files are available from the frozen archive:
 
-Extract the ZIP so that the layout at the repo root looks like:
+➡️ **[deCIFer Data Archive](https://www.erda.dk/archives/b7342461e7c932bd99e8273c6a49e97b/published-archive.html)**
+
+| File | Contents |
+|---|---|
+| `TRW-CSP-PXRD-data.zip` | Experimental PXRD scans and precomputed result pickles |
+| `decifer_v1_ckpt.pt` | deCIFer model checkpoint |
+| `u-decifer_v1_ckpt.pt` | U-deCIFer model checkpoint |
+| `noma.zip` | NOMA dataset, pre-serialized HDF5 splits |
+| `noma_cifs_raw.pkl.gz` | NOMA dataset, raw CIFs (only needed to re-run preprocessing) |
+
+**Extracting `TRW-CSP-PXRD-data.zip`:** place it at the repo root and extract so that the layout looks like:
 
 ```
 TRW-CSP-PXRD-data/
@@ -87,51 +97,45 @@ The interactive notebook `gen-figures-TRW-CSP-PXRD.ipynb` covers the same figure
 
 ### Model checkpoints
 
-Running `bin/ablation.py` or `bin/run_protocol.py` requires the model checkpoints. The ablations compare deCIFer against U-deCIFer, so both are needed for the paired DeltaMR / DeltaRD metrics.
-
-**deCIFer (~582 MB zipped):**
-
-➡️ **[deCIFer_v1 Checkpoint (.zip)](https://sid.erda.dk/share_redirect/epnX85vrEP)**
+Running `bin/ablation.py` or `bin/run_protocol.py` requires the model checkpoints. The ablations compare deCIFer against U-deCIFer, so both are needed for the paired DeltaMR / DeltaRD metrics. Download from the [archive](https://www.erda.dk/archives/b7342461e7c932bd99e8273c6a49e97b/published-archive.html) and place the checkpoints as follows:
 
 ```bash
-unzip deCIFer_v1_checkpoint.zip
-mkdir -p deCIFer_model
-mv ckpt.pt deCIFer_model/ckpt.pt
-```
-
-**U-deCIFer:**
-
-➡️ **[U-deCIFer_v1 Checkpoint (.zip)](PLACEHOLDER)**
-
-```bash
-unzip U-deCIFer_v1_checkpoint.zip
-mkdir -p U-deCIFer_model
-mv ckpt.pt U-deCIFer_model/ckpt.pt
+mkdir -p deCIFer_model U-deCIFer_model
+mv decifer_v1_ckpt.pt deCIFer_model/ckpt.pt
+mv u-decifer_v1_ckpt.pt U-deCIFer_model/ckpt.pt
 ```
 
 ### Preparing the NOMA dataset for ablations
 
-`bin/ablation.py` requires the full NOMA test split at `data/noma/full/serialized/test.h5`. This is the same dataset used to train deCIFer. The download above does not include it.
+`bin/ablation.py` requires the NOMA test split at `data/noma/serialized/test.h5`. Two download options are available:
 
-**Obtain the raw data.**
+**Option A -- pre-serialized (recommended):**
 
-➡️ **[NOMA dataset (.pkl.gz)](PLACEHOLDER)**
+Download `noma.zip` from the [archive](https://www.erda.dk/archives/b7342461e7c932bd99e8273c6a49e97b/published-archive.html) and extract it at the repo root. It should produce:
 
-Place the file at `data/noma/noma.pkl.gz`. The NOMA dataset is assembled from three open databases: [Materials Project](https://materialsproject.org/), [OQMD](https://oqmd.org/), and [NOMAD](https://nomad-lab.eu/).
+```
+data/noma/
+└── serialized/
+    ├── train.h5
+    ├── val.h5
+    └── test.h5
+```
 
-**Prepare the dataset:**
+No further preparation is needed. The ablation configs already point to `data/noma/serialized/test.h5`.
+
+**Option B -- raw CIFs:**
+
+Download `noma_cifs_raw.pkl.gz` from the [archive](https://www.erda.dk/archives/b7342461e7c932bd99e8273c6a49e97b/published-archive.html), place it at `data/noma/noma_cifs_raw.pkl.gz`, then run:
 
 ```bash
 python bin/prepare_dataset.py \
   --data-dir data/noma/ \
-  --name full \
+  --name noma \
   --all \
   --raw-from-gzip
 ```
 
-This writes the HDF5 files to `data/noma/full/serialized/`. The ablation configs point to `data/noma/full/serialized/test.h5`.
-
-See the main README [Data Preparation](../README.md#data-preparation) section for the full argument reference. For a quick pipeline check without the full dataset, add `--debug-max 500` and update `dataset_path` in your config to point to the debug output. Results will not match the paper but the pipeline will run end to end.
+This writes the HDF5 files to `data/noma/serialized/`. The NOMA dataset is assembled from [Materials Project](https://materialsproject.org/), [OQMD](https://oqmd.org/), and [NOMAD](https://nomad-lab.eu/). See the main README [Data Preparation](../README.md#data-preparation) section for the full argument reference.
 
 ### Running the ablation
 
