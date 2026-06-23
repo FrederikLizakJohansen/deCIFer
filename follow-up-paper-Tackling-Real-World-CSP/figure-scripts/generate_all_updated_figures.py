@@ -55,7 +55,7 @@ def main() -> None:
     run(
         [
             python,
-            str(REPO_ROOT / "revision-final-figures" / "selected-conditions-v2" / "selected_conditions_v2.py"),
+            str(FIGURE_DIR / "selected_conditions_v2.py"),
             "--output",
             str(
                 OUTPUT_ROOT

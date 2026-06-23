@@ -83,6 +83,7 @@ Individual scripts can also be run directly and each accepts `--help`:
 |---|---|
 | `experimental_appendix_figures.py` | Per-material appendix figures |
 | `selected_conditions_figure.py` | Main experimental figure |
+| `selected_conditions_v2.py` | Main experimental figure (v2) |
 | `experimental_results_figure.py` | Combined experimental figure |
 | `ablation_figure_exports.py` | Ablation figures (main + appendix) |
 | `robustness_figure_exports.py` | DeltaMR and DeltaRD robustness summaries |
