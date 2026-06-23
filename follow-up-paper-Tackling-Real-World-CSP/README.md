@@ -143,14 +143,20 @@ This writes the HDF5 files to `data/noma/serialized/`. The NOMA dataset is assem
 The ablation runs one model at a time. To reproduce the paired comparisons from the paper, run it once for deCIFer and once for U-deCIFer:
 
 ```bash
-# deCIFer -- cubic polymorph (main text)
-python bin/ablation.py --config follow-up-paper-Tackling-Real-World-CSP/configs-TRW-CSP-PXRD/ablation_config_cluster.yaml
+# cubic
+python bin/ablation.py --config follow-up-paper-Tackling-Real-World-CSP/configs-TRW-CSP-PXRD/ablation_cubic_decifer.yaml
+python bin/ablation.py --config follow-up-paper-Tackling-Real-World-CSP/configs-TRW-CSP-PXRD/ablation_cubic_udecifer.yaml
 
-# U-deCIFer -- cubic polymorph (main text)
-python bin/ablation.py --config follow-up-paper-Tackling-Real-World-CSP/configs-TRW-CSP-PXRD/ablation_config_cluster_udecifer.yaml
+# hexagonal (Fe2O3)
+python bin/ablation.py --config follow-up-paper-Tackling-Real-World-CSP/configs-TRW-CSP-PXRD/ablation_hexagonal_decifer.yaml
+python bin/ablation.py --config follow-up-paper-Tackling-Real-World-CSP/configs-TRW-CSP-PXRD/ablation_hexagonal_udecifer.yaml
+
+# trigonal (Fe2O3)
+python bin/ablation.py --config follow-up-paper-Tackling-Real-World-CSP/configs-TRW-CSP-PXRD/ablation_trigonal_decifer.yaml
+python bin/ablation.py --config follow-up-paper-Tackling-Real-World-CSP/configs-TRW-CSP-PXRD/ablation_trigonal_udecifer.yaml
 ```
 
-The `_cluster` configs use `batch_size: 10` for multi-GPU runs. The `_local` configs use `batch_size: 1` for single-machine use. Results are saved as pickle files; the figure scripts load and pair the conditioned / unconditioned pickles to compute DeltaMR and DeltaRD.
+All configs use `batch_size: 10` for multi-GPU runs. Results are saved as pickle files; the figure scripts load and pair the conditioned / unconditioned pickles to compute DeltaMR and DeltaRD.
 
 ### Running the experimental PXRD protocols
 
