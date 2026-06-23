@@ -331,19 +331,13 @@ class DeciferPipeline:
             c_tokens = self.ENCODE(self.TOKENIZE(comp_str))
             prompt = torch.tensor(c_tokens).unsqueeze(0).to(self.model.device)
 
-        # Generate new tokens using the model's custom generate function
-        out = self.model.generate_custom(
+        out = self.model.generate(
             idx=prompt,
             max_new_tokens=max_new_tokens,
             cond_vec=cond_array,
             start_indices_batch=[[0]],
-            composition_string=composition,
-            composition_ranges=composition_ranges,
-            spacegroup_string=spacegroup,
-            exclude_elements=inactive_elements_list,
             temperature=temperature,
             disable_pbar=False,
-            include_spacegroups=active_spacegroups,
         ).cpu().numpy()
         cif_raw: str = self.DECODE(out[0])
 
