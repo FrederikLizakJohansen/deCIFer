@@ -174,8 +174,8 @@ class DeciferPipeline:
                     records.append((float(parts[0]), float(parts[1]), float(parts[2])))
             return records
 
-        if p.is_dir():
-            for filepath in sorted(p.rglob('*')):
+        def _read_dir(directory: Path):
+            for filepath in sorted(directory.rglob('*')):
                 if filepath.suffix not in ('.xy', '.xye'):
                     continue
                 lines = filepath.read_text(encoding='utf-8').splitlines()
@@ -184,8 +184,16 @@ class DeciferPipeline:
                 df_temp['source_file'] = filepath.name
                 df_temp['source_folder'] = filepath.parent.name
                 frames.append(df_temp)
+
+        if p.is_dir():
+            _read_dir(p)
         else:
-            with zipfile.ZipFile(zip_path, 'r') as z:
+            try:
+                zf = zipfile.ZipFile(zip_path, 'r')
+            except IsADirectoryError:
+                _read_dir(p)
+                return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+            with zf as z:
                 for info in z.infolist():
                     if info.is_dir():
                         continue
