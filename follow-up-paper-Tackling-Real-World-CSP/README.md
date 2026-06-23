@@ -273,4 +273,4 @@ python bin/train.py --config follow-up-paper-Tackling-Real-World-CSP/configs-TRW
 python bin/train.py --config follow-up-paper-Tackling-Real-World-CSP/configs-TRW-CSP-PXRD/U-deCIFer_NOMA_training_config.yaml
 ```
 
-Both configs use `dataset: 'data/noma/full'` and save checkpoints to `deCIFer_model/` and `U-deCIFer_model/` respectively. A GPU is required. See the main README [Training](../README.md#training) section for full details.
+Both configs use `dataset: 'data/noma'` and save checkpoints to `deCIFer_model/` and `U-deCIFer_model/` respectively. A GPU is required. See the main README [Training](../README.md#training) section for full details.
