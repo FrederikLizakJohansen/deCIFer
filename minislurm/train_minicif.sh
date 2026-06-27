@@ -22,6 +22,7 @@ if [ "$#" -eq 0 ]; then
 fi
 
 mkdir -p logs
+export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 
 echo "Arguments passed: ${ARGS[*]}"
 echo "Running on host: $(hostname)"

@@ -6,9 +6,14 @@ import json
 import os
 import pickle
 import random
+import sys
 from dataclasses import asdict, dataclass
 from glob import glob
 from multiprocessing import Pool, cpu_count
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 import h5py
 import numpy as np
