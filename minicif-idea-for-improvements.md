@@ -8,6 +8,7 @@ Purpose: collect concrete ideas for improving the current deCIFer codebase, mode
 
 - 2026-06-27: Started notes file and reviewed `bin/train.py` for immediate training-code improvements. No source code changes made.
 - 2026-06-27: Implemented the immediate training-code improvements in `bin/train.py` and `decifer/decifer_model.py`; verified with syntax checks, an attention opt-in forward check, and a synthetic CPU training smoke test.
+- 2026-06-27: Started aggressive CIF minimization with a standalone `decifer.minicif` canonicalizer and focused unit tests.
 
 ## Review assumptions
 
@@ -238,6 +239,23 @@ Verification:
 
 - P0 - Canonicalize CIF output more aggressively.
   Normalize field order, numeric precision, symmetry representation, atom ordering, and whitespace so the model spends less capacity on arbitrary formatting.
+
+  Initial minicif DSL:
+  `<mcif> Ni Co Fe cs_7 sg_225 cell a b c alpha beta gamma <atom> Ni mult x y z occ <atom> Co mult x y z occ </mcif>`
+
+  Current implementation:
+  - The prefix after `<mcif>` is the set of constituent elements, without stoichiometry, terminated by the first `cs_*` token.
+  - `cs_1` through `cs_7` represents the crystal system.
+  - `sg_1` through `sg_230` represents the space group number.
+  - `cell` contains `a b c alpha beta gamma` with configurable decimal precision.
+  - Each `<atom>` row contains `element multiplicity fract_x fract_y fract_z occupancy`.
+  - Atom rows are sorted deterministically by atomic number, multiplicity, fractional coordinates, and occupancy.
+  - The element-prefix order is configurable; later training can add permutation augmentation so the model does not overfit arbitrary element order.
+
+  Not yet wired:
+  - Minicif training/evaluation configs.
+  - Minicif -> full CIF rendering for evaluation/generation.
+  - Token constraints that lock `sg_*` candidates based on `cs_*`.
 
 - P0 - Add grammar-aware decoding or constrained token masks.
   Many invalid generations can be prevented by masking impossible next tokens in known CIF contexts: field names, loop lengths, numeric formats, element symbols, and newline boundaries.

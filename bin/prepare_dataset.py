@@ -30,6 +30,7 @@ import logging
 from logging import handlers
 
 from decifer.tokenizer import Tokenizer
+from decifer.minicif import MinicifConfig, MinicifTokenizer, canonicalize_cif
 from decifer.utility import (
     replace_symmetry_loop_with_P1,
     remove_cif_header,
@@ -69,7 +70,7 @@ def log_listener(queue, log_dir):
     Rotates the log file based on size.
     """
     # Setup file handler (rotating)
-    log_file = os.path.join("./" + log_dir, "error.log")
+    log_file = os.path.join(log_dir, "error.log")
     handler = handlers.RotatingFileHandler(
         log_file, maxBytes=1024*1024, backupCount=5,
     )
@@ -364,7 +365,7 @@ def xrd_worker(args):
 def cif_tokenizer_worker(args):
     
     # Extract arguments
-    from_path, _, debug, to_dir = args
+    from_path, task_dict, debug, to_dir = args
 
     # Open pkl and extract
     with gzip.open(from_path, "rb") as f:
@@ -373,17 +374,25 @@ def cif_tokenizer_worker(args):
     cif_string = data['cif_string']
 
     try:
-        # Remove symmetries and header from cif_string before tokenizing
-        cif_string = remove_cif_header(cif_string)
-        cif_string_reduced = replace_data_formula_with_nonreduced_formula(cif_string)
-        cif_string_nosym = replace_symmetry_loop_with_P1(cif_string_reduced)
+        if task_dict.get("cif_representation", "legacy") == "minicif":
+            minicif_string = canonicalize_cif(
+                cif_string,
+                MinicifConfig(decimal_places=task_dict["num_decimal_places"]),
+            )
+            tokenizer = MinicifTokenizer()
+            cif_tokens = tokenizer.encode(tokenizer.tokenize_minicif(minicif_string))
+        else:
+            # Remove symmetries and header from cif_string before tokenizing
+            cif_string = remove_cif_header(cif_string)
+            cif_string_reduced = replace_data_formula_with_nonreduced_formula(cif_string)
+            cif_string_nosym = replace_symmetry_loop_with_P1(cif_string_reduced)
 
-        # Initialise Tokenizer
-        tokenizer = Tokenizer()
-        tokenize = tokenizer.tokenize_cif
-        encode = tokenizer.encode
+            # Initialise Tokenizer
+            tokenizer = Tokenizer()
+            tokenize = tokenizer.tokenize_cif
+            encode = tokenizer.encode
 
-        cif_tokens = encode(tokenize(cif_string_nosym))
+            cif_tokens = encode(tokenize(cif_string_nosym))
     
         # Save output to pickle file
         output_dict = {
@@ -648,6 +657,7 @@ if __name__ == "__main__":
     parser.add_argument("--strat-group-size", type=int, help="Spacegroup group size for stratification", default=10)
     parser.add_argument("--num-decimal-places", type=int, help="Number of decimal places for floats in CIF files", default=4)
     parser.add_argument("--include-occupancy-structures", help="Include structures with occupancies less than unity", action="store_true")
+    parser.add_argument("--cif-representation", choices=["legacy", "minicif"], default="legacy", help="CIF representation to tokenize")
 
     parser.add_argument("--preprocess", help="preprocess files", action="store_true")
     parser.add_argument("--xrd", help="calculate XRD patterns", action="store_true")  # Placeholder for future implementation
@@ -742,11 +752,16 @@ if __name__ == "__main__":
         save_metadata({'xrd': xrd_dict}, args.data_dir)
     
     if args.tokenize:
+        tokenize_dict = {
+            'cif_representation': args.cif_representation,
+            'num_decimal_places': args.num_decimal_places,
+        }
         run_subtasks(
             root = args.data_dir, 
             worker_function = cif_tokenizer_worker,
             get_from = "preprocessed",
             save_to = "cif_tokens",
+            task_kwargs_dict = tokenize_dict,
             announcement = "TOKENIZING CIFS",
             debug = args.debug,
             num_workers = args.num_workers,

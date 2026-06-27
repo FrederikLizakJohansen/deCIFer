@@ -35,6 +35,7 @@ from omegaconf import OmegaConf
 
 from decifer.decifer_model import Decifer, DeciferConfig
 from decifer.tokenizer import Tokenizer
+from decifer.minicif import END_TOKEN, START_TOKEN, MinicifTokenizer
 from decifer.utility import discrete_to_continuous_xrd
 from decifer.decifer_dataset import DeciferDataset
     
@@ -44,6 +45,27 @@ VOCAB_SIZE = TOKENIZER.vocab_size
 START_ID = TOKENIZER.token_to_id["data_"]
 PADDING_ID = TOKENIZER.padding_id
 NEWLINE_ID = TOKENIZER.token_to_id["\n"]
+SEPARATOR_IDS = [NEWLINE_ID, NEWLINE_ID]
+
+def configure_tokenizer(tokenizer_name):
+    global TOKENIZER, VOCAB_SIZE, START_ID, PADDING_ID, NEWLINE_ID, SEPARATOR_IDS
+
+    if tokenizer_name == "legacy":
+        TOKENIZER = Tokenizer()
+        START_ID = TOKENIZER.token_to_id["data_"]
+        NEWLINE_ID = TOKENIZER.token_to_id["\n"]
+        SEPARATOR_IDS = [NEWLINE_ID, NEWLINE_ID]
+    elif tokenizer_name == "minicif":
+        TOKENIZER = MinicifTokenizer()
+        START_ID = TOKENIZER.token_to_id[START_TOKEN]
+        NEWLINE_ID = None
+        end_id = TOKENIZER.token_to_id[END_TOKEN]
+        SEPARATOR_IDS = [end_id]
+    else:
+        raise ValueError(f"unknown tokenizer: {tokenizer_name}")
+
+    VOCAB_SIZE = TOKENIZER.vocab_size
+    PADDING_ID = TOKENIZER.padding_id
 
 class RandomBatchSampler(BatchSampler):
     def __init__(self, sampler, batch_size, drop_last, seed=None):
@@ -84,6 +106,7 @@ class TrainConfig:
     num_workers_dataloader: int = 0 # Default; single process
 
     # deCIFer model
+    tokenizer: str = "legacy"
     block_size: int = 1024  # context of up to `block_size` previous characters
     vocab_size: int = 372 # Excluding conditioning token
     n_layer: int = 8
@@ -153,6 +176,7 @@ def parse_config():
     
     if not C.dataset:
         raise Exception("The 'dataset' option is required and cannot be empty")
+    configure_tokenizer(C.tokenizer)
     
     print("Using configuration:", flush=True)
     print(OmegaConf.to_yaml(C))
@@ -484,7 +508,8 @@ if __name__ == "__main__":
 
             # Fetch sequences and remove padding tokens
             sequences = batch['cif_tokens']
-            sequences = [torch.cat([seq[seq != PADDING_ID], torch.tensor([NEWLINE_ID, NEWLINE_ID], dtype=torch.long)]) for seq in sequences]
+            sequence_separator = torch.tensor(SEPARATOR_IDS, dtype=torch.long)
+            sequences = [torch.cat([seq[seq != PADDING_ID], sequence_separator]) for seq in sequences]
             total_sequences.extend(sequences)
 
             # Fetch conditioning and augment to cont signals
