@@ -31,6 +31,11 @@ class PrepConfig:
     raw_dir: str
     out_dir: str
     raw_from_gzip: bool = False
+    max_samples: int = 0
+    sample_strategy: str = "first"
+    checkpoint_path: str = ""
+    checkpoint_interval: int = 1000
+    no_resume: bool = False
     num_decimal_places: int = 4
     wavelength: str = "CuKa"
     qmin: float = 0.0
@@ -99,10 +104,11 @@ def process_cif(args):
 
 def safe_process_cif(args):
     obj, _ = args
+    key = source_id(obj)
     try:
-        return process_cif(args), None
+        return key, process_cif(args), None
     except Exception as exc:
-        return None, {"source": str(obj[0] if isinstance(obj, tuple) else obj), "error": str(exc)}
+        return key, None, {"source": key, "error": str(exc)}
 
 
 def load_inputs(raw_dir, raw_from_gzip):
@@ -127,6 +133,48 @@ def load_inputs(raw_dir, raw_from_gzip):
     if not cif_paths:
         raise ValueError(f"no .cif files found in {raw_dir}")
     return cif_paths
+
+
+def source_id(obj):
+    if isinstance(obj, tuple):
+        return str(obj[0])
+    return str(obj)
+
+
+def select_inputs(inputs, max_samples, sample_strategy, seed):
+    inputs = list(inputs)
+    if max_samples <= 0 or max_samples >= len(inputs):
+        return inputs
+    if sample_strategy == "first":
+        return inputs[:max_samples]
+    if sample_strategy == "random":
+        rng = random.Random(seed)
+        return rng.sample(inputs, max_samples)
+    raise ValueError(f"unknown sample_strategy: {sample_strategy}")
+
+
+def load_checkpoint(path):
+    if not path or not os.path.exists(path):
+        return {}, {}
+    with gzip.open(path, "rb") as f:
+        state = pickle.load(f)
+    rows = {row["source_id"]: row["data"] for row in state.get("rows", [])}
+    failures = {failure["source_id"]: failure["data"] for failure in state.get("failures", [])}
+    return rows, failures
+
+
+def save_checkpoint(path, rows_by_source, failures_by_source):
+    if not path:
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    state = {
+        "rows": [{"source_id": key, "data": value} for key, value in rows_by_source.items()],
+        "failures": [{"source_id": key, "data": value} for key, value in failures_by_source.items()],
+    }
+    tmp_path = path + ".tmp"
+    with gzip.open(tmp_path, "wb") as f:
+        pickle.dump(state, f)
+    os.replace(tmp_path, path)
 
 
 def write_split(path, rows):
@@ -178,6 +226,11 @@ def main():
     parser.add_argument("--raw-dir", required=True, help="Directory containing raw .cif files or .pkl.gz bundles")
     parser.add_argument("--out-dir", required=True, help="Output dataset directory")
     parser.add_argument("--raw-from-gzip", action="store_true", help="Read raw CIF strings from .pkl.gz bundle(s)")
+    parser.add_argument("--max-samples", type=int, default=0, help="Limit the number of raw inputs after deterministic selection")
+    parser.add_argument("--sample-strategy", choices=["first", "random"], default="first", help="How to select --max-samples inputs")
+    parser.add_argument("--checkpoint-path", default="", help="Path to resumable prep checkpoint; defaults to OUT_DIR/prep_checkpoint.pkl.gz")
+    parser.add_argument("--checkpoint-interval", type=int, default=1000, help="Save prep checkpoint every N processed inputs")
+    parser.add_argument("--no-resume", action="store_true", help="Ignore any existing prep checkpoint")
     parser.add_argument("--num-decimal-places", type=int, default=4)
     parser.add_argument("--wavelength", default="CuKa")
     parser.add_argument("--qmin", type=float, default=0.0)
@@ -196,18 +249,41 @@ def main():
 
     config = PrepConfig(**vars(args))
     inputs = load_inputs(config.raw_dir, config.raw_from_gzip)
+    inputs = select_inputs(inputs, config.max_samples, config.sample_strategy, config.seed)
     if config.debug_max > 0:
         inputs = inputs[:config.debug_max]
 
-    tasks = [(obj, asdict(config)) for obj in inputs]
-    rows = []
-    failures = []
+    if not config.checkpoint_path:
+        config.checkpoint_path = os.path.join(config.out_dir, "prep_checkpoint.pkl.gz")
+
+    rows_by_source = {}
+    failures_by_source = {}
+    if not config.no_resume:
+        rows_by_source, failures_by_source = load_checkpoint(config.checkpoint_path)
+
+    pending_inputs = [
+        obj for obj in inputs
+        if source_id(obj) not in rows_by_source and source_id(obj) not in failures_by_source
+    ]
+    tasks = [(obj, asdict(config)) for obj in pending_inputs]
     with Pool(processes=config.num_workers) as pool:
-        for result, failure in tqdm(pool.imap(safe_process_cif, tasks), total=len(tasks), desc="Preparing minicif"):
+        iterator = pool.imap(safe_process_cif, tasks)
+        for n_processed, (key, result, failure) in enumerate(tqdm(iterator, total=len(tasks), desc="Preparing minicif"), start=1):
             if failure is None:
-                rows.append(result)
+                rows_by_source[key] = result
             else:
-                failures.append(failure)
+                failures_by_source[key] = failure
+            if config.checkpoint_interval > 0 and n_processed % config.checkpoint_interval == 0:
+                save_checkpoint(config.checkpoint_path, rows_by_source, failures_by_source)
+
+    save_checkpoint(config.checkpoint_path, rows_by_source, failures_by_source)
+
+    rows = [
+        rows_by_source[source_id(obj)]
+        for obj in inputs
+        if source_id(obj) in rows_by_source
+    ]
+    failures = list(failures_by_source.values())
 
     splits = split_rows(rows, config.val_fraction, config.test_fraction, config.seed)
     serialized_dir = os.path.join(config.out_dir, "serialized")
@@ -217,6 +293,7 @@ def main():
     metadata = {
         "config": asdict(config),
         "n_input": len(inputs),
+        "n_pending_at_start": len(pending_inputs),
         "n_success": len(rows),
         "n_failures": len(failures),
         "split_sizes": {split: len(split_rows_) for split, split_rows_ in splits.items()},

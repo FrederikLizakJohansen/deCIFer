@@ -23,6 +23,21 @@ sbatch minislurm/prepare_minicif_dataset.sh \
   --num-workers 8
 ```
 
+Prepare a deterministic subset from a larger source:
+
+```bash
+sbatch minislurm/prepare_minicif_dataset.sh \
+  --raw-dir data/noma \
+  --out-dir data/minicif_debug \
+  --raw-from-gzip \
+  --max-samples 10000 \
+  --sample-strategy random \
+  --num-workers 8
+```
+
+Preparation is resumable by default through `OUT_DIR/prep_checkpoint.pkl.gz`.
+Use `--no-resume` to ignore an existing checkpoint, or `--checkpoint-path PATH` to store it elsewhere.
+
 The output should contain `data/minicif/serialized/train.h5`, `val.h5`, and `test.h5`.
 
 ## 2. Train
