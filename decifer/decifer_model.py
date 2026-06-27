@@ -112,7 +112,11 @@ class CausalSelfAttention(nn.Module):
                 attention_bias = attention_bias.unsqueeze(1) # Shap (B, 1, T, T)
                 att = att + attention_bias
             else:
-                att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float("-inf"))
+                if hasattr(self, "bias"):
+                    causal_mask = self.bias[:, :, :T, :T] == 1
+                else:
+                    causal_mask = torch.tril(torch.ones(T, T, dtype=torch.bool, device=x.device)).view(1, 1, T, T)
+                att = att.masked_fill(causal_mask == 0, float("-inf"))
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
@@ -273,6 +277,7 @@ class Decifer(nn.Module):
         targets: Optional[torch.Tensor] = None,
         start_indices_batch: List[List[int]] = [[0]],
         custom_cond_emb: Optional[torch.Tensor] = None,
+        return_attn: Optional[bool] = None,
     ):
 
         device = idx.device
@@ -280,6 +285,7 @@ class Decifer(nn.Module):
         ptdtype = self.transformer.wte.weight.dtype
 
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        capture_attention = self.config.plot_attention if return_attn is None else return_attn
 
         # Original positions
         positions = torch.arange(t, device=device).unsqueeze(0).expand(b, t)  # shape (b, t)
@@ -410,10 +416,13 @@ class Decifer(nn.Module):
         x = self.transformer.drop(tok_emb + pos_emb)
 
         # Forward pass through transformer blocks
-        self.attn_scores = []
+        self.attn_scores = [] if capture_attention else None
         for i, block in enumerate(self.transformer.h):
-            x, att = block(x, attention_bias=attention_bias, return_attn=True)
-            self.attn_scores.append(att.detach().cpu().mean(dim=1))
+            if capture_attention:
+                x, att = block(x, attention_bias=attention_bias, return_attn=True)
+                self.attn_scores.append(att.detach().cpu().mean(dim=1))
+            else:
+                x = block(x, attention_bias=attention_bias, return_attn=False)
 
         x = self.transformer.ln_f(x)
 

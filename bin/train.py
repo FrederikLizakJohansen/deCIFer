@@ -11,6 +11,9 @@ import math
 import time
 import yaml
 import random
+import sys
+import platform
+import subprocess
 
 from typing import List
 import argparse
@@ -20,6 +23,7 @@ import numpy as np
 from torch.utils.data import DataLoader
 from torch.utils.data import SubsetRandomSampler
 from torch.utils.data import BatchSampler
+from torch.utils.data import SequentialSampler
 
 from torch.nn.utils.rnn import pad_sequence
 
@@ -42,20 +46,24 @@ PADDING_ID = TOKENIZER.padding_id
 NEWLINE_ID = TOKENIZER.token_to_id["\n"]
 
 class RandomBatchSampler(BatchSampler):
-    def __init__(self, sampler, batch_size, drop_last):
+    def __init__(self, sampler, batch_size, drop_last, seed=None):
         super().__init__(sampler, batch_size, drop_last)
         self.sampler = sampler
         self.batch_size = batch_size
         self.drop_last = drop_last
+        self.rng = random.Random(seed)
 
     def __iter__(self):
         # Each time __iter__ is called, radomize the batch indices
         batch_indices = list(self.sampler)
-        random.shuffle(batch_indices)
+        self.rng.shuffle(batch_indices)
 
         # Return batches of size batch_Size
         for i in range(0, len(batch_indices), self.batch_size):
-            yield batch_indices[i:i + self.batch_size]
+            batch = batch_indices[i:i + self.batch_size]
+            if len(batch) < self.batch_size and self.drop_last:
+                continue
+            yield batch
 
 @dataclass
 class TrainConfig:
@@ -72,13 +80,11 @@ class TrainConfig:
     dataset: str = ""  # Path to the dataset hdf5 files
     gradient_accumulation_steps: int = 40  # used to simulate larger batch sizes
     batch_size: int = 64  # if gradient_accumulation_steps > 1, this is the micro-batch size
-    block_size: int = 2048  # context of up to `block_size` previous characters
-    cond_size: int = 1000
     accumulative_pbar: bool = False
     num_workers_dataloader: int = 0 # Default; single process
 
     # deCIFer model
-    block_size: int = 1024
+    block_size: int = 1024  # context of up to `block_size` previous characters
     vocab_size: int = 372 # Excluding conditioning token
     n_layer: int = 8
     n_head: int = 8
@@ -95,7 +101,6 @@ class TrainConfig:
     qmin: float = 0.0
     qmax: float = 10.0
     qstep: float = 0.01
-    wavelength: str = "CuKa"
     fwhm_range_min: float = 0.001 
     fwhm_range_max: float = 0.05
     eta_range_min: float = 0.5
@@ -126,6 +131,7 @@ class TrainConfig:
     compile: bool = False  # use PyTorch 2.0 to compile the model to be faster (Not supported for deCIFer currently)
     validate: bool = False  # whether to evaluate the model using the validation set
     seed: int = 1337
+    debug_batch_assertions: bool = False
 
     # Early stopping
     early_stopping_patience: int = 50
@@ -169,6 +175,95 @@ def parse_config():
 
     return C
 
+def seed_everything(seed):
+    if seed is None:
+        return
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+def make_generator(seed):
+    if seed is None:
+        return None
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    return generator
+
+def get_git_revision():
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=os.getcwd(),
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return None
+
+def build_run_metadata(C, model):
+    return {
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S %z"),
+        "command": " ".join(sys.argv),
+        "python": sys.version,
+        "platform": platform.platform(),
+        "torch": str(torch.__version__),
+        "git_revision": get_git_revision(),
+        "dataset": os.path.abspath(C.dataset),
+        "out_dir": os.path.abspath(C.out_dir),
+        "num_parameters": model.get_num_params(non_embedding=False),
+        "num_trainable_parameters": model.get_num_params(non_embedding=False, trainable=True),
+        "config": OmegaConf.to_container(C, resolve=True),
+    }
+
+def write_run_metadata(C, metadata):
+    metadata_path = os.path.join(C.out_dir, "run_metadata.yaml")
+    with open(metadata_path, "w") as f:
+        yaml.safe_dump(metadata, f, sort_keys=False)
+
+def build_xrd_kwargs(C, augment=True):
+    if augment:
+        return {
+            'qmin': C.qmin,
+            'qmax': C.qmax,
+            'qstep': C.qstep,
+            'fwhm_range': (C.fwhm_range_min, C.fwhm_range_max),
+            'eta_range': (C.eta_range_min, C.eta_range_max),
+            'noise_range': (C.noise_range_min, C.noise_range_max),
+            'intensity_scale_range': (C.intensity_scale_range_min, C.intensity_scale_range_max),
+            'mask_prob': C.mask_prob,
+        }
+
+    fwhm = 0.5 * (C.fwhm_range_min + C.fwhm_range_max)
+    eta = 0.5 * (C.eta_range_min + C.eta_range_max)
+    return {
+        'qmin': C.qmin,
+        'qmax': C.qmax,
+        'qstep': C.qstep,
+        'fwhm_range': (fwhm, fwhm),
+        'eta_range': (eta, eta),
+        'noise_range': None,
+        'intensity_scale_range': None,
+        'mask_prob': None,
+    }
+
+def save_checkpoint(C, checkpoint, model, optimizer, training_metrics, local_iteration_number):
+    checkpoint.update({
+        "local_iteration_number": local_iteration_number,
+        'training_metrics': training_metrics,
+        'current_model': model.state_dict(),
+        "current_optimizer": optimizer.state_dict(),
+    })
+
+    print(f"saving checkpoint to {C.out_dir}...", flush=True)
+    torch.save(checkpoint, os.path.join(C.out_dir, "ckpt.pt"))
+
 def setup_datasets(C):
     
     # Custom collate function
@@ -191,6 +286,7 @@ def setup_datasets(C):
     
     # Collect relevant data
     dataset_fields = ["cif_tokens", "xrd.q", "xrd.iq"]
+    pin_memory = torch.device(C.device).type == "cuda"
 
     # Initialise datasets/loaders 
     train_dataset = DeciferDataset(os.path.join(C.dataset, "serialized/train.h5"), dataset_fields)
@@ -198,19 +294,42 @@ def setup_datasets(C):
     test_dataset = DeciferDataset(os.path.join(C.dataset, "serialized/test.h5"), dataset_fields)
         
     # Random batching sampler, train
-    train_sampler = SubsetRandomSampler(range(len(train_dataset)))
-    train_batch_sampler = RandomBatchSampler(train_sampler, batch_size=C.batch_size, drop_last=False)
-    train_dataloader = DataLoader(train_dataset, batch_sampler=train_batch_sampler, num_workers=C.num_workers_dataloader, collate_fn=collate_fn)
+    train_sampler = SubsetRandomSampler(range(len(train_dataset)), generator=make_generator(C.seed))
+    train_batch_sampler = RandomBatchSampler(train_sampler, batch_size=C.batch_size, drop_last=False, seed=C.seed)
+    train_dataloader = DataLoader(
+        train_dataset,
+        batch_sampler=train_batch_sampler,
+        num_workers=C.num_workers_dataloader,
+        collate_fn=collate_fn,
+        pin_memory=pin_memory,
+        worker_init_fn=seed_worker if C.seed is not None else None,
+        generator=make_generator(None if C.seed is None else C.seed + 1),
+    )
     
-    # Random batching sampler, val
-    val_sampler = SubsetRandomSampler(range(len(val_dataset)))
-    val_batch_sampler = RandomBatchSampler(val_sampler, batch_size=C.batch_size, drop_last=False)
-    val_dataloader = DataLoader(val_dataset, batch_sampler=val_batch_sampler, num_workers=C.num_workers_dataloader, collate_fn=collate_fn)
+    # Sequential batching sampler, val/test
+    val_sampler = SequentialSampler(val_dataset)
+    val_dataloader = DataLoader(
+        val_dataset,
+        sampler=val_sampler,
+        batch_size=C.batch_size,
+        num_workers=C.num_workers_dataloader,
+        collate_fn=collate_fn,
+        pin_memory=pin_memory,
+        worker_init_fn=seed_worker if C.seed is not None else None,
+        generator=make_generator(None if C.seed is None else C.seed + 2),
+    )
     
-    # Random batching sampler, test
-    test_sampler = SubsetRandomSampler(range(len(test_dataset)))
-    test_batch_sampler = RandomBatchSampler(test_sampler, batch_size=C.batch_size, drop_last=False)
-    test_dataloader = DataLoader(test_dataset, batch_sampler=test_batch_sampler, num_workers=C.num_workers_dataloader, collate_fn=collate_fn)
+    test_sampler = SequentialSampler(test_dataset)
+    test_dataloader = DataLoader(
+        test_dataset,
+        sampler=test_sampler,
+        batch_size=C.batch_size,
+        num_workers=C.num_workers_dataloader,
+        collate_fn=collate_fn,
+        pin_memory=pin_memory,
+        worker_init_fn=seed_worker if C.seed is not None else None,
+        generator=make_generator(None if C.seed is None else C.seed + 3),
+    )
 
     # Combine loaders for easy access
     dataloaders = {
@@ -227,30 +346,22 @@ if __name__ == "__main__":
     C = parse_config()
     
     # Set seed
-    if C.seed is not None: torch.manual_seed(C.seed)
+    seed_everything(C.seed)
     
     # Setup ctx, note: float16 data type will automatically use a GradScaler
-    torch.backends.cuda.matmul.allow_tf32 = True  # allow tf32 on matmul
-    torch.backends.cudnn.allow_tf32 = True  # allow tf32 on cudnn
+    device_type = torch.device(C.device).type
+    if device_type == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = True  # allow tf32 on matmul
+        torch.backends.cudnn.allow_tf32 = True  # allow tf32 on cudnn
     ptdtype = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16}[C.dtype]
-    ctx = nullcontext() if C.device == "cpu" else torch.cuda.amp.autocast(dtype=ptdtype)
+    ctx = torch.amp.autocast(device_type="cuda", dtype=ptdtype) if device_type == "cuda" else nullcontext()
 
     # Setup datasets
     dataloaders = setup_datasets(C)
 
     # Augmentation kwargs
-    augmentation_kwargs = {
-        'qmin': C.qmin,
-        'qmax': C.qmax,
-        'qstep': C.qstep,
-        # 'wavelength': C.wavelength,
-        'fwhm_range': (C.fwhm_range_min, C.fwhm_range_max),
-        'eta_range': (C.eta_range_min, C.eta_range_max),
-        'noise_range': (C.noise_range_min, C.noise_range_max),
-        'intensity_scale_range': (C.intensity_scale_range_min, C.intensity_scale_range_max),
-        'mask_prob': C.mask_prob,
-        # 'size': len(np.arange(C.qmin, C.qmax, C.qstep))
-    }
+    augmentation_kwargs = build_xrd_kwargs(C, augment=True)
+    clean_xrd_kwargs = build_xrd_kwargs(C, augment=False)
 
     # Initialize training metrics
     training_metrics = {
@@ -321,6 +432,7 @@ if __name__ == "__main__":
 
         training_metrics['iteration_number'] = checkpoint["training_metrics"]["iteration_number"]
         training_metrics['best_val_loss'] = checkpoint["training_metrics"]["best_val_loss"]
+        training_metrics['patience_counter'] = checkpoint["training_metrics"].get("patience_counter", 0)
     else:
         raise Exception(f"[init_from] '{C.init_from}' not recognized")
 
@@ -328,7 +440,7 @@ if __name__ == "__main__":
     model.to(C.device)
 
     # initialize a GradScaler; if enabled=False scaler is a no-op
-    scaler = torch.cuda.amp.GradScaler(enabled=(C.dtype == "float16"))
+    scaler = torch.amp.GradScaler("cuda", enabled=(device_type == "cuda" and C.dtype == "float16"))
 
     # Initialize Optimizer
     optimizer = model.configure_optimizers(C.weight_decay, C.learning_rate, (C.beta1, C.beta2))
@@ -340,12 +452,15 @@ if __name__ == "__main__":
         print("Compiling the model (takes a ~minute)...", flush=True)
         unoptimized_model = model
         model = torch.compile(model)  # requires PyTorch 2.0
+    raw_model = model._orig_mod if hasattr(model, "_orig_mod") else model
+    checkpoint["run_metadata"] = build_run_metadata(C, raw_model)
+    write_run_metadata(C, checkpoint["run_metadata"])
     
     # Initialize a dictionary to keep data iterators per split
     data_iters = {}
 
     #@profile
-    def get_batch(split):
+    def get_batch(split, augment=True):
 
         # Retrieve the dataloader and initialize the iterator
         dataloader = dataloaders[split]
@@ -374,7 +489,8 @@ if __name__ == "__main__":
 
             # Fetch conditioning and augment to cont signals
             if C.condition:
-                cond_list.extend(discrete_to_continuous_xrd(batch['xrd.q'], batch['xrd.iq'], **augmentation_kwargs)['iq'])
+                xrd_kwargs = augmentation_kwargs if augment else clean_xrd_kwargs
+                cond_list.extend(discrete_to_continuous_xrd(batch['xrd.q'], batch['xrd.iq'], **xrd_kwargs)['iq'])
 
         # Now pack sequences into batches without loops
         # Concatenate all sequences into one long tensor
@@ -417,18 +533,25 @@ if __name__ == "__main__":
             index = torch.searchsorted(seq_cum_lengths, num_batches * C.block_size) + 1
             cond_list = cond_list[:index]
             cond_batch = torch.stack(cond_list)
+            if C.debug_batch_assertions:
+                num_start_tokens = sum(len(indices) for indices in start_indices_list)
+                if cond_batch.size(0) < num_start_tokens:
+                    raise RuntimeError(
+                        f"conditioning alignment error: {cond_batch.size(0)} condition vectors "
+                        f"for {num_start_tokens} start tokens"
+                    )
         
         # Send to device (CUDA/CPU)
-        if C.device == "cuda":
+        if device_type == "cuda":
             X_batch = X_batch.pin_memory().to(C.device, non_blocking=True)
             Y_batch = Y_batch.pin_memory().to(C.device, non_blocking=True)
             if cond_batch is not None:
                 cond_batch = cond_batch.pin_memory().to(C.device, non_blocking=True)
         else:
-            X_batch = X_batch.pin_memory().to(C.device)
-            Y_batch = Y_batch.pin_memory().to(C.device)
+            X_batch = X_batch.to(C.device)
+            Y_batch = Y_batch.to(C.device)
             if cond_batch is not None:
-                cond_batch = cond_batch.pin_memory().to(C.device)
+                cond_batch = cond_batch.to(C.device)
 
         # Return the batch data and start indices
         return X_batch, Y_batch, cond_batch, start_indices_list
@@ -439,13 +562,15 @@ if __name__ == "__main__":
         out = {}
         model.eval()
         for split, eval_iters in [("train", C.eval_iters_train), ("val", C.eval_iters_val)]:
+            if split == "val":
+                data_iters.pop(split, None)
             losses = torch.zeros(eval_iters)
             for k in range(eval_iters):
-                X, Y, cond, start_indices = get_batch(split)
+                X, Y, cond, start_indices = get_batch(split, augment=False)
                 with ctx:
                     _, loss = model(X, cond, Y, start_indices)
                 losses[k] = loss.item()
-            out[split] = losses.mean()
+            out[split] = losses.mean().item()
         model.train()
         return out
 
@@ -456,6 +581,8 @@ if __name__ == "__main__":
             return C.learning_rate * it / C.warmup_iters
         # 2) if it > lr_decay_iters, return min learning rate
         if it > C.lr_decay_iters:
+            return C.min_lr
+        if C.lr_decay_iters <= C.warmup_iters:
             return C.min_lr
         # 3) in between, use cosine decay down to min learning rate
         decay_ratio = (it - C.warmup_iters) / (C.lr_decay_iters - C.warmup_iters)
@@ -487,29 +614,20 @@ if __name__ == "__main__":
                 print(f"step {training_metrics['iteration_number']}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}", flush=True)
 
                 # Check if new best model is found; if so, save, else patience score recal
+                found_new_best = losses["val"] <= training_metrics['best_val_loss'] or local_iteration_number == 0
                 if losses["val"] > training_metrics['best_val_loss'] and local_iteration_number != 0:
                     training_metrics['patience_counter'] += 1
                     print("Patience score increasing to:", training_metrics['patience_counter'])
                 else:
                     training_metrics['best_val_loss'] = losses['val']
-                    checkpoint['best_model_state'] = copy.deepcopy(model.state_dict())
+                    checkpoint['best_model_state'] = copy.deepcopy(raw_model.state_dict())
                     checkpoint['best_optimizer_state'] = copy.deepcopy(optimizer.state_dict())
                     if training_metrics['patience_counter'] > 0:
                         print("Patience score resetting.")
                         training_metrics['patience_counter'] = 0
 
-                if training_metrics['iteration_number'] > 0:
-
-                    # Update checkpoint
-                    checkpoint.update({
-                        "local_iteration_number": local_iteration_number,
-                        'training_metrics': training_metrics,
-                        'current_model': model.state_dict(),
-                        "current_optimizer": optimizer.state_dict(),
-                    })
-
-                    print(f"saving checkpoint to {C.out_dir}...", flush=True)
-                    torch.save(checkpoint, os.path.join(C.out_dir, "ckpt.pt"))
+                if C.always_save_checkpoint or found_new_best:
+                    save_checkpoint(C, checkpoint, raw_model, optimizer, training_metrics, local_iteration_number)
 
                 if training_metrics['patience_counter'] >= C.early_stopping_patience:
                     print(f"Early stopping triggered after {training_metrics['iteration_number']} iterations")
@@ -517,6 +635,8 @@ if __name__ == "__main__":
 
             else:
                 training_metrics['best_val_loss'] = 0.
+                if C.always_save_checkpoint:
+                    save_checkpoint(C, checkpoint, raw_model, optimizer, training_metrics, local_iteration_number)
 
         if training_metrics['iteration_number'] == 0 and C.eval_only:
             break
@@ -524,14 +644,17 @@ if __name__ == "__main__":
         # Forward backward update, with optional gradient accumulation to simulate larger batch size
         # and using the GradScaler if data type is float16
         small_step_pbar = tqdm(desc='Accumulating losses...', total=C.gradient_accumulation_steps, leave=False, disable=not C.accumulative_pbar)
+        loss_accum = 0.0
         for micro_step in range(C.gradient_accumulation_steps):
             with ctx:
                 logits, loss = model(X, cond, Y, start_indices)
+                loss = loss / C.gradient_accumulation_steps
                 
             # immediately async prefetch next batch while model is doing the forward pass on the GPU
             X, Y, cond, start_indices = get_batch("train")
             # backward pass, with gradient scaling if training in fp16
             scaler.scale(loss).backward()
+            loss_accum += loss.detach()
             small_step_pbar.update(1)
 
         small_step_pbar.close()
@@ -551,7 +674,7 @@ if __name__ == "__main__":
         dt = t1 - t0
         t0 = t1
         if training_metrics['iteration_number'] % C.log_interval == 0:
-            lossf = loss.item()  # loss as float. note: this is a CPU-GPU sync point
+            lossf = loss_accum.item()  # loss as float. note: this is a CPU-GPU sync point
             print(f"iter {training_metrics['iteration_number']}: loss {lossf:.4f}, time {dt * 1000:.2f}ms", flush=True)
         training_metrics['iteration_number'] += 1
         local_iteration_number += 1
