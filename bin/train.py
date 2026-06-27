@@ -336,6 +336,19 @@ def save_checkpoint(C, checkpoint, model, optimizer, training_metrics, local_ite
     print(f"saving checkpoint to {C.out_dir}...", flush=True)
     torch.save(checkpoint, os.path.join(C.out_dir, "ckpt.pt"))
 
+def autocast_context(device_type, dtype):
+    if device_type != "cuda":
+        return nullcontext()
+    if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
+        return torch.amp.autocast(device_type="cuda", dtype=dtype)
+    return torch.cuda.amp.autocast(dtype=dtype)
+
+def make_grad_scaler(device_type, dtype):
+    enabled = device_type == "cuda" and dtype == "float16"
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        return torch.amp.GradScaler("cuda", enabled=enabled)
+    return torch.cuda.amp.GradScaler(enabled=enabled)
+
 def setup_datasets(C):
     
     # Custom collate function
@@ -426,7 +439,7 @@ if __name__ == "__main__":
         torch.backends.cuda.matmul.allow_tf32 = True  # allow tf32 on matmul
         torch.backends.cudnn.allow_tf32 = True  # allow tf32 on cudnn
     ptdtype = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16}[C.dtype]
-    ctx = torch.amp.autocast(device_type="cuda", dtype=ptdtype) if device_type == "cuda" else nullcontext()
+    ctx = autocast_context(device_type, ptdtype)
 
     # Setup datasets
     dataloaders = setup_datasets(C)
@@ -512,7 +525,7 @@ if __name__ == "__main__":
     model.to(C.device)
 
     # initialize a GradScaler; if enabled=False scaler is a no-op
-    scaler = torch.amp.GradScaler("cuda", enabled=(device_type == "cuda" and C.dtype == "float16"))
+    scaler = make_grad_scaler(device_type, C.dtype)
 
     # Initialize Optimizer
     optimizer = model.configure_optimizers(C.weight_decay, C.learning_rate, (C.beta1, C.beta2))
