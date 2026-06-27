@@ -2,7 +2,7 @@
 
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from pymatgen.core import Element
 from pymatgen.io.cif import CifParser
@@ -22,6 +22,16 @@ START_TOKEN = "<mcif>"
 ATOM_TOKEN = "<atom>"
 END_TOKEN = "</mcif>"
 CELL_TOKEN = "cell"
+
+CRYSTAL_SYSTEM_SPACE_GROUPS = {
+    1: range(1, 3),
+    2: range(3, 16),
+    3: range(16, 75),
+    4: range(75, 143),
+    5: range(143, 168),
+    6: range(168, 195),
+    7: range(195, 231),
+}
 
 
 @dataclass
@@ -122,6 +132,79 @@ class MinicifTokenizer:
         token_pattern = "|".join(self._escaped_tokens)
         tokens = re.findall(token_pattern, minicif_string)
         return [token if token in self._tokens else UNK_TOKEN for token in tokens]
+
+
+def allowed_minicif_next_token_ids(token_ids, tokenizer: Optional[MinicifTokenizer] = None) -> Optional[Set[int]]:
+    """Return allowed next token ids for the minicif DSL, or None if unconstrained."""
+    tokenizer = tokenizer or MinicifTokenizer()
+    token_to_id = tokenizer.token_to_id
+    padding_id = tokenizer.padding_id
+    ids = [int(token_id) for token_id in token_ids if int(token_id) != padding_id]
+    text = tokenizer.decode(ids) if ids else ""
+
+    if text == "":
+        return {token_to_id[START_TOKEN]}
+
+    fields = text.split(" ")
+    fresh_field = text.endswith(" ")
+    completed_fields = fields[:-1] if fresh_field else fields
+
+    if not fresh_field:
+        current = completed_fields[-1]
+        if _current_field_is_numeric(completed_fields):
+            return _numeric_next_ids(current, token_to_id)
+        if current == END_TOKEN:
+            return {padding_id}
+        return {token_to_id[" "]}
+
+    expected = _expected_next_field(completed_fields)
+    if expected is None:
+        return None
+
+    kind = expected["kind"]
+    if kind == "start":
+        return {token_to_id[START_TOKEN]}
+    if kind == "formula_element_or_cs":
+        allowed = _element_ids(tokenizer)
+        if expected["elements"]:
+            allowed.update(_crystal_system_ids(tokenizer))
+        return allowed
+    if kind == "space_group":
+        crystal_system = expected["crystal_system"]
+        return {token_to_id[f"sg_{i}"] for i in CRYSTAL_SYSTEM_SPACE_GROUPS[crystal_system]}
+    if kind == "cell":
+        return {token_to_id[CELL_TOKEN]}
+    if kind == "number":
+        return {token_to_id[token] for token in DIGITS + ["+", "-", "."]}
+    if kind == "atom_or_end":
+        return {token_to_id[ATOM_TOKEN], token_to_id[END_TOKEN]}
+    if kind == "atom_element":
+        elements = expected["elements"]
+        if not elements:
+            return _element_ids(tokenizer)
+        return {token_to_id[element] for element in elements if element in token_to_id}
+    if kind == "pad":
+        return {padding_id}
+    return None
+
+
+def mask_minicif_logits(logits, sequences, tokenizer: Optional[MinicifTokenizer] = None):
+    """Set logits for impossible minicif next tokens to -inf."""
+    import torch
+
+    tokenizer = tokenizer or MinicifTokenizer()
+    masked_logits = logits.clone()
+    for row_idx in range(sequences.size(0)):
+        allowed = allowed_minicif_next_token_ids(sequences[row_idx].detach().cpu().tolist(), tokenizer)
+        if allowed is None:
+            continue
+        allowed = [token_id for token_id in allowed if 0 <= token_id < masked_logits.size(-1)]
+        if not allowed:
+            continue
+        row_mask = torch.ones(masked_logits.size(-1), dtype=torch.bool, device=masked_logits.device)
+        row_mask[allowed] = False
+        masked_logits[row_idx, row_mask] = -float("inf")
+    return masked_logits
 
 
 def _ordered_elements(block: Dict, element_order: str) -> List[str]:
@@ -228,3 +311,100 @@ def _format_number(value: float, decimal_places: int) -> str:
     if value == 0:
         value = 0.0
     return f"{value:.{decimal_places}f}"
+
+
+def _expected_next_field(fields: List[str]) -> Optional[Dict]:
+    if not fields or fields == [""]:
+        return {"kind": "start"}
+    if fields[0] != START_TOKEN:
+        return None
+
+    elements = []
+    index = 1
+    while index < len(fields) and not fields[index].startswith("cs_"):
+        if fields[index]:
+            elements.append(fields[index])
+        index += 1
+
+    if index == len(fields):
+        return {"kind": "formula_element_or_cs", "elements": elements}
+
+    crystal_system = _parse_prefixed_int(fields[index], "cs_")
+    if crystal_system not in CRYSTAL_SYSTEM_SPACE_GROUPS:
+        return None
+    index += 1
+
+    if index == len(fields):
+        return {"kind": "space_group", "crystal_system": crystal_system}
+
+    space_group = _parse_prefixed_int(fields[index], "sg_")
+    if space_group not in CRYSTAL_SYSTEM_SPACE_GROUPS[crystal_system]:
+        return None
+    index += 1
+
+    if index == len(fields):
+        return {"kind": "cell"}
+    if fields[index] != CELL_TOKEN:
+        return None
+    index += 1
+
+    for _ in range(6):
+        if index == len(fields):
+            return {"kind": "number"}
+        index += 1
+
+    while index < len(fields):
+        if fields[index] == END_TOKEN:
+            return {"kind": "pad"} if index == len(fields) - 1 else None
+        if fields[index] != ATOM_TOKEN:
+            return None
+        index += 1
+
+        if index == len(fields):
+            return {"kind": "atom_element", "elements": elements}
+        index += 1
+
+        for _ in range(5):
+            if index == len(fields):
+                return {"kind": "number"}
+            index += 1
+
+    return {"kind": "atom_or_end"}
+
+
+def _current_field_is_numeric(fields: List[str]) -> bool:
+    previous_fields = fields[:-1]
+    expected = _expected_next_field(previous_fields)
+    return expected is not None and expected["kind"] == "number"
+
+
+def _numeric_next_ids(current: str, token_to_id: Dict[str, int]) -> Set[int]:
+    allowed = {token_to_id[digit] for digit in DIGITS}
+    if "." not in current:
+        allowed.add(token_to_id["."])
+    if _is_complete_number(current):
+        allowed.add(token_to_id[" "])
+    return allowed
+
+
+def _is_complete_number(value: str) -> bool:
+    return re.fullmatch(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)", value) is not None
+
+
+def _parse_prefixed_int(value: str, prefix: str) -> Optional[int]:
+    if not value.startswith(prefix):
+        return None
+    try:
+        return int(value[len(prefix):])
+    except ValueError:
+        return None
+
+
+def _element_ids(tokenizer: MinicifTokenizer) -> Set[int]:
+    token_to_id = tokenizer.token_to_id
+    return {token_to_id[str(Element.from_Z(z))] for z in range(1, 119)}
+
+
+def _crystal_system_ids(tokenizer: MinicifTokenizer) -> Set[int]:
+    token_to_id = tokenizer.token_to_id
+    return {token_to_id[f"cs_{i}"] for i in range(1, 8)}

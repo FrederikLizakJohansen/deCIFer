@@ -35,6 +35,8 @@ class DeciferConfig:
     condition_size: int = 1000
     condition_embedder_hidden_layers: List[int] = field(default_factory=lambda: [512])
     plot_attention: bool = False
+    tokenizer: str = "legacy"
+    minicif_constrained_decoding: bool = False
 
 class LayerNorm(nn.Module):
 
@@ -193,7 +195,19 @@ class Decifer(nn.Module):
 
         self.config = config
 
-        self.tokenizer = Tokenizer()
+        if config.tokenizer == "minicif":
+            from decifer.minicif import END_TOKEN, MinicifTokenizer
+
+            self.tokenizer = MinicifTokenizer()
+            self.end_id = self.tokenizer.token_to_id[END_TOKEN]
+            self.newline_id = None
+        elif config.tokenizer == "legacy":
+            self.tokenizer = Tokenizer()
+            self.end_id = None
+            self.newline_id = self.tokenizer.token_to_id["\n"]
+        else:
+            raise ValueError(f"unknown tokenizer: {config.tokenizer}")
+        self.padding_id = self.tokenizer.padding_id
 
         self.attn_scores = None
 
@@ -384,7 +398,7 @@ class Decifer(nn.Module):
                 orig_pos = index_map[batch_idx, seq_pos]
 
                 # Gather idx and targets
-                idx_new = torch.full((int(b), int(max_new_t)), Tokenizer().padding_id, dtype=idx.dtype, device=device)
+                idx_new = torch.full((int(b), int(max_new_t)), self.padding_id, dtype=idx.dtype, device=device)
                 targets_new = torch.full((int(b), int(max_new_t)), -1, dtype=targets.dtype, device=device)
 
                 idx_new[batch_idx, seq_pos] = idx[batch_idx, orig_pos]
@@ -500,14 +514,51 @@ class Decifer(nn.Module):
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas)
         return optimizer
 
+    def _use_minicif_constraints(self, constrain_minicif: Optional[bool]) -> bool:
+        if constrain_minicif is None:
+            constrain_minicif = self.config.minicif_constrained_decoding
+        return bool(constrain_minicif and self.config.tokenizer == "minicif")
+
+    def _mask_generation_logits(self, logits: torch.Tensor, idx: torch.Tensor, constrain_minicif: Optional[bool]) -> torch.Tensor:
+        if not self._use_minicif_constraints(constrain_minicif):
+            return logits
+        from decifer.minicif import mask_minicif_logits
+
+        return mask_minicif_logits(logits, idx, self.tokenizer)
+
+    def _generation_end_mask(self, idx_next: torch.Tensor, prev_id: torch.Tensor) -> torch.Tensor:
+        end_condition = idx_next == self.padding_id
+        if self.end_id is not None:
+            end_condition = end_condition | (idx_next == self.end_id)
+        if self.newline_id is not None:
+            end_condition = end_condition | ((prev_id == self.newline_id) & (idx_next == self.newline_id))
+        return end_condition
+
+    def _drop_generation_end_token_mask(self, idx_next: torch.Tensor, prev_id: torch.Tensor) -> torch.Tensor:
+        drop_token = idx_next == self.padding_id
+        if self.newline_id is not None:
+            drop_token = drop_token | ((prev_id == self.newline_id) & (idx_next == self.newline_id))
+        return drop_token
+
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, cond_vec=None, start_indices_batch=None, temperature=1.0, top_k=None, disable_pbar=False, custom_cond_emb=None):
+    def generate(
+        self,
+        idx,
+        max_new_tokens,
+        cond_vec=None,
+        start_indices_batch=None,
+        temperature=1.0,
+        top_k=None,
+        disable_pbar=False,
+        custom_cond_emb=None,
+        constrain_minicif=None,
+    ):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         """
-        prev_id = None
+        prev_id = torch.full((idx.size(0),), fill_value=-1, dtype=torch.long, device=idx.device)
         generation_pbar = tqdm(total=max_new_tokens, desc='Generating sequence', leave=False, disable=disable_pbar)
         for _ in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
@@ -516,6 +567,7 @@ class Decifer(nn.Module):
             logits, _ = self(idx_cond, cond_vec=cond_vec, start_indices_batch = start_indices_batch, custom_cond_emb=custom_cond_emb)
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
+            logits = self._mask_generation_logits(logits, idx, constrain_minicif)
             # optionally crop the logits to only the top k options
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
@@ -526,21 +578,29 @@ class Decifer(nn.Module):
             idx_next = torch.multinomial(probs, num_samples=1)
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
-            # a sequence of two newlines indicates the end of a CIF file
-            if prev_id is not None and prev_id == NEWLINE_ID and idx_next.item() == NEWLINE_ID:
+            if self._generation_end_mask(idx_next.squeeze(-1), prev_id).all():
+                if self._drop_generation_end_token_mask(idx_next.squeeze(-1), prev_id).all():
+                    idx = idx[:,:-1]
                 break
-            # as soon as <pad> is hit -> end of cif
-            if idx_next.item() == PADDING_ID:
-                idx = idx[:,:-1]
-                break
-            prev_id = idx_next.item()
+            prev_id = idx_next.squeeze(-1)
             generation_pbar.update(1)
         generation_pbar.close()
         
         return idx
 
     @torch.no_grad()
-    def generate_batched_reps(self, idx, max_new_tokens, cond_vec=None, start_indices_batch=None, temperature=1.0, top_k=None, disable_pbar=False, custom_cond_emb = None):
+    def generate_batched_reps(
+        self,
+        idx,
+        max_new_tokens,
+        cond_vec=None,
+        start_indices_batch=None,
+        temperature=1.0,
+        top_k=None,
+        disable_pbar=False,
+        custom_cond_emb=None,
+        constrain_minicif=None,
+    ):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (batch_size, seq_len)) and complete
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
@@ -560,6 +620,7 @@ class Decifer(nn.Module):
             logits, _ = self(idx_cond, cond_vec=cond_vec, start_indices_batch=start_indices_batch, custom_cond_emb=custom_cond_emb)
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
+            logits = self._mask_generation_logits(logits, idx, constrain_minicif)
             # optionally crop the logits to only the top k options
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
@@ -567,7 +628,7 @@ class Decifer(nn.Module):
             # apply softmax to convert logits to (normalized) probabilities
             probs = F.softmax(logits, dim=-1)
             # sample from the distribution
-            idx_next = torch.full((batch_size, 1), fill_value=PADDING_ID, dtype=torch.long, device=device)
+            idx_next = torch.full((batch_size, 1), fill_value=self.padding_id, dtype=torch.long, device=device)
             active_mask = ~finished
             if active_mask.any():
                 idx_next[active_mask] = torch.multinomial(probs[active_mask], num_samples=1)
@@ -575,11 +636,12 @@ class Decifer(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)
             # Update prev_id and check stopping conditions
             idx_next_squeezed = idx_next.squeeze(-1)
-            end_condition = ((prev_id == NEWLINE_ID) & (idx_next_squeezed == NEWLINE_ID)) | (idx_next_squeezed == PADDING_ID)
+            end_condition = self._generation_end_mask(idx_next_squeezed, prev_id)
             # Record sequence lengths when sequences finish
             just_finished = end_condition & (~finished)
-            # Exclude the last token that triggered the end condition
-            seq_lens[just_finished] = idx.size(1) - 1
+            seq_lens[just_finished] = idx.size(1)
+            drop_end_token = self._drop_generation_end_token_mask(idx_next_squeezed, prev_id)
+            seq_lens[just_finished & drop_end_token] = idx.size(1) - 1
             finished = finished | end_condition
             prev_id = idx_next_squeezed
             generation_pbar.update(1)
@@ -590,23 +652,33 @@ class Decifer(nn.Module):
         seq_lens[seq_lens == -1] = idx.size(1)
         # Truncate sequences to their actual length
         max_seq_len = seq_lens.max().item()
-        idx_truncated = torch.full((batch_size, max_seq_len), fill_value=Tokenizer().padding_id, dtype=idx.dtype, device=idx.device)
+        idx_truncated = torch.full((batch_size, max_seq_len), fill_value=self.padding_id, dtype=idx.dtype, device=idx.device)
         for i in range(batch_size):
             seq_len = seq_lens[i].item()
             idx_truncated[i, :seq_len] = idx[i, :seq_len]
         return idx_truncated
     
     @torch.no_grad()
-    def generate_and_print(self, idx, max_new_tokens, cond_vec=None, start_indices_batch=None, temperature=1.0, top_k=None, custom_cond_emb=None):
+    def generate_and_print(
+        self,
+        idx,
+        max_new_tokens,
+        cond_vec=None,
+        start_indices_batch=None,
+        temperature=1.0,
+        top_k=None,
+        custom_cond_emb=None,
+        constrain_minicif=None,
+    ):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         """
-        prev_id = None
+        prev_id = torch.full((idx.size(0),), fill_value=-1, dtype=torch.long, device=idx.device)
             
         for id in idx[0]:
-            token = tokenizer.id_to_token[id.item()]
+            token = self.tokenizer.id_to_token[id.item()]
             for char in token:
                 sys.stdout.write(char)
                 sys.stdout.flush()
@@ -618,6 +690,7 @@ class Decifer(nn.Module):
             logits, _ = self(idx_cond, cond_vec=cond_vec, start_indices_batch=start_indices_batch, custom_cond_emb=custom_cond_emb)
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
+            logits = self._mask_generation_logits(logits, idx, constrain_minicif)
             # optionally crop the logits to only the top k options
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
@@ -627,23 +700,21 @@ class Decifer(nn.Module):
             # sample from the distribution
             idx_next = torch.multinomial(probs, num_samples=1)
             
-            # as soon as <pad> is hit -> end of cif
-            if idx_next.item() == PADDING_ID:
-                idx = idx[:,:-1]
+            end_condition = self._generation_end_mask(idx_next.squeeze(-1), prev_id)
+            if end_condition.all() and self._drop_generation_end_token_mask(idx_next.squeeze(-1), prev_id).all():
                 break
 
             # Decode and print
-            token_next = tokenizer.id_to_token[idx_next[0].item()]
+            token_next = self.tokenizer.id_to_token[idx_next[0].item()]
             for char in token_next:
                 sys.stdout.write(char)
                 sys.stdout.flush()
 
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
-            # a sequence of two newlines indicates the end of a CIF file
-            if prev_id is not None and prev_id == NEWLINE_ID and idx_next.item() == NEWLINE_ID:
+            if end_condition.all():
                 break
                 
-            prev_id = idx_next.item()
+            prev_id = idx_next.squeeze(-1)
 
         return idx

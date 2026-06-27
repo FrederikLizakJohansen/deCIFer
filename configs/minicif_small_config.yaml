@@ -37,6 +37,7 @@ early_stopping_patience: 50
 
 condition: True
 boundary_masking: True
+minicif_constrained_decoding: True
 
 qmin: 0.0
 qmax: 10.0

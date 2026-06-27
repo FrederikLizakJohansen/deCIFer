@@ -1,5 +1,6 @@
 import unittest
 
+import torch
 from pymatgen.core import Lattice, Structure
 from pymatgen.io.cif import CifWriter
 
@@ -9,7 +10,9 @@ from decifer.minicif import (
     START_TOKEN,
     MinicifConfig,
     MinicifTokenizer,
+    allowed_minicif_next_token_ids,
     canonicalize_cif,
+    mask_minicif_logits,
 )
 
 
@@ -63,6 +66,46 @@ class MinicifTest(unittest.TestCase):
         ids = tokenizer.encode(tokens)
 
         self.assertEqual(tokenizer.decode(ids), minicif)
+
+    def test_space_group_choices_are_conditioned_on_crystal_system(self):
+        tokenizer = MinicifTokenizer()
+        prefix = "<mcif> Na Cl cs_7 "
+        ids = tokenizer.encode(tokenizer.tokenize_minicif(prefix))
+
+        allowed = allowed_minicif_next_token_ids(ids, tokenizer)
+
+        self.assertIn(tokenizer.token_to_id["sg_195"], allowed)
+        self.assertIn(tokenizer.token_to_id["sg_230"], allowed)
+        self.assertNotIn(tokenizer.token_to_id["sg_194"], allowed)
+
+    def test_atom_elements_are_conditioned_on_prefix_elements(self):
+        tokenizer = MinicifTokenizer()
+        prefix = (
+            "<mcif> Na Cl cs_7 sg_221 cell "
+            "5.640 5.640 5.640 90.000 90.000 90.000 <atom> "
+        )
+        ids = tokenizer.encode(tokenizer.tokenize_minicif(prefix))
+
+        allowed = allowed_minicif_next_token_ids(ids, tokenizer)
+
+        self.assertIn(tokenizer.token_to_id["Na"], allowed)
+        self.assertIn(tokenizer.token_to_id["Cl"], allowed)
+        self.assertNotIn(tokenizer.token_to_id["Fe"], allowed)
+
+    def test_minicif_logit_mask_blocks_invalid_atom_elements(self):
+        tokenizer = MinicifTokenizer()
+        prefix = (
+            "<mcif> Na Cl cs_7 sg_221 cell "
+            "5.640 5.640 5.640 90.000 90.000 90.000 <atom> "
+        )
+        ids = tokenizer.encode(tokenizer.tokenize_minicif(prefix))
+        logits = torch.zeros(1, tokenizer.vocab_size)
+
+        masked = mask_minicif_logits(logits, torch.tensor([ids]), tokenizer)
+
+        self.assertEqual(masked[0, tokenizer.token_to_id["Na"]].item(), 0)
+        self.assertEqual(masked[0, tokenizer.token_to_id["Cl"]].item(), 0)
+        self.assertTrue(torch.isneginf(masked[0, tokenizer.token_to_id["Fe"]]))
 
 
 if __name__ == "__main__":

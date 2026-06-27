@@ -10,6 +10,7 @@ Purpose: collect concrete ideas for improving the current deCIFer codebase, mode
 - 2026-06-27: Implemented the immediate training-code improvements in `bin/train.py` and `decifer/decifer_model.py`; verified with syntax checks, an attention opt-in forward check, and a synthetic CPU training smoke test.
 - 2026-06-27: Started aggressive CIF minimization with a standalone `decifer.minicif` canonicalizer and focused unit tests.
 - 2026-06-27: Added a one-pass minicif dataset preparation path and moved PXRD conditioning toward sparse peak storage plus training-time Nyquist-aware augmentation.
+- 2026-06-27: Added first-pass minicif constrained decoding helpers: `sg_*` choices are masked by the emitted crystal system, and `<atom>` element choices are masked to the constituent elements emitted in the minicif prefix.
 
 ## Review assumptions
 
@@ -202,6 +203,12 @@ Verification:
 - P0 - Establish reproducible baselines before changing model capacity.
   Now that checkpointing, validation, and gradient accumulation are saner, run the current small and full configs to establish loss, validity, PXRD agreement, throughput, and memory. Without this, architecture changes will be hard to interpret.
 
+  Baseline protocol:
+  - Use `configs/minicif_small_config.yaml` plus `minislurm/train_minicif.sh` as the first smoke/baseline path.
+  - Record train loss, clean validation loss, tokens/sec, max GPU memory, checkpoint git commit, dataset path, q-grid size, and augmentation settings.
+  - Generate a small fixed validation sample set with and without `minicif_constrained_decoding` so syntax/chemistry gains are separated from training-loss changes.
+  - Treat later architecture changes as meaningful only if they beat this run at comparable tokens seen and parameter count.
+
 - P0 - Add curriculum over PXRD difficulty.
   Start with clean, fixed-width simulated patterns and gradually introduce peak broadening, noise, missing regions, intensity scaling, preferred-orientation-like perturbations, and background. This can make the conditioning problem easier early and more robust later.
   Experiment: schedule augmentation ranges over training iterations and compare to full-strength augmentation from step 0.
@@ -267,11 +274,20 @@ Verification:
   Not yet wired:
   - Minicif training/evaluation configs.
   - Minicif -> full CIF rendering for evaluation/generation.
-  - Token constraints that lock `sg_*` candidates based on `cs_*`.
+
+  Current constrained decoding:
+  - `sg_*` candidates are restricted to the emitted `cs_*` crystal-system range.
+  - Atom-site element candidates after `<atom>` are restricted to the constituent elements emitted after `<mcif>`.
+  - `</mcif>` is treated as the minicif generation stop token, while `<pad>` remains a stripped stop token.
+  - The minicif small config enables constrained generation by default through `minicif_constrained_decoding`.
 
 - P0 - Add grammar-aware decoding or constrained token masks.
   Many invalid generations can be prevented by masking impossible next tokens in known CIF contexts: field names, loop lengths, numeric formats, element symbols, and newline boundaries.
   Experiment: start with lightweight masks for element symbols and numeric fields, then expand.
+
+  Current implementation:
+  - Added a lightweight minicif state mask for canonical field order, numeric fields, crystal-system-to-space-group consistency, and atom-element membership in the prefix composition.
+  - The mask is wired into `Decifer.generate*` for minicif checkpoints without changing training loss.
 
 - P1 - Numeric tokenization for crystallographic values.
   Character-like numeric generation is inefficient and brittle. Consider digit-position tokens, quantized numeric bins, or structured numeric heads for cell parameters and coordinates.
