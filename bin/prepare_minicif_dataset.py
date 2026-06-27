@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 
 import argparse
+import gzip
 import json
 import os
+import pickle
 import random
 from dataclasses import asdict, dataclass
 from glob import glob
@@ -23,6 +25,7 @@ from decifer.utility import space_group_to_crystal_system
 class PrepConfig:
     raw_dir: str
     out_dir: str
+    raw_from_gzip: bool = False
     num_decimal_places: int = 4
     wavelength: str = "CuKa"
     qmin: float = 0.0
@@ -37,11 +40,16 @@ class PrepConfig:
 
 
 def process_cif(args):
-    path, config_dict = args
+    obj, config_dict = args
     config = PrepConfig(**config_dict)
-    name = os.path.splitext(os.path.basename(path))[0]
+    if isinstance(obj, tuple):
+        name, cif_string_raw = obj
+        structure = Structure.from_str(cif_string_raw, fmt="cif")
+        name = os.path.splitext(str(name))[0]
+    else:
+        name = os.path.splitext(os.path.basename(obj))[0]
+        structure = Structure.from_file(obj)
 
-    structure = Structure.from_file(path)
     if not config.include_occupancy_structures:
         for site in structure:
             occupancies = list(site.species.as_dict().values())
@@ -85,11 +93,35 @@ def process_cif(args):
 
 
 def safe_process_cif(args):
-    path, _ = args
+    obj, _ = args
     try:
         return process_cif(args), None
     except Exception as exc:
-        return None, {"path": path, "error": str(exc)}
+        return None, {"source": str(obj[0] if isinstance(obj, tuple) else obj), "error": str(exc)}
+
+
+def load_inputs(raw_dir, raw_from_gzip):
+    if raw_from_gzip:
+        bundle_paths = sorted(glob(os.path.join(raw_dir, "*.pkl.gz")))
+        if not bundle_paths:
+            raise ValueError(f"no .pkl.gz files found in {raw_dir}")
+        inputs = []
+        for bundle_path in bundle_paths:
+            with gzip.open(bundle_path, "rb") as f:
+                bundle = pickle.load(f)
+            for item in bundle:
+                if isinstance(item, tuple) and len(item) >= 2:
+                    inputs.append((item[0], item[1]))
+                elif isinstance(item, dict) and "cif_name" in item and "cif_string" in item:
+                    inputs.append((item["cif_name"], item["cif_string"]))
+                else:
+                    raise ValueError(f"unsupported raw gzip entry in {bundle_path}: {type(item)}")
+        return inputs
+
+    cif_paths = sorted(glob(os.path.join(raw_dir, "*.cif")))
+    if not cif_paths:
+        raise ValueError(f"no .cif files found in {raw_dir}")
+    return cif_paths
 
 
 def write_split(path, rows):
@@ -138,8 +170,9 @@ def split_rows(rows, val_fraction, test_fraction, seed):
 
 def main():
     parser = argparse.ArgumentParser(description="Prepare compact minicif HDF5 datasets directly from raw CIFs.")
-    parser.add_argument("--raw-dir", required=True, help="Directory containing raw .cif files")
+    parser.add_argument("--raw-dir", required=True, help="Directory containing raw .cif files or .pkl.gz bundles")
     parser.add_argument("--out-dir", required=True, help="Output dataset directory")
+    parser.add_argument("--raw-from-gzip", action="store_true", help="Read raw CIF strings from .pkl.gz bundle(s)")
     parser.add_argument("--num-decimal-places", type=int, default=4)
     parser.add_argument("--wavelength", default="CuKa")
     parser.add_argument("--qmin", type=float, default=0.0)
@@ -157,13 +190,11 @@ def main():
         args.num_workers = max(1, cpu_count() - 1)
 
     config = PrepConfig(**vars(args))
-    cif_paths = sorted(glob(os.path.join(config.raw_dir, "*.cif")))
+    inputs = load_inputs(config.raw_dir, config.raw_from_gzip)
     if config.debug_max > 0:
-        cif_paths = cif_paths[:config.debug_max]
-    if not cif_paths:
-        raise ValueError(f"no .cif files found in {config.raw_dir}")
+        inputs = inputs[:config.debug_max]
 
-    tasks = [(path, asdict(config)) for path in cif_paths]
+    tasks = [(obj, asdict(config)) for obj in inputs]
     rows = []
     failures = []
     with Pool(processes=config.num_workers) as pool:
@@ -180,7 +211,7 @@ def main():
 
     metadata = {
         "config": asdict(config),
-        "n_input": len(cif_paths),
+        "n_input": len(inputs),
         "n_success": len(rows),
         "n_failures": len(failures),
         "split_sizes": {split: len(split_rows_) for split, split_rows_ in splits.items()},
