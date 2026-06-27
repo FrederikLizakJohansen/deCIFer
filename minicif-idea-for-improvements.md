@@ -11,6 +11,7 @@ Purpose: collect concrete ideas for improving the current deCIFer codebase, mode
 - 2026-06-27: Started aggressive CIF minimization with a standalone `decifer.minicif` canonicalizer and focused unit tests.
 - 2026-06-27: Added a one-pass minicif dataset preparation path and moved PXRD conditioning toward sparse peak storage plus training-time Nyquist-aware augmentation.
 - 2026-06-27: Added first-pass minicif constrained decoding helpers: `sg_*` choices are masked by the emitted crystal system, and `<atom>` element choices are masked to the constituent elements emitted in the minicif prefix.
+- 2026-06-28: Added a configurable PXRD condition encoder. The old one-vector MLP remains available, and minicif can now use a small 1D convolutional PXRD encoder that emits multiple latent condition tokens per `<mcif>` start.
 
 ## Review assumptions
 
@@ -181,6 +182,16 @@ Verification:
 - P0 - Replace single-vector PXRD injection with cross-attention over learned PXRD tokens.
   Current conditioning compresses the full continuous PXRD vector through an MLP and inserts one condition embedding at each CIF start. That is a strong bottleneck: local peak positions, widths, missing peaks, and uncertainty all have to fit into one vector. A stronger minicif architecture would encode the PXRD as a sequence of q/intensity patches or peaks, then let CIF tokens cross-attend to that representation.
   Experiment: implement a small PXRD encoder producing 32-128 latent tokens; add cross-attention blocks every N transformer layers or prefix the latents as non-generated memory tokens. Compare validation loss, generated structure validity, and PXRD agreement at fixed parameter count.
+
+  Current implementation:
+  - Added `condition_encoder: mlp|conv`.
+  - Added `condition_n_tokens`, allowing either encoder to emit multiple non-generated condition tokens per `<mcif>` start.
+  - Added a compact 1D convolutional PXRD encoder with adaptive pooling over q-space, projection to transformer width, and learned latent-token positions.
+  - Kept condition insertion aligned with packed batches by inserting the latent tokens at each start token, rather than adding one prefix for the whole row.
+
+  Still needed:
+  - True cross-attention from CIF tokens into PXRD memory tokens.
+  - Peak-list or patch-aware encoders that preserve explicit q coordinates rather than only dense-grid intensity order.
 
 - P0 - Add composition and lattice priors as explicit conditioning channels.
   PXRD alone is ambiguous, and CIF generation has hard chemistry/geometric constraints. If composition, formula, crystal system, or approximate cell parameters are available at generation time, encode them separately instead of expecting the language model to infer everything from diffraction.

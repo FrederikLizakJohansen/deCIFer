@@ -38,6 +38,10 @@ early_stopping_patience: 50
 condition: True
 boundary_masking: True
 minicif_constrained_decoding: True
+condition_encoder: 'conv'
+condition_n_tokens: 16
+pxrd_encoder_channels: 64
+pxrd_encoder_kernel_size: 7
 
 qmin: 0.0
 qmax: 10.0
