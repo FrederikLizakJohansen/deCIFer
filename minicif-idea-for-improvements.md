@@ -9,6 +9,7 @@ Purpose: collect concrete ideas for improving the current deCIFer codebase, mode
 - 2026-06-27: Started notes file and reviewed `bin/train.py` for immediate training-code improvements. No source code changes made.
 - 2026-06-27: Implemented the immediate training-code improvements in `bin/train.py` and `decifer/decifer_model.py`; verified with syntax checks, an attention opt-in forward check, and a synthetic CPU training smoke test.
 - 2026-06-27: Started aggressive CIF minimization with a standalone `decifer.minicif` canonicalizer and focused unit tests.
+- 2026-06-27: Added a one-pass minicif dataset preparation path and moved PXRD conditioning toward sparse peak storage plus training-time Nyquist-aware augmentation.
 
 ## Review assumptions
 
@@ -222,6 +223,17 @@ Verification:
   Current augmentation covers broadening, noise, intensity scale, and masking. Real experimental patterns also include background, zero shift, sample displacement, preferred orientation, finite crystallite size/strain effects, impurity peaks, peak overlap, and detector/q calibration artifacts.
   Experiment: add one perturbation family at a time and evaluate robustness on experimental or intentionally shifted validation patterns.
 
+  Current implementation:
+  - Store sparse `xrd_disc.q` and `xrd_disc.iq` peak lists in HDF5.
+  - Generate continuous PXRD conditions at batch time to avoid storing many dense augmented traces.
+  - Support Nyquist-style q-grid selection through `nyquist_points_per_fwhm`.
+  - Support q shift, q scaling, peak intensity jitter, peak dropout, background, impurity peaks, particle-size broadening, peak asymmetry, noise, masking, and final normalization.
+
+  Still needed:
+  - hkl-aware preferred-orientation augmentation. This requires storing hkl metadata from XRD calculation; q/iq alone is not enough for a physically meaningful preferred-orientation transform.
+  - Experimental-background templates or Chebyshev background coefficients if we want richer background distributions than the current smooth random baseline.
+  - A calibration sweep to choose q-grid size from the minimum useful FWHM instead of blindly preserving the old dense `qstep=0.01`.
+
 - P0 - Train with hard negatives and ambiguous PXRD neighborhoods.
   Many structures can have similar diffraction patterns. Construct batches or auxiliary tasks where the model must distinguish near-neighbor patterns, polymorphs, same-composition structures, and decoys with similar peak positions.
   Experiment: build nearest-neighbor sets in PXRD embedding space and add contrastive ranking loss.
@@ -305,6 +317,11 @@ Verification:
 
 - P0 - Create a tiny committed smoke dataset or synthetic test fixture.
   A minimal HDF5 fixture would let training, evaluation, checkpoint resume, and conditioning alignment be tested without access to NOMA data.
+
+  Current implementation:
+  - Added `bin/prepare_minicif_dataset.py`, a direct raw-CIF-to-HDF5 path for minicif experiments.
+  - It avoids the legacy preprocessed/xrd/cif_tokens pickle directories and writes train/val/test HDF5 files directly.
+  - It writes compact minicif tokens, sparse PXRD peaks, space group, crystal system, metadata, and optional failures.
 
 - P0 - Add structured experiment logging.
   Write metrics to CSV/JSONL alongside checkpoints, including tokens seen, learning rate, gradient norm, throughput, validation mode, and augmentation settings.

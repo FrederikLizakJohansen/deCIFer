@@ -36,7 +36,7 @@ from omegaconf import OmegaConf
 from decifer.decifer_model import Decifer, DeciferConfig
 from decifer.tokenizer import Tokenizer
 from decifer.minicif import END_TOKEN, START_TOKEN, MinicifTokenizer
-from decifer.utility import discrete_to_continuous_xrd
+from decifer.pxrd import discrete_to_continuous_xrd, nyquist_qstep
 from decifer.decifer_dataset import DeciferDataset
     
 # Tokenizer, get start, padding and newline IDs
@@ -124,6 +124,7 @@ class TrainConfig:
     qmin: float = 0.0
     qmax: float = 10.0
     qstep: float = 0.01
+    nyquist_points_per_fwhm: float = 0.0
     fwhm_range_min: float = 0.001 
     fwhm_range_max: float = 0.05
     eta_range_min: float = 0.5
@@ -133,6 +134,24 @@ class TrainConfig:
     intensity_scale_range_min: float = 1.0
     intensity_scale_range_max: float = 1.0
     mask_prob: float = 0.0
+    q_shift_range_min: float = 0.0
+    q_shift_range_max: float = 0.0
+    q_scale_range_min: float = 1.0
+    q_scale_range_max: float = 1.0
+    peak_intensity_jitter_range_min: float = 1.0
+    peak_intensity_jitter_range_max: float = 1.0
+    peak_dropout_prob: float = 0.0
+    background_range_min: float = 0.0
+    background_range_max: float = 0.0
+    impurity_peak_count_min: int = 0
+    impurity_peak_count_max: int = 0
+    impurity_intensity_range_min: float = 0.01
+    impurity_intensity_range_max: float = 0.1
+    particle_size_range_min: float = 0.0
+    particle_size_range_max: float = 0.0
+    peak_asymmetry_range_min: float = 0.0
+    peak_asymmetry_range_max: float = 0.0
+    final_normalize_xrd: bool = False
 
     # AdamW optimizer
     learning_rate: float = 6e-4  # max learning rate
@@ -252,16 +271,28 @@ def write_run_metadata(C, metadata):
         yaml.safe_dump(metadata, f, sort_keys=False)
 
 def build_xrd_kwargs(C, augment=True):
+    qstep = effective_qstep(C)
     if augment:
         return {
             'qmin': C.qmin,
             'qmax': C.qmax,
-            'qstep': C.qstep,
+            'qstep': qstep,
+            'nyquist_points_per_fwhm': None,
             'fwhm_range': (C.fwhm_range_min, C.fwhm_range_max),
             'eta_range': (C.eta_range_min, C.eta_range_max),
             'noise_range': (C.noise_range_min, C.noise_range_max),
             'intensity_scale_range': (C.intensity_scale_range_min, C.intensity_scale_range_max),
             'mask_prob': C.mask_prob,
+            'q_shift_range': _range_or_none(C.q_shift_range_min, C.q_shift_range_max, 0.0),
+            'q_scale_range': _range_or_none(C.q_scale_range_min, C.q_scale_range_max, 1.0),
+            'peak_intensity_jitter_range': _range_or_none(C.peak_intensity_jitter_range_min, C.peak_intensity_jitter_range_max, 1.0),
+            'peak_dropout_prob': C.peak_dropout_prob,
+            'background_range': _range_or_none(C.background_range_min, C.background_range_max, 0.0),
+            'impurity_peak_count_range': _int_range_or_none(C.impurity_peak_count_min, C.impurity_peak_count_max, 0),
+            'impurity_intensity_range': (C.impurity_intensity_range_min, C.impurity_intensity_range_max),
+            'particle_size_range': _range_or_none(C.particle_size_range_min, C.particle_size_range_max, 0.0),
+            'peak_asymmetry_range': _range_or_none(C.peak_asymmetry_range_min, C.peak_asymmetry_range_max, 0.0),
+            'final_normalize': C.final_normalize_xrd,
         }
 
     fwhm = 0.5 * (C.fwhm_range_min + C.fwhm_range_max)
@@ -269,13 +300,30 @@ def build_xrd_kwargs(C, augment=True):
     return {
         'qmin': C.qmin,
         'qmax': C.qmax,
-        'qstep': C.qstep,
+        'qstep': qstep,
+        'nyquist_points_per_fwhm': None,
         'fwhm_range': (fwhm, fwhm),
         'eta_range': (eta, eta),
         'noise_range': None,
         'intensity_scale_range': None,
         'mask_prob': None,
+        'final_normalize': C.final_normalize_xrd,
     }
+
+def _range_or_none(range_min, range_max, identity):
+    if range_min == identity and range_max == identity:
+        return None
+    return (range_min, range_max)
+
+def _int_range_or_none(range_min, range_max, identity):
+    if range_min == identity and range_max == identity:
+        return None
+    return (range_min, range_max)
+
+def effective_qstep(C):
+    if C.nyquist_points_per_fwhm > 0:
+        return nyquist_qstep(C.fwhm_range_min, C.nyquist_points_per_fwhm)
+    return C.qstep
 
 def save_checkpoint(C, checkpoint, model, optimizer, training_metrics, local_iteration_number):
     checkpoint.update({
@@ -403,7 +451,7 @@ if __name__ == "__main__":
         n_head=C.n_head, 
         n_embd=C.n_embd, 
         block_size=C.block_size,
-        condition_size=len(np.arange(C.qmin, C.qmax, C.qstep)),
+        condition_size=len(np.arange(C.qmin, C.qmax, effective_qstep(C))),
         bias=C.bias,
         vocab_size=C.vocab_size,
         dropout=C.dropout,
