@@ -3,6 +3,7 @@
 #SBATCH --time 2-00:00:00
 #SBATCH --job-name=train_minicif
 #SBATCH --array 0
+#SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem-per-cpu=16G
 #SBATCH --output=logs/minicif_train_%A_%a.out
@@ -28,6 +29,7 @@ export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 echo "Arguments passed: ${ARGS[*]}"
 echo "Running on host: $(hostname)"
 echo "Started at: $(date)"
+echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-unset}"
 
 GPUS_PER_NODE="${SLURM_GPUS_ON_NODE:-1}"
 if [ -n "${CUDA_VISIBLE_DEVICES:-}" ] && [ "${CUDA_VISIBLE_DEVICES}" != "NoDevFiles" ]; then
@@ -38,6 +40,15 @@ if ! [[ "${GPUS_PER_NODE}" =~ ^[0-9]+$ ]]; then
 fi
 
 echo "GPUs visible to job: ${GPUS_PER_NODE}"
+if [ -z "${OMP_NUM_THREADS:-}" ]; then
+  OMP_THREADS=$(( ${SLURM_CPUS_PER_TASK:-1} / GPUS_PER_NODE ))
+  if [ "${OMP_THREADS}" -lt 1 ]; then
+    OMP_THREADS=1
+  fi
+  export OMP_NUM_THREADS="${OMP_THREADS}"
+fi
+echo "OMP_NUM_THREADS: ${OMP_NUM_THREADS}"
+
 if [ "${GPUS_PER_NODE}" -gt 1 ]; then
   torchrun --standalone --nproc_per_node="${GPUS_PER_NODE}" bin/train.py "${ARGS[@]}"
 else
