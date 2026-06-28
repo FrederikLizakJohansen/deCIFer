@@ -16,7 +16,7 @@ dtype: 'float16'
 always_save_checkpoint: True
 validate: True
 
-dataset: 'data'
+dataset: 'data/noma'
 tokenizer: 'minicif'
 batch_size: 32
 block_size: 1024
@@ -29,8 +29,8 @@ dropout: 0.0
 
 learning_rate: 1e-3
 gradient_accumulation_steps: 40
-max_iters: 50_000
-lr_decay_iters: 50_000
+max_iters: 100_000
+lr_decay_iters: 100_000
 min_lr: 1e-6
 beta2: 0.99
 
