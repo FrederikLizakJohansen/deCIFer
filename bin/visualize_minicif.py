@@ -24,6 +24,7 @@ from decifer.decifer_dataset import DeciferDataset
 from decifer.decifer_model import Decifer, DeciferConfig
 from decifer.minicif import END_TOKEN, START_TOKEN, MinicifTokenizer, minicif_to_structure, parse_minicif
 from decifer.pxrd import discrete_to_continuous_xrd, nyquist_qstep
+from bin.train import TrainConfig
 
 
 def rwp(reference, generated):
@@ -52,11 +53,23 @@ def load_checkpoint(path, device, use_best=True):
 
 
 def checkpoint_config(checkpoint):
-    config = checkpoint.get("config") or {}
-    metadata_config = checkpoint.get("run_metadata", {}).get("config") or {}
+    config = _config_to_dict(checkpoint.get("config"))
+    metadata_config = _config_to_dict(checkpoint.get("run_metadata", {}).get("config"))
     merged = dict(metadata_config)
     merged.update(config)
     return merged
+
+
+def _config_to_dict(config):
+    if config is None:
+        return {}
+    if isinstance(config, dict):
+        return dict(config)
+    if hasattr(config, "items"):
+        return dict(config.items())
+    if hasattr(config, "__dict__"):
+        return dict(vars(config))
+    return {}
 
 
 def clean_xrd_kwargs(config, args):
