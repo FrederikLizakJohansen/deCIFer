@@ -71,10 +71,28 @@ def canonicalize_cif(cif_string: str, config: Optional[MinicifConfig] = None) ->
     else:
         structure = parser.get_structures()[0]
 
+    return canonicalize_cif_block(block, config, structure=structure)
+
+
+def canonicalize_cif_block(block: Dict, config: Optional[MinicifConfig] = None, structure: Optional[Structure] = None) -> str:
+    """Convert an already parsed CIF block into the compact minicif representation."""
+    config = config or MinicifConfig()
     elements = _ordered_elements(block, config.element_order)
     space_group_number = _space_group_number(block, structure)
     crystal_system = space_group_to_crystal_system(space_group_number)
     sites = _atom_sites(block)
+    cell = _cell_from_block(block)
+    if cell is None:
+        if structure is None:
+            raise ValueError("CIF block is missing cell fields")
+        cell = (
+            structure.lattice.a,
+            structure.lattice.b,
+            structure.lattice.c,
+            structure.lattice.alpha,
+            structure.lattice.beta,
+            structure.lattice.gamma,
+        )
 
     parts = [
         START_TOKEN,
@@ -82,12 +100,7 @@ def canonicalize_cif(cif_string: str, config: Optional[MinicifConfig] = None) ->
         "cs_" + str(crystal_system),
         "sg_" + str(space_group_number),
         CELL_TOKEN,
-        _format_number(structure.lattice.a, config.decimal_places),
-        _format_number(structure.lattice.b, config.decimal_places),
-        _format_number(structure.lattice.c, config.decimal_places),
-        _format_number(structure.lattice.alpha, config.decimal_places),
-        _format_number(structure.lattice.beta, config.decimal_places),
-        _format_number(structure.lattice.gamma, config.decimal_places),
+        *[_format_number(value, config.decimal_places) for value in cell],
     ]
 
     for site in sites:
@@ -331,7 +344,27 @@ def _space_group_number(block: Dict, structure) -> int:
             if number is not None:
                 return number
 
+    if structure is None:
+        raise ValueError("CIF block does not contain a space group number")
     return int(structure.get_space_group_info()[1])
+
+
+def space_group_number_from_cif_block(block: Dict, structure=None) -> int:
+    return _space_group_number(block, structure)
+
+
+def _cell_from_block(block: Dict) -> Optional[Tuple[float, float, float, float, float, float]]:
+    keys = [
+        "_cell_length_a",
+        "_cell_length_b",
+        "_cell_length_c",
+        "_cell_angle_alpha",
+        "_cell_angle_beta",
+        "_cell_angle_gamma",
+    ]
+    if any(key not in block for key in keys):
+        return None
+    return tuple(_parse_number(block[key]) for key in keys)
 
 
 def _atom_sites(block: Dict) -> List[Dict]:

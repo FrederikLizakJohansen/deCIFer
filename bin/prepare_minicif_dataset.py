@@ -25,7 +25,12 @@ from pymatgen.core import Structure
 from pymatgen.io.cif import CifWriter
 from tqdm import tqdm
 
-from decifer.minicif import MinicifConfig, MinicifTokenizer, canonicalize_cif
+from decifer.minicif import (
+    MinicifConfig,
+    MinicifTokenizer,
+    canonicalize_cif_block,
+    space_group_number_from_cif_block,
+)
 from decifer.utility import space_group_to_crystal_system
 
 STOP_REQUESTED = False
@@ -74,9 +79,10 @@ def process_cif(args):
             if any(occupancy < 1 for occupancy in occupancies):
                 raise ValueError(f"{name}: occupancy below 1.0")
 
-    cif_string = str(CifWriter(struct=structure, symprec=config.symprec))
-    minicif_string = canonicalize_cif(
-        cif_string,
+    cif_writer = CifWriter(struct=structure, symprec=config.symprec)
+    cif_block = next(iter(cif_writer.cif_file.data.values())).data
+    minicif_string = canonicalize_cif_block(
+        cif_block,
         MinicifConfig(decimal_places=config.num_decimal_places),
     )
     tokenizer = MinicifTokenizer()
@@ -97,7 +103,7 @@ def process_cif(args):
     iq_disc = np.asarray(pattern.y, dtype=np.float32)
     iq_disc = iq_disc / (np.max(iq_disc) + 1e-16)
 
-    spacegroup = int(structure.get_space_group_info(symprec=config.symprec)[1])
+    spacegroup = space_group_number_from_cif_block(cif_block)
 
     return {
         "cif_name": name,

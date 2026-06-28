@@ -12,6 +12,7 @@ from decifer.minicif import (
     MinicifTokenizer,
     allowed_minicif_next_token_ids,
     canonicalize_cif,
+    canonicalize_cif_block,
     mask_minicif_logits,
     minicif_to_structure,
     parse_minicif,
@@ -68,6 +69,20 @@ class MinicifTest(unittest.TestCase):
         ids = tokenizer.encode(tokens)
 
         self.assertEqual(tokenizer.decode(ids), minicif)
+
+    def test_canonicalize_cif_block_uses_parsed_block(self):
+        structure = Structure(
+            Lattice.cubic(5.64),
+            ["Na", "Cl"],
+            [[0, 0, 0], [0.5, 0.5, 0.5]],
+        )
+        block = next(iter(CifWriter(structure, symprec=0.1).cif_file.data.values())).data
+
+        minicif = canonicalize_cif_block(block, MinicifConfig(decimal_places=3))
+
+        self.assertIn("<mcif> Na Cl cs_7 sg_221", minicif)
+        self.assertIn("cell 5.640 5.640 5.640 90.000 90.000 90.000", minicif)
+        self.assertEqual(minicif.count(ATOM_TOKEN), 2)
 
     def test_space_group_choices_are_conditioned_on_crystal_system(self):
         tokenizer = MinicifTokenizer()
