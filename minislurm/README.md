@@ -19,9 +19,30 @@ From a legacy `.pkl.gz` raw bundle:
 sbatch minislurm/prepare_minicif_dataset.sh \
   --raw-dir data/noma \
   --out-dir data \
-  --raw-from-gzip \
-  --num-workers 8
+  --raw-from-gzip
 ```
+
+Parallel shard preparation with a SLURM array:
+
+```bash
+sbatch --array=0-31 minislurm/prepare_minicif_dataset.sh \
+  --raw-dir data/noma \
+  --out-dir data \
+  --raw-from-gzip
+```
+
+Each array task writes its own checkpoint under `OUT_DIR`. After all array tasks finish, merge the shard checkpoints and write final `train.h5`, `val.h5`, and `test.h5`:
+
+```bash
+sbatch minislurm/prepare_minicif_dataset.sh \
+  --raw-dir data/noma \
+  --out-dir data \
+  --raw-from-gzip \
+  --num-shards 32 \
+  --merge-shards
+```
+
+The wrapper uses `$SLURM_CPUS_PER_TASK` as `--num-workers` unless you pass `--num-workers` explicitly. It also defaults to `--chunksize 8`.
 
 Prepare a deterministic subset from a larger source:
 
@@ -31,8 +52,7 @@ sbatch minislurm/prepare_minicif_dataset.sh \
   --out-dir data/minicif_debug \
   --raw-from-gzip \
   --max-samples 10000 \
-  --sample-strategy random \
-  --num-workers 8
+  --sample-strategy random
 ```
 
 Preparation is resumable by default through `OUT_DIR/prep_checkpoint.pkl.gz`.

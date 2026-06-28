@@ -11,9 +11,12 @@ prepare_minicif_dataset = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(prepare_minicif_dataset)
 load_inputs = prepare_minicif_dataset.load_inputs
 load_checkpoint = prepare_minicif_dataset.load_checkpoint
+load_shard_checkpoints = prepare_minicif_dataset.load_shard_checkpoints
 runtime_exceeded = prepare_minicif_dataset.runtime_exceeded
 save_checkpoint = prepare_minicif_dataset.save_checkpoint
 select_inputs = prepare_minicif_dataset.select_inputs
+shard_checkpoint_path = prepare_minicif_dataset.shard_checkpoint_path
+shard_inputs = prepare_minicif_dataset.shard_inputs
 split_rows = prepare_minicif_dataset.split_rows
 write_metadata = prepare_minicif_dataset.write_metadata
 PrepConfig = prepare_minicif_dataset.PrepConfig
@@ -65,6 +68,37 @@ class PrepareMinicifDatasetTest(unittest.TestCase):
 
         self.assertEqual(loaded_rows, rows)
         self.assertEqual(loaded_failures, failures)
+
+    def test_shard_inputs_use_index_modulo(self):
+        inputs = list(range(10))
+
+        self.assertEqual(shard_inputs(inputs, shard_index=0, num_shards=3), [0, 3, 6, 9])
+        self.assertEqual(shard_inputs(inputs, shard_index=1, num_shards=3), [1, 4, 7])
+        self.assertEqual(shard_inputs(inputs, shard_index=2, num_shards=3), [2, 5, 8])
+
+    def test_shard_checkpoint_paths_keep_pkl_gz_suffix(self):
+        path = shard_checkpoint_path("out/prep_checkpoint.pkl.gz", shard_index=2, num_shards=16)
+
+        self.assertEqual(path, "out/prep_checkpoint_shard_00002_of_00016.pkl.gz")
+
+    def test_load_shard_checkpoints_merges_rows_and_failures(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_path = os.path.join(tmpdir, "prep_checkpoint.pkl.gz")
+            save_checkpoint(
+                shard_checkpoint_path(base_path, 0, 2),
+                {"a": {"cif_name": "a"}},
+                {},
+            )
+            save_checkpoint(
+                shard_checkpoint_path(base_path, 1, 2),
+                {"b": {"cif_name": "b"}},
+                {"c": {"source": "c", "error": "bad"}},
+            )
+
+            rows, failures = load_shard_checkpoints(base_path, 2)
+
+        self.assertEqual(set(rows), {"a", "b"})
+        self.assertEqual(set(failures), {"c"})
 
     def test_runtime_exceeded_respects_disabled_zero(self):
         self.assertFalse(runtime_exceeded(0.0, 0))

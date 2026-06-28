@@ -45,7 +45,8 @@ class PrepConfig:
     max_samples: int = 0
     sample_strategy: str = "first"
     checkpoint_path: str = ""
-    checkpoint_interval: int = 1000
+    checkpoint_interval: int = 10000
+    chunksize: int = 8
     max_runtime_seconds: int = 0
     no_resume: bool = False
     num_decimal_places: int = 4
@@ -59,6 +60,9 @@ class PrepConfig:
     seed: int = 42
     include_occupancy_structures: bool = False
     num_workers: int = 1
+    num_shards: int = 1
+    shard_index: int = 0
+    merge_shards: bool = False
     debug_max: int = 0
 
 
@@ -195,6 +199,40 @@ def save_checkpoint(path, rows_by_source, failures_by_source):
     os.replace(tmp_path, path)
 
 
+def shard_checkpoint_path(base_path, shard_index, num_shards):
+    if base_path.endswith(".pkl.gz"):
+        stem = base_path[:-7]
+        suffix = ".pkl.gz"
+    else:
+        stem, suffix = os.path.splitext(base_path)
+    return f"{stem}_shard_{shard_index:05d}_of_{num_shards:05d}{suffix}"
+
+
+def shard_inputs(inputs, shard_index, num_shards):
+    if num_shards < 1:
+        raise ValueError("num_shards must be >= 1")
+    if not 0 <= shard_index < num_shards:
+        raise ValueError("shard_index must satisfy 0 <= shard_index < num_shards")
+    return [obj for index, obj in enumerate(inputs) if index % num_shards == shard_index]
+
+
+def load_shard_checkpoints(base_checkpoint_path, num_shards):
+    rows_by_source = {}
+    failures_by_source = {}
+    missing_paths = []
+    for shard_index in range(num_shards):
+        path = shard_checkpoint_path(base_checkpoint_path, shard_index, num_shards)
+        if not os.path.exists(path):
+            missing_paths.append(path)
+            continue
+        shard_rows, shard_failures = load_checkpoint(path)
+        rows_by_source.update(shard_rows)
+        failures_by_source.update(shard_failures)
+    if missing_paths:
+        raise FileNotFoundError("missing shard checkpoint(s): " + ", ".join(missing_paths))
+    return rows_by_source, failures_by_source
+
+
 def request_stop(signum, _frame):
     global STOP_REQUESTED, STOP_SIGNAL
     STOP_REQUESTED = True
@@ -319,7 +357,8 @@ def main():
     parser.add_argument("--max-samples", type=int, default=0, help="Limit the number of raw inputs after deterministic selection")
     parser.add_argument("--sample-strategy", choices=["first", "random"], default="first", help="How to select --max-samples inputs")
     parser.add_argument("--checkpoint-path", default="", help="Path to resumable prep checkpoint; defaults to OUT_DIR/prep_checkpoint.pkl.gz")
-    parser.add_argument("--checkpoint-interval", type=int, default=1000, help="Save prep checkpoint every N processed inputs")
+    parser.add_argument("--checkpoint-interval", type=int, default=10000, help="Save prep checkpoint every N processed inputs")
+    parser.add_argument("--chunksize", type=int, default=8, help="Multiprocessing imap_unordered chunksize")
     parser.add_argument("--max-runtime-seconds", type=int, default=0, help="Stop cleanly after this many seconds, saving a checkpoint first; 0 disables")
     parser.add_argument("--no-resume", action="store_true", help="Ignore any existing prep checkpoint")
     parser.add_argument("--num-decimal-places", type=int, default=4)
@@ -333,6 +372,9 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--include-occupancy-structures", action="store_true")
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--num-shards", type=int, default=1, help="Total number of input shards for SLURM-array preparation")
+    parser.add_argument("--shard-index", type=int, default=0, help="Shard index for this preparation process")
+    parser.add_argument("--merge-shards", action="store_true", help="Merge shard checkpoints and write final serialized HDF5 splits")
     parser.add_argument("--debug-max", type=int, default=0)
     args = parser.parse_args()
 
@@ -350,6 +392,52 @@ def main():
 
     if not config.checkpoint_path:
         config.checkpoint_path = os.path.join(config.out_dir, "prep_checkpoint.pkl.gz")
+    if config.chunksize < 1:
+        raise ValueError("chunksize must be >= 1")
+
+    if config.merge_shards:
+        rows_by_source, failures_by_source = load_shard_checkpoints(config.checkpoint_path, config.num_shards)
+        missing_inputs = [
+            source_id(obj)
+            for obj in inputs
+            if source_id(obj) not in rows_by_source and source_id(obj) not in failures_by_source
+        ]
+        if missing_inputs:
+            raise RuntimeError(
+                f"{len(missing_inputs)} input(s) are missing from shard checkpoints; "
+                f"first missing source: {missing_inputs[0]}"
+            )
+        rows = [
+            rows_by_source[source_id(obj)]
+            for obj in inputs
+            if source_id(obj) in rows_by_source
+        ]
+        failures = list(failures_by_source.values())
+        splits = split_rows(rows, config.val_fraction, config.test_fraction, config.seed, config.stratify_split_on)
+        serialized_dir = os.path.join(config.out_dir, "serialized")
+        for split, split_rows_ in splits.items():
+            write_split(os.path.join(serialized_dir, f"{split}.h5"), split_rows_)
+        metadata = write_metadata(
+            config,
+            inputs,
+            rows,
+            failures,
+            splits,
+            [],
+            0,
+            complete=True,
+        )
+        print(json.dumps(metadata, indent=2))
+        return
+
+    if config.num_shards > 1:
+        inputs = shard_inputs(inputs, config.shard_index, config.num_shards)
+        config.checkpoint_path = shard_checkpoint_path(config.checkpoint_path, config.shard_index, config.num_shards)
+        print(
+            f"Preparing shard {config.shard_index + 1}/{config.num_shards}: "
+            f"{len(inputs)} selected inputs; checkpoint {config.checkpoint_path}",
+            flush=True,
+        )
 
     rows_by_source = {}
     failures_by_source = {}
@@ -373,8 +461,9 @@ def main():
     n_processed_this_run = 0
 
     tasks = [(obj, asdict(config)) for obj in pending_inputs]
-    with Pool(processes=config.num_workers) as pool:
-        iterator = pool.imap(safe_process_cif, tasks)
+    pool = Pool(processes=config.num_workers)
+    try:
+        iterator = pool.imap_unordered(safe_process_cif, tasks, chunksize=config.chunksize)
         for n_processed, (key, result, failure) in enumerate(tqdm(iterator, total=len(tasks), desc="Preparing minicif"), start=1):
             n_processed_this_run = n_processed
             if failure is None:
@@ -391,7 +480,15 @@ def main():
                 stop_reason = f"signal_{STOP_SIGNAL}" if STOP_REQUESTED else "max_runtime_seconds"
                 save_checkpoint(config.checkpoint_path, rows_by_source, failures_by_source)
                 print(f"Stopping early ({stop_reason}); checkpoint saved to {config.checkpoint_path}", flush=True)
+                pool.terminate()
                 break
+        else:
+            pool.close()
+    except Exception:
+        pool.terminate()
+        raise
+    finally:
+        pool.join()
 
     save_checkpoint(config.checkpoint_path, rows_by_source, failures_by_source)
 
@@ -413,6 +510,20 @@ def main():
             n_processed_this_run,
             complete=False,
             stop_reason=stop_reason,
+        )
+        print(json.dumps(metadata, indent=2))
+        return
+
+    if config.num_shards > 1:
+        metadata = write_metadata(
+            config,
+            inputs,
+            rows,
+            failures,
+            {},
+            pending_inputs,
+            n_processed_this_run,
+            complete=True,
         )
         print(json.dumps(metadata, indent=2))
         return
