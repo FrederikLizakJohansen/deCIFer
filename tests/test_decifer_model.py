@@ -1,4 +1,5 @@
 import unittest
+from types import MethodType
 
 import torch
 
@@ -105,6 +106,58 @@ class DeciferModelTest(unittest.TestCase):
         second_record_last_position = attention.size(0) - 1
         blocked_attention = attention[second_record_last_position, first_record_positions]
         self.assertTrue(torch.all(blocked_attention == 0))
+
+    def test_batched_minicif_generation_mask_blocks_invalid_space_group(self):
+        tokenizer = MinicifTokenizer()
+        model = Decifer(DeciferConfig(
+            tokenizer="minicif",
+            vocab_size=tokenizer.vocab_size,
+            block_size=32,
+            n_layer=1,
+            n_head=1,
+            n_embd=16,
+            minicif_constrained_decoding=True,
+        ))
+        prompt = torch.tensor([tokenizer.encode(tokenizer.tokenize_minicif("<mcif> Na Cl cs_7 "))]).repeat(2, 1)
+
+        def forward_with_bad_space_group(self, idx, **kwargs):
+            logits = torch.full((idx.size(0), idx.size(1), tokenizer.vocab_size), -100.0)
+            logits[:, -1, tokenizer.token_to_id["sg_194"]] = 100.0
+            logits[:, -1, tokenizer.token_to_id["sg_195"]] = 0.0
+            return logits, None
+
+        model.forward = MethodType(forward_with_bad_space_group, model)
+
+        out = model.generate_batched_reps(prompt, max_new_tokens=1, top_k=1, disable_pbar=True)
+
+        self.assertTrue(torch.all(out[:, -1] == tokenizer.token_to_id["sg_195"]))
+
+    def test_minicif_generation_mask_blocks_invalid_atom_element(self):
+        tokenizer = MinicifTokenizer()
+        model = Decifer(DeciferConfig(
+            tokenizer="minicif",
+            vocab_size=tokenizer.vocab_size,
+            block_size=64,
+            n_layer=1,
+            n_head=1,
+            n_embd=16,
+            minicif_constrained_decoding=True,
+        ))
+        prompt = torch.tensor([tokenizer.encode(tokenizer.tokenize_minicif(
+            "<mcif> Na Cl cs_7 sg_221 cell 5.640 5.640 5.640 90.000 90.000 90.000 <atom> "
+        ))])
+
+        def forward_with_bad_atom(self, idx, **kwargs):
+            logits = torch.full((idx.size(0), idx.size(1), tokenizer.vocab_size), -100.0)
+            logits[:, -1, tokenizer.token_to_id["Fe"]] = 100.0
+            logits[:, -1, tokenizer.token_to_id["Na"]] = 0.0
+            return logits, None
+
+        model.forward = MethodType(forward_with_bad_atom, model)
+
+        out = model.generate(prompt, max_new_tokens=1, top_k=1, disable_pbar=True)
+
+        self.assertEqual(out[0, -1].item(), tokenizer.token_to_id["Na"])
 
 
 if __name__ == "__main__":

@@ -26,6 +26,13 @@ from decifer.minicif import END_TOKEN, START_TOKEN, MinicifTokenizer, minicif_to
 from decifer.pxrd import discrete_to_continuous_xrd, nyquist_qstep
 from bin.train import TrainConfig
 
+PROMPT_MODE_ALIASES = {
+    "pxrd": "start",
+    "pxrd-elements": "formula",
+    "pxrd-elements-cs": "formula-cs",
+    "pxrd-elements-cs-sg": "formula-cs-sg",
+}
+
 
 def rwp(reference, generated):
     reference = np.asarray(reference, dtype=float)
@@ -112,6 +119,7 @@ def dataset_path(dataset_dir, split):
 
 
 def prompt_from_minicif(minicif_string, mode, tokenizer):
+    mode = PROMPT_MODE_ALIASES.get(mode, mode)
     fields = minicif_string.strip().split()
     if mode == "start":
         prompt = START_TOKEN
@@ -216,10 +224,19 @@ def evaluate_split(split, h5_path, model, tokenizer, matcher, xrd_kwargs, args):
                 "reference_space_group": reference_parsed.space_group,
                 "reference_crystal_system": reference_parsed.crystal_system,
                 "parse_ok": False,
+                "structure_ok": False,
                 "match": False,
             }
             try:
                 generated_parsed = parse_minicif(generated_minicif)
+                row.update({
+                    "parse_ok": True,
+                    "generated_space_group": generated_parsed.space_group,
+                    "generated_crystal_system": generated_parsed.crystal_system,
+                    "space_group_match": generated_parsed.space_group == reference_parsed.space_group,
+                    "crystal_system_match": generated_parsed.crystal_system == reference_parsed.crystal_system,
+                    "element_set_match": set(generated_parsed.elements) == set(reference_parsed.elements),
+                })
                 generated_structure = minicif_to_structure(generated_minicif)
                 generated_iq = structure_to_continuous_xrd(generated_structure, xrd_kwargs, args.wavelength)
                 rmsd = matcher.get_rms_dist(reference_structure, generated_structure)
@@ -228,14 +245,10 @@ def evaluate_split(split, h5_path, model, tokenizer, matcher, xrd_kwargs, args):
                 if args.rmsd_threshold > 0 and rmsd_value is not None:
                     match = rmsd_value <= args.rmsd_threshold
                 row.update({
-                    "parse_ok": True,
+                    "structure_ok": True,
                     "rwp": rwp(reference_iq, generated_iq),
                     "rmsd": rmsd_value,
                     "match": match,
-                    "generated_space_group": generated_parsed.space_group,
-                    "generated_crystal_system": generated_parsed.crystal_system,
-                    "space_group_match": generated_parsed.space_group == reference_parsed.space_group,
-                    "crystal_system_match": generated_parsed.crystal_system == reference_parsed.crystal_system,
                     "composition_match": generated_structure.composition.reduced_formula == reference_structure.composition.reduced_formula,
                 })
             except Exception as exc:
@@ -255,6 +268,8 @@ def summarize(df):
             "n_samples": int(split_df["sample_index"].nunique()),
             "n_candidates": int(len(split_df[split_df["rep"] >= 0])),
             "parse_rate": float(split_df["parse_ok"].fillna(False).mean()),
+            "valid_minicif_rate": float(split_df["parse_ok"].fillna(False).mean()),
+            "structure_rate": float(split_df["structure_ok"].fillna(False).mean()) if "structure_ok" in split_df else np.nan,
             "candidate_match_rate": float(split_df["match"].fillna(False).mean()),
             "best_of_k_match_rate": float(by_sample["match"].max().fillna(False).mean()),
             "median_rwp": float(valid_rwp["rwp"].median()) if not valid_rwp.empty else np.nan,
@@ -263,6 +278,7 @@ def summarize(df):
             "median_matched_rmsd": float(split_df.loc[split_df["match"] == True, "rmsd"].median()) if "rmsd" in split_df else np.nan,
             "space_group_accuracy": float(split_df["space_group_match"].fillna(False).mean()) if "space_group_match" in split_df else np.nan,
             "crystal_system_accuracy": float(split_df["crystal_system_match"].fillna(False).mean()) if "crystal_system_match" in split_df else np.nan,
+            "element_set_accuracy": float(split_df["element_set_match"].fillna(False).mean()) if "element_set_match" in split_df else np.nan,
             "composition_match_rate": float(split_df["composition_match"].fillna(False).mean()) if "composition_match" in split_df else np.nan,
         })
     return pd.DataFrame(summaries)
@@ -293,7 +309,16 @@ def plot_learning_curves(checkpoint, out_dir):
 def plot_metric_summary(summary, out_dir):
     if summary.empty:
         return
-    metrics = ["parse_rate", "best_of_k_match_rate", "candidate_match_rate", "composition_match_rate", "space_group_accuracy", "crystal_system_accuracy"]
+    metrics = [
+        "valid_minicif_rate",
+        "structure_rate",
+        "best_of_k_match_rate",
+        "candidate_match_rate",
+        "element_set_accuracy",
+        "composition_match_rate",
+        "space_group_accuracy",
+        "crystal_system_accuracy",
+    ]
     available = [metric for metric in metrics if metric in summary.columns]
     fig, ax = plt.subplots(figsize=(10, 4.8), dpi=160)
     x = np.arange(len(summary))
@@ -337,7 +362,24 @@ def main():
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top-k", type=int, default=None)
-    parser.add_argument("--prompt-mode", choices=["start", "formula", "formula-cs", "formula-cs-sg"], default="start")
+    parser.add_argument(
+        "--prompt-mode",
+        choices=[
+            "pxrd",
+            "pxrd-elements",
+            "pxrd-elements-cs",
+            "pxrd-elements-cs-sg",
+            "start",
+            "formula",
+            "formula-cs",
+            "formula-cs-sg",
+        ],
+        default="pxrd",
+        help=(
+            "Known-field prompt mode. pxrd starts from <mcif>; pxrd-elements also fixes constituent "
+            "elements; pxrd-elements-cs also fixes crystal system; pxrd-elements-cs-sg also fixes space group."
+        ),
+    )
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--use-current", action="store_true", help="Use current_model instead of best_model_state")
     parser.add_argument("--rmsd-threshold", type=float, default=0.0, help="Optional positive RMSD threshold for match rate")
