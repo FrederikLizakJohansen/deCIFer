@@ -12,6 +12,7 @@ DEFAULT_CONFIG="configs/minicif_small_config.yaml"
 usage() {
   echo "Usage: sbatch $0 [--config CONFIG]"
   echo "Default: sbatch $0 --config ${DEFAULT_CONFIG}"
+  echo "Multi-GPU example: sbatch --gres=gpu:a100:4 $0 --config configs/minicif_large_config.yaml"
   echo "Pass any bin/train.py arguments after the script name."
   exit 1
 }
@@ -28,6 +29,19 @@ echo "Arguments passed: ${ARGS[*]}"
 echo "Running on host: $(hostname)"
 echo "Started at: $(date)"
 
-python bin/train.py "${ARGS[@]}"
+GPUS_PER_NODE="${SLURM_GPUS_ON_NODE:-1}"
+if [ -n "${CUDA_VISIBLE_DEVICES:-}" ] && [ "${CUDA_VISIBLE_DEVICES}" != "NoDevFiles" ]; then
+  GPUS_PER_NODE=$(awk -F',' '{print NF}' <<< "${CUDA_VISIBLE_DEVICES}")
+fi
+if ! [[ "${GPUS_PER_NODE}" =~ ^[0-9]+$ ]]; then
+  GPUS_PER_NODE=1
+fi
+
+echo "GPUs visible to job: ${GPUS_PER_NODE}"
+if [ "${GPUS_PER_NODE}" -gt 1 ]; then
+  torchrun --standalone --nproc_per_node="${GPUS_PER_NODE}" bin/train.py "${ARGS[@]}"
+else
+  python bin/train.py "${ARGS[@]}"
+fi
 
 echo "Finished at: $(date)"

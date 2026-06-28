@@ -85,6 +85,15 @@ Custom config:
 sbatch minislurm/train_minicif.sh --config configs/minicif_small_config.yaml
 ```
 
+Single-node multi-GPU training uses PyTorch DDP automatically when Slurm exposes more than one GPU:
+
+```bash
+sbatch --gres=gpu:a100:4 minislurm/train_minicif.sh \
+  --config configs/minicif_large_config.yaml
+```
+
+To keep the same effective batch size, divide `gradient_accumulation_steps` by the number of GPUs. For example, the large config uses `gradient_accumulation_steps: 40`, so use `10` on 4 GPUs for roughly the same tokens per optimizer update.
+
 ## 3. Evaluate and visualize
 
 Default validation/test report:

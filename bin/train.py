@@ -21,7 +21,9 @@ from typing import List
 import argparse
 
 import torch
+import torch.distributed as dist
 import numpy as np
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data import SubsetRandomSampler
 from torch.utils.data import BatchSampler
@@ -249,6 +251,39 @@ def make_generator(seed):
     generator.manual_seed(seed)
     return generator
 
+def setup_distributed(C):
+    ddp = "RANK" in os.environ and "WORLD_SIZE" in os.environ
+    if not ddp:
+        return {
+            "ddp": False,
+            "rank": 0,
+            "local_rank": 0,
+            "world_size": 1,
+            "master_process": True,
+        }
+
+    if torch.device(C.device).type != "cuda":
+        raise RuntimeError("Distributed training currently requires a CUDA device")
+
+    dist.init_process_group(backend="nccl")
+    rank = int(os.environ["RANK"])
+    local_rank = int(os.environ["LOCAL_RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    torch.cuda.set_device(local_rank)
+    C.device = f"cuda:{local_rank}"
+
+    return {
+        "ddp": True,
+        "rank": rank,
+        "local_rank": local_rank,
+        "world_size": world_size,
+        "master_process": rank == 0,
+    }
+
+def cleanup_distributed(distributed):
+    if distributed["ddp"] and dist.is_initialized():
+        dist.destroy_process_group()
+
 def get_git_revision():
     try:
         return subprocess.check_output(
@@ -437,7 +472,7 @@ def make_grad_scaler(device_type, dtype):
         return torch.amp.GradScaler("cuda", enabled=enabled)
     return torch.cuda.amp.GradScaler(enabled=enabled)
 
-def setup_datasets(C):
+def setup_datasets(C, distributed):
     
     # Custom collate function
     def collate_fn(batch):
@@ -475,15 +510,23 @@ def setup_datasets(C):
         crystal_systems = [int(train_dataset.data["crystal_system"][idx]) for idx in range(len(train_dataset))]
         counts = {value: crystal_systems.count(value) for value in set(crystal_systems)}
         weights = torch.tensor([1.0 / counts[value] for value in crystal_systems], dtype=torch.double)
+        num_samples = math.ceil(len(train_dataset) / distributed["world_size"])
+        sampler_seed = None if C.seed is None else C.seed + distributed["rank"]
         train_sampler = WeightedRandomSampler(
             weights,
-            num_samples=len(train_dataset),
+            num_samples=num_samples,
             replacement=True,
-            generator=make_generator(C.seed),
+            generator=make_generator(sampler_seed),
         )
     else:
-        train_sampler = SubsetRandomSampler(range(len(train_dataset)), generator=make_generator(C.seed))
-    train_batch_sampler = RandomBatchSampler(train_sampler, batch_size=C.batch_size, drop_last=False, seed=C.seed)
+        if distributed["ddp"]:
+            train_indices = range(distributed["rank"], len(train_dataset), distributed["world_size"])
+        else:
+            train_indices = range(len(train_dataset))
+        sampler_seed = None if C.seed is None else C.seed + distributed["rank"]
+        train_sampler = SubsetRandomSampler(train_indices, generator=make_generator(sampler_seed))
+    batch_seed = None if C.seed is None else C.seed + distributed["rank"]
+    train_batch_sampler = RandomBatchSampler(train_sampler, batch_size=C.batch_size, drop_last=False, seed=batch_seed)
     train_dataloader = DataLoader(
         train_dataset,
         batch_sampler=train_batch_sampler,
@@ -532,6 +575,8 @@ if __name__ == "__main__":
 
     # Parse configuration
     C = parse_config()
+    distributed = setup_distributed(C)
+    master_process = distributed["master_process"]
     
     # Set seed
     seed_everything(C.seed)
@@ -545,7 +590,7 @@ if __name__ == "__main__":
     ctx = autocast_context(device_type, ptdtype)
 
     # Setup datasets
-    dataloaders = setup_datasets(C)
+    dataloaders = setup_datasets(C, distributed)
 
     # Augmentation kwargs
     augmentation_kwargs = build_xrd_kwargs(C, augment=True)
@@ -646,10 +691,16 @@ if __name__ == "__main__":
         print("Compiling the model (takes a ~minute)...", flush=True)
         unoptimized_model = model
         model = torch.compile(model)  # requires PyTorch 2.0
-    raw_model = model._orig_mod if hasattr(model, "_orig_mod") else model
+    if distributed["ddp"]:
+        model = DDP(model, device_ids=[distributed["local_rank"]])
+    raw_model = model.module if distributed["ddp"] else model
+    raw_model = raw_model._orig_mod if hasattr(raw_model, "_orig_mod") else raw_model
     checkpoint["run_metadata"] = build_run_metadata(C, raw_model)
-    write_run_metadata(C, checkpoint["run_metadata"])
-    metrics_paths = initialize_metrics_logs(C)
+    if master_process:
+        write_run_metadata(C, checkpoint["run_metadata"])
+        metrics_paths = initialize_metrics_logs(C)
+    else:
+        metrics_paths = None
     
     # Initialize a dictionary to keep data iterators per split
     data_iters = {}
@@ -764,7 +815,8 @@ if __name__ == "__main__":
             for k in range(eval_iters):
                 X, Y, cond, start_indices = get_batch(split, augment=False)
                 with ctx:
-                    _, loss = model(X, cond, Y, start_indices)
+                    eval_model = raw_model if distributed["ddp"] else model
+                    _, loss = eval_model(X, cond, Y, start_indices)
                 losses[k] = loss.item()
             out[split] = losses.mean().item()
         model.train()
@@ -799,46 +851,62 @@ if __name__ == "__main__":
         # evaluate the loss on train/val sets and write checkpoints
         if training_metrics['iteration_number'] % C.eval_interval == 0:
             if C.validate:
+                should_stop = torch.zeros((), dtype=torch.int, device=C.device)
 
-                # Esimate loss
+                # Esimate loss on each rank, then average for logging.
                 losses = estimate_loss()
+                if distributed["ddp"]:
+                    loss_tensor = torch.tensor([losses["train"], losses["val"]], dtype=torch.float64, device=C.device)
+                    dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+                    loss_tensor /= distributed["world_size"]
+                    losses = {
+                        "train": float(loss_tensor[0].item()),
+                        "val": float(loss_tensor[1].item()),
+                    }
 
-                # Update metrics
-                training_metrics['train_losses'].append(losses['train'])
-                training_metrics['val_losses'].append(losses['val'])
-                training_metrics['epochs'].append(training_metrics['iteration_number'])
-                print(f"step {training_metrics['iteration_number']}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}", flush=True)
+                if master_process:
+                    # Update metrics
+                    training_metrics['train_losses'].append(losses['train'])
+                    training_metrics['val_losses'].append(losses['val'])
+                    training_metrics['epochs'].append(training_metrics['iteration_number'])
+                    print(f"step {training_metrics['iteration_number']}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}", flush=True)
 
-                # Check if new best model is found; if so, save, else patience score recal
-                found_new_best = losses["val"] <= training_metrics['best_val_loss'] or local_iteration_number == 0
-                if losses["val"] > training_metrics['best_val_loss'] and local_iteration_number != 0:
-                    training_metrics['patience_counter'] += 1
-                    print("Patience score increasing to:", training_metrics['patience_counter'])
-                else:
-                    training_metrics['best_val_loss'] = losses['val']
-                    checkpoint['best_model_state'] = copy.deepcopy(raw_model.state_dict())
-                    checkpoint['best_optimizer_state'] = copy.deepcopy(optimizer.state_dict())
-                    if training_metrics['patience_counter'] > 0:
-                        print("Patience score resetting.")
-                        training_metrics['patience_counter'] = 0
+                    # Check if new best model is found; if so, save, else patience score recal
+                    found_new_best = losses["val"] <= training_metrics['best_val_loss'] or local_iteration_number == 0
+                    if losses["val"] > training_metrics['best_val_loss'] and local_iteration_number != 0:
+                        training_metrics['patience_counter'] += 1
+                        print("Patience score increasing to:", training_metrics['patience_counter'])
+                    else:
+                        training_metrics['best_val_loss'] = losses['val']
+                        checkpoint['best_model_state'] = copy.deepcopy(raw_model.state_dict())
+                        checkpoint['best_optimizer_state'] = copy.deepcopy(optimizer.state_dict())
+                        if training_metrics['patience_counter'] > 0:
+                            print("Patience score resetting.")
+                            training_metrics['patience_counter'] = 0
 
-                eval_event = base_metric_event(C, training_metrics, local_iteration_number, lr, "eval")
-                eval_event.update({
-                    "train_loss": losses["train"],
-                    "val_loss": losses["val"],
-                })
-                write_metric_event(C, metrics_paths, eval_event)
+                    eval_event = base_metric_event(C, training_metrics, local_iteration_number, lr, "eval")
+                    eval_event.update({
+                        "train_loss": losses["train"],
+                        "val_loss": losses["val"],
+                    })
+                    write_metric_event(C, metrics_paths, eval_event)
 
-                if C.always_save_checkpoint or found_new_best:
-                    save_checkpoint(C, checkpoint, raw_model, optimizer, training_metrics, local_iteration_number)
+                    if C.always_save_checkpoint or found_new_best:
+                        save_checkpoint(C, checkpoint, raw_model, optimizer, training_metrics, local_iteration_number)
 
-                if training_metrics['patience_counter'] >= C.early_stopping_patience:
-                    print(f"Early stopping triggered after {training_metrics['iteration_number']} iterations")
+                    if training_metrics['patience_counter'] >= C.early_stopping_patience:
+                        print(f"Early stopping triggered after {training_metrics['iteration_number']} iterations")
+                        should_stop.fill_(1)
+
+                if distributed["ddp"]:
+                    dist.broadcast(should_stop, src=0)
+
+                if bool(should_stop.item()):
                     break
 
             else:
                 training_metrics['best_val_loss'] = 0.
-                if C.always_save_checkpoint:
+                if C.always_save_checkpoint and master_process:
                     save_checkpoint(C, checkpoint, raw_model, optimizer, training_metrics, local_iteration_number)
 
         if training_metrics['iteration_number'] == 0 and C.eval_only:
@@ -847,19 +915,25 @@ if __name__ == "__main__":
         # Forward backward update, with optional gradient accumulation to simulate larger batch size
         # and using the GradScaler if data type is float16
         small_step_pbar = tqdm(desc='Accumulating losses...', total=C.gradient_accumulation_steps, leave=False, disable=not C.accumulative_pbar)
-        loss_accum = 0.0
+        loss_accum = torch.zeros((), device=C.device)
         tokens_accum = 0
         for micro_step in range(C.gradient_accumulation_steps):
-            with ctx:
-                logits, loss = model(X, cond, Y, start_indices)
-                loss = loss / C.gradient_accumulation_steps
-            tokens_accum += int(X.numel())
+            sync_context = (
+                model.no_sync()
+                if distributed["ddp"] and micro_step < C.gradient_accumulation_steps - 1
+                else nullcontext()
+            )
+            with sync_context:
+                with ctx:
+                    logits, loss = model(X, cond, Y, start_indices)
+                    loss = loss / C.gradient_accumulation_steps
+                tokens_accum += int(X.numel())
 
-            # immediately async prefetch next batch while model is doing the forward pass on the GPU
-            X, Y, cond, start_indices = get_batch("train")
-            # backward pass, with gradient scaling if training in fp16
-            scaler.scale(loss).backward()
-            loss_accum += loss.detach()
+                # immediately async prefetch next batch while model is doing the forward pass on the GPU
+                X, Y, cond, start_indices = get_batch("train")
+                # backward pass, with gradient scaling if training in fp16
+                scaler.scale(loss).backward()
+                loss_accum += loss.detach()
             small_step_pbar.update(1)
 
         small_step_pbar.close()
@@ -875,20 +949,31 @@ if __name__ == "__main__":
         # flush the gradients as soon as we can, no need for this memory anymore
         optimizer.zero_grad(set_to_none=True)
 
+        logged_loss = loss_accum.detach()
+        logged_tokens = tokens_accum
+        if distributed["ddp"]:
+            metrics_tensor = torch.stack([
+                logged_loss.to(dtype=torch.float64),
+                torch.tensor(float(tokens_accum), dtype=torch.float64, device=C.device),
+            ])
+            dist.all_reduce(metrics_tensor, op=dist.ReduceOp.SUM)
+            logged_loss = metrics_tensor[0] / distributed["world_size"]
+            logged_tokens = int(metrics_tensor[1].item())
+
         # timing and logging
         t1 = time.time()
         dt = t1 - t0
         t0 = t1
-        if training_metrics['iteration_number'] % C.log_interval == 0:
-            lossf = loss_accum.item()  # loss as float. note: this is a CPU-GPU sync point
+        if master_process and training_metrics['iteration_number'] % C.log_interval == 0:
+            lossf = logged_loss.item()  # loss as float. note: this is a CPU-GPU sync point
             print(f"iter {training_metrics['iteration_number']}: loss {lossf:.4f}, time {dt * 1000:.2f}ms", flush=True)
-        if training_metrics['iteration_number'] % C.metrics_log_interval == 0:
+        if master_process and training_metrics['iteration_number'] % C.metrics_log_interval == 0:
             train_event = base_metric_event(C, training_metrics, local_iteration_number, lr, "train")
             train_event.update({
-                "step_loss": float(loss_accum.item()),
+                "step_loss": float(logged_loss.item()),
                 "time_ms": dt * 1000,
-                "tokens": tokens_accum,
-                "tokens_per_second": tokens_accum / dt if dt > 0 else None,
+                "tokens": logged_tokens,
+                "tokens_per_second": logged_tokens / dt if dt > 0 else None,
                 "grad_norm": grad_norm,
             })
             write_metric_event(C, metrics_paths, train_event)
@@ -898,3 +983,5 @@ if __name__ == "__main__":
         # termination conditions
         if training_metrics['iteration_number'] > C.max_iters:
             break
+
+    cleanup_distributed(distributed)
