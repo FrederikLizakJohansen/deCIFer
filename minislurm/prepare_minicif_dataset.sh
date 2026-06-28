@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time 3-00:00:00
+#SBATCH --time 1-00:00:00
 #SBATCH --job-name=prepare_minicif
 #SBATCH --array 0
 #SBATCH --cpus-per-task=8

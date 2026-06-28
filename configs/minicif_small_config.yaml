@@ -15,7 +15,7 @@ dtype: 'float16'
 always_save_checkpoint: True
 validate: True
 
-dataset: 'data/minicif'
+dataset: 'data'
 tokenizer: 'minicif'
 batch_size: 16
 block_size: 1024
