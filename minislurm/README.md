@@ -37,6 +37,17 @@ sbatch minislurm/prepare_minicif_dataset.sh \
 
 Preparation is resumable by default through `OUT_DIR/prep_checkpoint.pkl.gz`.
 Use `--no-resume` to ignore an existing checkpoint, or `--checkpoint-path PATH` to store it elsewhere.
+The SLURM script requests a `SIGTERM` five minutes before walltime; the prep script catches it, writes the checkpoint, and exits without rewriting partial HDF5 splits.
+You can also stop before walltime explicitly:
+
+```bash
+sbatch minislurm/prepare_minicif_dataset.sh \
+  --raw-dir data/noma \
+  --out-dir data \
+  --raw-from-gzip \
+  --num-workers 8 \
+  --max-runtime-seconds 82800
+```
 
 The output should contain `data/serialized/train.h5`, `val.h5`, and `test.h5`.
 

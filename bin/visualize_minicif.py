@@ -379,6 +379,7 @@ def main():
         json.dump({
             "checkpoint": os.path.abspath(args.checkpoint),
             "dataset_dir": os.path.abspath(dataset_dir),
+            "prompt_mode": args.prompt_mode,
             "xrd_kwargs": xrd_kwargs,
             "summary": summary.to_dict(orient="records"),
         }, f, indent=2)

@@ -237,6 +237,17 @@ Verification:
 - P1 - Add auxiliary denoising/contrastive objectives for PXRD conditioning.
   The model should learn that different noisy views of the same structure have the same underlying CIF. Add an auxiliary contrastive loss between PXRD embeddings from two augmentations of the same sample, or predict clean PXRD features from augmented inputs.
 
+- P1 - Fine-tune generation against PXRD agreement.
+  The end metric we care about is not only token likelihood; it is whether generated structures reproduce the input PXRD. Directly backpropagating Rwp through autoregressive discrete token sampling is not straightforward, but there are practical approximations.
+
+  Candidate approaches:
+  - Use best-of-K generation plus forward PXRD simulation to create preference pairs, then fine-tune with a ranking or DPO-style objective where lower-Rwp valid structures are preferred over higher-Rwp or invalid structures.
+  - Use policy-gradient/RL fine-tuning with reward terms for low Rwp, valid minicif parse, composition consistency, space-group consistency, and reasonable cell/atom geometry. Keep this as a late-stage fine-tune because rewards will be noisy and expensive.
+  - Train a differentiable surrogate "PXRD agreement critic" that predicts Rwp or match quality from hidden states/generated fields, then use it as an auxiliary loss or reranker-distillation target.
+  - For structured numeric fields, explore differentiable losses on predicted cell/coordinate distributions before token sampling, but avoid pretending this is full Rwp backprop unless the renderer/simulator path is differentiable.
+
+  Experiment: start with offline candidate generation and preference fine-tuning before RL. Generate K candidates per training/validation PXRD, compute validity and Rwp, build preferred/rejected pairs, and compare post-fine-tune best-of-K Rwp and match rate against the supervised baseline.
+
 - P2 - Try EMA checkpoints for generation.
   An exponential moving average of weights often improves sample quality even when validation loss is similar.
   Experiment: maintain EMA weights and evaluate generated CIF validity/PXRD agreement from current vs EMA checkpoints.
@@ -267,6 +278,13 @@ Verification:
 
 - P1 - Domain adaptation from simulated to real PXRD.
   If real-world CSP is the goal, create a held-out real/experimental benchmark and add augmentation specifically targeted at the sim-to-real gap.
+
+  RRUF evaluation direction:
+  - Build a real-life PXRD evaluation set from RRUF mineral patterns, paired with curated crystal structures where possible.
+  - Keep RRUF out of training initially and use it as an external robustness benchmark for simulated-to-real generalization.
+  - Normalize metadata carefully: radiation/wavelength, instrument geometry, background, peak positions, impurities, sample mixtures, and preferred orientation can differ from simulated NOMA-style patterns.
+  - Match RRUF phases to reference structures by mineral name/composition/space group, but treat ambiguous or mixed-phase entries separately rather than forcing noisy labels.
+  - Report RRUF metrics separately from simulated validation/test metrics: parse rate, candidate validity, best-of-K Rwp to experimental pattern, composition agreement, and whether the correct or plausible mineral family appears among candidates.
 
 - P2 - Data quality scoring.
   Before increasing data size, score CIFs for parseability, charge/occupancy sanity, missing fields, extreme cell values, duplicate structures, and tokenization anomalies. Train ablations on clean-only vs full data.

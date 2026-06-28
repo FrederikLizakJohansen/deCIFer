@@ -11,8 +11,11 @@ prepare_minicif_dataset = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(prepare_minicif_dataset)
 load_inputs = prepare_minicif_dataset.load_inputs
 load_checkpoint = prepare_minicif_dataset.load_checkpoint
+runtime_exceeded = prepare_minicif_dataset.runtime_exceeded
 save_checkpoint = prepare_minicif_dataset.save_checkpoint
 select_inputs = prepare_minicif_dataset.select_inputs
+write_metadata = prepare_minicif_dataset.write_metadata
+PrepConfig = prepare_minicif_dataset.PrepConfig
 
 
 class PrepareMinicifDatasetTest(unittest.TestCase):
@@ -45,6 +48,48 @@ class PrepareMinicifDatasetTest(unittest.TestCase):
 
         self.assertEqual(loaded_rows, rows)
         self.assertEqual(loaded_failures, failures)
+
+    def test_checkpoint_round_trip_without_directory_component(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                rows = {"a": {"cif_name": "a"}}
+                failures = {}
+
+                save_checkpoint("prep_checkpoint.pkl.gz", rows, failures)
+                loaded_rows, loaded_failures = load_checkpoint("prep_checkpoint.pkl.gz")
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertEqual(loaded_rows, rows)
+        self.assertEqual(loaded_failures, failures)
+
+    def test_runtime_exceeded_respects_disabled_zero(self):
+        self.assertFalse(runtime_exceeded(0.0, 0))
+        self.assertTrue(runtime_exceeded(0.0, 1))
+
+    def test_incomplete_metadata_records_checkpoint_status(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = PrepConfig(raw_dir="raw", out_dir=tmpdir, checkpoint_path=os.path.join(tmpdir, "ckpt.pkl.gz"))
+
+            metadata = write_metadata(
+                config=config,
+                inputs=["a", "b"],
+                rows=[{"cif_name": "a"}],
+                failures=[],
+                splits={},
+                pending_inputs=["b"],
+                n_processed_this_run=1,
+                complete=False,
+                stop_reason="max_runtime_seconds",
+            )
+
+            with open(os.path.join(tmpdir, "metadata.json")) as f:
+                loaded = __import__("json").load(f)
+
+        self.assertFalse(metadata["complete"])
+        self.assertEqual(loaded["stop_reason"], "max_runtime_seconds")
 
 
 if __name__ == "__main__":

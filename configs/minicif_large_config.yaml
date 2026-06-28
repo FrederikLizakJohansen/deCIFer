@@ -1,0 +1,77 @@
+# deCIFer-scale minicif config for full training.
+# Prepare data first with:
+# python bin/prepare_minicif_dataset.py --raw-dir data/raw_cifs --out-dir data
+
+out_dir: 'minicif_model_large'
+eval_interval: 250
+eval_iters_train: 200
+eval_iters_val: 200
+log_interval: 1
+metrics_log_interval: 1
+init_from: 'scratch'
+
+device: 'cuda'
+dtype: 'float16'
+
+always_save_checkpoint: True
+validate: True
+
+dataset: 'data'
+tokenizer: 'minicif'
+batch_size: 32
+block_size: 1024
+
+n_layer: 8
+n_head: 8
+n_embd: 512
+dropout: 0.0
+
+learning_rate: 1e-3
+gradient_accumulation_steps: 40
+max_iters: 50_000
+lr_decay_iters: 50_000
+min_lr: 1e-6
+beta2: 0.99
+
+warmup_iters: 100
+early_stopping_patience: 100
+
+condition: True
+boundary_masking: True
+minicif_constrained_decoding: True
+condition_encoder: 'conv'
+condition_n_tokens: 16
+pxrd_encoder_channels: 64
+pxrd_encoder_kernel_size: 7
+
+qmin: 0.0
+qmax: 10.0
+nyquist_points_per_fwhm: 4
+fwhm_range_min: 0.04
+fwhm_range_max: 0.08
+eta_range_min: 0.5
+eta_range_max: 0.5
+noise_range_min: 0.001
+noise_range_max: 0.05
+intensity_scale_range_min: 1.0
+intensity_scale_range_max: 1.0
+mask_prob: 0.0
+
+q_shift_range_min: -0.01
+q_shift_range_max: 0.01
+q_scale_range_min: 0.99
+q_scale_range_max: 1.01
+peak_intensity_jitter_range_min: 0.9
+peak_intensity_jitter_range_max: 1.1
+peak_dropout_prob: 0.0
+background_range_min: 0.0
+background_range_max: 0.01
+impurity_peak_count_min: 0
+impurity_peak_count_max: 1
+impurity_intensity_range_min: 0.01
+impurity_intensity_range_max: 0.05
+particle_size_range_min: 0.0
+particle_size_range_max: 0.0
+peak_asymmetry_range_min: -0.1
+peak_asymmetry_range_max: 0.1
+final_normalize_xrd: True

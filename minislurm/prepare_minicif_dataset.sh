@@ -4,6 +4,7 @@
 #SBATCH --array 0
 #SBATCH --cpus-per-task=8
 #SBATCH --mem-per-cpu=8G
+#SBATCH --signal=B:TERM@300
 #SBATCH --output=logs/minicif_prepare_%A_%a.out
 
 usage() {

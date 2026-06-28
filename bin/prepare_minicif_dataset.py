@@ -6,7 +6,9 @@ import json
 import os
 import pickle
 import random
+import signal
 import sys
+import time
 from dataclasses import asdict, dataclass
 from glob import glob
 from multiprocessing import Pool, cpu_count
@@ -25,6 +27,9 @@ from tqdm import tqdm
 from decifer.minicif import MinicifConfig, MinicifTokenizer, canonicalize_cif
 from decifer.utility import space_group_to_crystal_system
 
+STOP_REQUESTED = False
+STOP_SIGNAL = None
+
 
 @dataclass
 class PrepConfig:
@@ -35,6 +40,7 @@ class PrepConfig:
     sample_strategy: str = "first"
     checkpoint_path: str = ""
     checkpoint_interval: int = 1000
+    max_runtime_seconds: int = 0
     no_resume: bool = False
     num_decimal_places: int = 4
     wavelength: str = "CuKa"
@@ -166,8 +172,12 @@ def load_checkpoint(path):
 def save_checkpoint(path, rows_by_source, failures_by_source):
     if not path:
         return
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    checkpoint_dir = os.path.dirname(path)
+    if checkpoint_dir:
+        os.makedirs(checkpoint_dir, exist_ok=True)
     state = {
+        "version": 2,
+        "saved_at": time.strftime("%Y-%m-%d %H:%M:%S %z"),
         "rows": [{"source_id": key, "data": value} for key, value in rows_by_source.items()],
         "failures": [{"source_id": key, "data": value} for key, value in failures_by_source.items()],
     }
@@ -175,6 +185,45 @@ def save_checkpoint(path, rows_by_source, failures_by_source):
     with gzip.open(tmp_path, "wb") as f:
         pickle.dump(state, f)
     os.replace(tmp_path, path)
+
+
+def request_stop(signum, _frame):
+    global STOP_REQUESTED, STOP_SIGNAL
+    STOP_REQUESTED = True
+    STOP_SIGNAL = signum
+
+
+def install_signal_handlers():
+    signal.signal(signal.SIGINT, request_stop)
+    signal.signal(signal.SIGTERM, request_stop)
+
+
+def runtime_exceeded(start_time, max_runtime_seconds):
+    return max_runtime_seconds > 0 and (time.monotonic() - start_time) >= max_runtime_seconds
+
+
+def write_metadata(config, inputs, rows, failures, splits, pending_inputs, n_processed_this_run, complete, stop_reason=None):
+    metadata = {
+        "config": asdict(config),
+        "complete": complete,
+        "stop_reason": stop_reason,
+        "checkpoint_path": os.path.abspath(config.checkpoint_path) if config.checkpoint_path else "",
+        "n_input": len(inputs),
+        "n_pending_at_start": len(pending_inputs),
+        "n_processed_this_run": n_processed_this_run,
+        "n_success": len(rows),
+        "n_failures": len(failures),
+        "split_sizes": {split: len(split_rows_) for split, split_rows_ in splits.items()},
+        "tokenizer": "minicif",
+        "cif_representation": "minicif",
+    }
+    os.makedirs(config.out_dir, exist_ok=True)
+    with open(os.path.join(config.out_dir, "metadata.json"), "w") as f:
+        json.dump(metadata, f, indent=2)
+    if failures:
+        with open(os.path.join(config.out_dir, "failures.json"), "w") as f:
+            json.dump(failures, f, indent=2)
+    return metadata
 
 
 def write_split(path, rows):
@@ -230,6 +279,7 @@ def main():
     parser.add_argument("--sample-strategy", choices=["first", "random"], default="first", help="How to select --max-samples inputs")
     parser.add_argument("--checkpoint-path", default="", help="Path to resumable prep checkpoint; defaults to OUT_DIR/prep_checkpoint.pkl.gz")
     parser.add_argument("--checkpoint-interval", type=int, default=1000, help="Save prep checkpoint every N processed inputs")
+    parser.add_argument("--max-runtime-seconds", type=int, default=0, help="Stop cleanly after this many seconds, saving a checkpoint first; 0 disables")
     parser.add_argument("--no-resume", action="store_true", help="Ignore any existing prep checkpoint")
     parser.add_argument("--num-decimal-places", type=int, default=4)
     parser.add_argument("--wavelength", default="CuKa")
@@ -260,21 +310,43 @@ def main():
     failures_by_source = {}
     if not config.no_resume:
         rows_by_source, failures_by_source = load_checkpoint(config.checkpoint_path)
+        if rows_by_source or failures_by_source:
+            print(
+                f"Resuming from {config.checkpoint_path}: "
+                f"{len(rows_by_source)} successes, {len(failures_by_source)} failures already checkpointed.",
+                flush=True,
+            )
 
     pending_inputs = [
         obj for obj in inputs
         if source_id(obj) not in rows_by_source and source_id(obj) not in failures_by_source
     ]
+    install_signal_handlers()
+    start_time = time.monotonic()
+    stopped_early = False
+    stop_reason = None
+    n_processed_this_run = 0
+
     tasks = [(obj, asdict(config)) for obj in pending_inputs]
     with Pool(processes=config.num_workers) as pool:
         iterator = pool.imap(safe_process_cif, tasks)
         for n_processed, (key, result, failure) in enumerate(tqdm(iterator, total=len(tasks), desc="Preparing minicif"), start=1):
+            n_processed_this_run = n_processed
             if failure is None:
                 rows_by_source[key] = result
             else:
                 failures_by_source[key] = failure
-            if config.checkpoint_interval > 0 and n_processed % config.checkpoint_interval == 0:
+            if (
+                config.checkpoint_interval > 0
+                and n_processed % config.checkpoint_interval == 0
+            ):
                 save_checkpoint(config.checkpoint_path, rows_by_source, failures_by_source)
+            if STOP_REQUESTED or runtime_exceeded(start_time, config.max_runtime_seconds):
+                stopped_early = True
+                stop_reason = f"signal_{STOP_SIGNAL}" if STOP_REQUESTED else "max_runtime_seconds"
+                save_checkpoint(config.checkpoint_path, rows_by_source, failures_by_source)
+                print(f"Stopping early ({stop_reason}); checkpoint saved to {config.checkpoint_path}", flush=True)
+                break
 
     save_checkpoint(config.checkpoint_path, rows_by_source, failures_by_source)
 
@@ -285,27 +357,36 @@ def main():
     ]
     failures = list(failures_by_source.values())
 
+    if stopped_early:
+        metadata = write_metadata(
+            config,
+            inputs,
+            rows,
+            failures,
+            {},
+            pending_inputs,
+            n_processed_this_run,
+            complete=False,
+            stop_reason=stop_reason,
+        )
+        print(json.dumps(metadata, indent=2))
+        return
+
     splits = split_rows(rows, config.val_fraction, config.test_fraction, config.seed)
     serialized_dir = os.path.join(config.out_dir, "serialized")
     for split, split_rows_ in splits.items():
         write_split(os.path.join(serialized_dir, f"{split}.h5"), split_rows_)
 
-    metadata = {
-        "config": asdict(config),
-        "n_input": len(inputs),
-        "n_pending_at_start": len(pending_inputs),
-        "n_success": len(rows),
-        "n_failures": len(failures),
-        "split_sizes": {split: len(split_rows_) for split, split_rows_ in splits.items()},
-        "tokenizer": "minicif",
-        "cif_representation": "minicif",
-    }
-    os.makedirs(config.out_dir, exist_ok=True)
-    with open(os.path.join(config.out_dir, "metadata.json"), "w") as f:
-        json.dump(metadata, f, indent=2)
-    if failures:
-        with open(os.path.join(config.out_dir, "failures.json"), "w") as f:
-            json.dump(failures, f, indent=2)
+    metadata = write_metadata(
+        config,
+        inputs,
+        rows,
+        failures,
+        splits,
+        pending_inputs,
+        n_processed_this_run,
+        complete=True,
+    )
 
     print(json.dumps(metadata, indent=2))
 
