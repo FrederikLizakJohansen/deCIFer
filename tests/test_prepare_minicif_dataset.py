@@ -14,6 +14,7 @@ load_checkpoint = prepare_minicif_dataset.load_checkpoint
 runtime_exceeded = prepare_minicif_dataset.runtime_exceeded
 save_checkpoint = prepare_minicif_dataset.save_checkpoint
 select_inputs = prepare_minicif_dataset.select_inputs
+split_rows = prepare_minicif_dataset.split_rows
 write_metadata = prepare_minicif_dataset.write_metadata
 PrepConfig = prepare_minicif_dataset.PrepConfig
 
@@ -90,6 +91,19 @@ class PrepareMinicifDatasetTest(unittest.TestCase):
 
         self.assertFalse(metadata["complete"])
         self.assertEqual(loaded["stop_reason"], "max_runtime_seconds")
+
+    def test_split_rows_stratifies_by_crystal_system(self):
+        rows = [
+            {"cif_name": f"cs{crystal_system}_{i}", "crystal_system": crystal_system}
+            for crystal_system in [1, 2, 7]
+            for i in range(20)
+        ]
+
+        splits = split_rows(rows, val_fraction=0.1, test_fraction=0.1, seed=42, stratify_on="crystal_system")
+
+        for split in ["train", "val", "test"]:
+            crystal_systems = {row["crystal_system"] for row in splits[split]}
+            self.assertEqual(crystal_systems, {1, 2, 7})
 
 
 if __name__ == "__main__":

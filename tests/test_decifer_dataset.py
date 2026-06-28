@@ -1,9 +1,11 @@
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 import h5py
 import numpy as np
+from torch.utils.data import WeightedRandomSampler
 
 from decifer.decifer_dataset import DeciferDataset
 
@@ -19,6 +21,39 @@ class DeciferDatasetTest(unittest.TestCase):
             item = dataset[0]
 
             self.assertEqual(item["spacegroup"].item(), 221)
+
+    def test_crystal_system_balanced_training_sampler_is_weighted(self):
+        from bin.train import setup_datasets
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            serialized = os.path.join(tmpdir, "serialized")
+            os.makedirs(serialized)
+            for split in ["train", "val", "test"]:
+                path = os.path.join(serialized, f"{split}.h5")
+                with h5py.File(path, "w") as h5:
+                    int_vlen = h5py.vlen_dtype(np.dtype("int32"))
+                    float_vlen = h5py.vlen_dtype(np.dtype("float32"))
+                    tokens = h5.create_dataset("cif_tokenized", shape=(4,), dtype=int_vlen)
+                    q = h5.create_dataset("xrd_disc.q", shape=(4,), dtype=float_vlen)
+                    iq = h5.create_dataset("xrd_disc.iq", shape=(4,), dtype=float_vlen)
+                    h5.create_dataset("crystal_system", data=np.asarray([1, 1, 1, 7], dtype=np.int32))
+                    for i in range(4):
+                        tokens[i] = np.asarray([0, 1], dtype=np.int32)
+                        q[i] = np.asarray([1.0], dtype=np.float32)
+                        iq[i] = np.asarray([1.0], dtype=np.float32)
+
+            config = SimpleNamespace(
+                dataset=tmpdir,
+                sampling_strategy="crystal_system_balanced",
+                device="cpu",
+                batch_size=2,
+                num_workers_dataloader=0,
+                seed=42,
+            )
+
+            dataloaders = setup_datasets(config)
+
+        self.assertIsInstance(dataloaders["train"].batch_sampler.sampler, WeightedRandomSampler)
 
 
 if __name__ == "__main__":

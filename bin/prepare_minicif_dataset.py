@@ -9,6 +9,7 @@ import random
 import signal
 import sys
 import time
+from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from glob import glob
 from multiprocessing import Pool, cpu_count
@@ -49,6 +50,7 @@ class PrepConfig:
     symprec: float = 0.1
     val_fraction: float = 0.075
     test_fraction: float = 0.075
+    stratify_split_on: str = "crystal_system"
     seed: int = 42
     include_occupancy_structures: bool = False
     num_workers: int = 1
@@ -202,6 +204,13 @@ def runtime_exceeded(start_time, max_runtime_seconds):
     return max_runtime_seconds > 0 and (time.monotonic() - start_time) >= max_runtime_seconds
 
 
+def split_distribution(splits, key):
+    return {
+        split: {str(value): count for value, count in sorted(Counter(row[key] for row in split_rows_).items())}
+        for split, split_rows_ in splits.items()
+    }
+
+
 def write_metadata(config, inputs, rows, failures, splits, pending_inputs, n_processed_this_run, complete, stop_reason=None):
     metadata = {
         "config": asdict(config),
@@ -214,6 +223,9 @@ def write_metadata(config, inputs, rows, failures, splits, pending_inputs, n_pro
         "n_success": len(rows),
         "n_failures": len(failures),
         "split_sizes": {split: len(split_rows_) for split, split_rows_ in splits.items()},
+        "split_distributions": {
+            "crystal_system": split_distribution(splits, "crystal_system") if splits else {},
+        },
         "tokenizer": "minicif",
         "cif_representation": "minicif",
     }
@@ -248,7 +260,7 @@ def write_split(path, rows):
             iq_ds[i] = row["xrd_disc.iq"]
 
 
-def split_rows(rows, val_fraction, test_fraction, seed):
+def random_split_rows(rows, val_fraction, test_fraction, seed):
     rows = list(rows)
     random.Random(seed).shuffle(rows)
     n_total = len(rows)
@@ -270,6 +282,29 @@ def split_rows(rows, val_fraction, test_fraction, seed):
     }
 
 
+def split_rows(rows, val_fraction, test_fraction, seed, stratify_on="crystal_system"):
+    rows = list(rows)
+    if not stratify_on:
+        return random_split_rows(rows, val_fraction, test_fraction, seed)
+
+    grouped = defaultdict(list)
+    for row in rows:
+        grouped[row[stratify_on]].append(row)
+
+    rng = random.Random(seed)
+    splits = {"train": [], "val": [], "test": []}
+    for value in sorted(grouped):
+        group_rows = grouped[value]
+        rng.shuffle(group_rows)
+        group_splits = random_split_rows(group_rows, val_fraction, test_fraction, rng.randrange(2**32))
+        for split, split_rows_ in group_splits.items():
+            splits[split].extend(split_rows_)
+
+    for split_rows_ in splits.values():
+        rng.shuffle(split_rows_)
+    return splits
+
+
 def main():
     parser = argparse.ArgumentParser(description="Prepare compact minicif HDF5 datasets directly from raw CIFs.")
     parser.add_argument("--raw-dir", required=True, help="Directory containing raw .cif files or .pkl.gz bundles")
@@ -288,6 +323,7 @@ def main():
     parser.add_argument("--symprec", type=float, default=0.1)
     parser.add_argument("--val-fraction", type=float, default=0.075)
     parser.add_argument("--test-fraction", type=float, default=0.075)
+    parser.add_argument("--stratify-split-on", choices=["crystal_system", "none"], default="crystal_system", help="Stratify train/val/test splits by this field")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--include-occupancy-structures", action="store_true")
     parser.add_argument("--num-workers", type=int, default=0)
@@ -296,6 +332,9 @@ def main():
 
     if args.num_workers == 0:
         args.num_workers = max(1, cpu_count() - 1)
+
+    if args.stratify_split_on == "none":
+        args.stratify_split_on = ""
 
     config = PrepConfig(**vars(args))
     inputs = load_inputs(config.raw_dir, config.raw_from_gzip)
@@ -372,7 +411,7 @@ def main():
         print(json.dumps(metadata, indent=2))
         return
 
-    splits = split_rows(rows, config.val_fraction, config.test_fraction, config.seed)
+    splits = split_rows(rows, config.val_fraction, config.test_fraction, config.seed, config.stratify_split_on)
     serialized_dir = os.path.join(config.out_dir, "serialized")
     for split, split_rows_ in splits.items():
         write_split(os.path.join(serialized_dir, f"{split}.h5"), split_rows_)

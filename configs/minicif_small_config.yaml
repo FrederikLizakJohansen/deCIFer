@@ -20,6 +20,7 @@ dataset: 'data'
 tokenizer: 'minicif'
 batch_size: 16
 block_size: 1024
+sampling_strategy: 'crystal_system_balanced'
 
 n_layer: 4
 n_head: 4

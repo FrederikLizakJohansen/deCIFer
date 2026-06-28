@@ -26,6 +26,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data import SubsetRandomSampler
 from torch.utils.data import BatchSampler
 from torch.utils.data import SequentialSampler
+from torch.utils.data import WeightedRandomSampler
 
 from torch.nn.utils.rnn import pad_sequence
 
@@ -106,6 +107,7 @@ class TrainConfig:
     batch_size: int = 64  # if gradient_accumulation_steps > 1, this is the micro-batch size
     accumulative_pbar: bool = False
     num_workers_dataloader: int = 0 # Default; single process
+    sampling_strategy: str = "random"
 
     # deCIFer model
     tokenizer: str = "legacy"
@@ -298,6 +300,7 @@ METRIC_LOG_FIELDS = [
     "condition",
     "condition_encoder",
     "condition_n_tokens",
+    "sampling_strategy",
     "tokenizer",
     "batch_size",
     "block_size",
@@ -347,6 +350,7 @@ def base_metric_event(C, training_metrics, local_iteration_number, lr, event_typ
         "condition": C.condition,
         "condition_encoder": C.condition_encoder,
         "condition_n_tokens": C.condition_n_tokens,
+        "sampling_strategy": C.sampling_strategy,
         "tokenizer": C.tokenizer,
         "batch_size": C.batch_size,
         "block_size": C.block_size,
@@ -455,6 +459,10 @@ def setup_datasets(C):
     
     # Collect relevant data
     dataset_fields = ["cif_tokens", "xrd.q", "xrd.iq"]
+    if C.sampling_strategy == "crystal_system_balanced":
+        dataset_fields.append("crystal_system")
+    elif C.sampling_strategy != "random":
+        raise ValueError(f"unknown sampling_strategy: {C.sampling_strategy}")
     pin_memory = torch.device(C.device).type == "cuda"
 
     # Initialise datasets/loaders 
@@ -463,7 +471,18 @@ def setup_datasets(C):
     test_dataset = DeciferDataset(os.path.join(C.dataset, "serialized/test.h5"), dataset_fields)
         
     # Random batching sampler, train
-    train_sampler = SubsetRandomSampler(range(len(train_dataset)), generator=make_generator(C.seed))
+    if C.sampling_strategy == "crystal_system_balanced":
+        crystal_systems = [int(train_dataset.data["crystal_system"][idx]) for idx in range(len(train_dataset))]
+        counts = {value: crystal_systems.count(value) for value in set(crystal_systems)}
+        weights = torch.tensor([1.0 / counts[value] for value in crystal_systems], dtype=torch.double)
+        train_sampler = WeightedRandomSampler(
+            weights,
+            num_samples=len(train_dataset),
+            replacement=True,
+            generator=make_generator(C.seed),
+        )
+    else:
+        train_sampler = SubsetRandomSampler(range(len(train_dataset)), generator=make_generator(C.seed))
     train_batch_sampler = RandomBatchSampler(train_sampler, batch_size=C.batch_size, drop_last=False, seed=C.seed)
     train_dataloader = DataLoader(
         train_dataset,
