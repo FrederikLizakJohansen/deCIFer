@@ -115,9 +115,14 @@ class TrainConfig:
     dropout: float = 0.0  # for pretraining 0 is good, for finetuning try 0.1+
     bias: bool = False  # do we use bias inside LayerNorm and Linear layers?
     boundary_masking: bool = True
+    minicif_constrained_decoding: bool = False
 
     # PXRD embedder
     condition: bool = False
+    condition_encoder: str = "mlp"
+    condition_n_tokens: int = 1
+    pxrd_encoder_channels: int = 64
+    pxrd_encoder_kernel_size: int = 7
     condition_embedder_hidden_layers: List[int] = field(default_factory=lambda: [512])
 
     # Augmentation at training time
@@ -470,6 +475,12 @@ if __name__ == "__main__":
         dropout=C.dropout,
         condition=C.condition,
         boundary_masking=C.boundary_masking,
+        tokenizer=C.tokenizer,
+        minicif_constrained_decoding=C.minicif_constrained_decoding,
+        condition_encoder=C.condition_encoder,
+        condition_n_tokens=C.condition_n_tokens,
+        pxrd_encoder_channels=C.pxrd_encoder_channels,
+        pxrd_encoder_kernel_size=C.pxrd_encoder_kernel_size,
         condition_embedder_hidden_layers = C.condition_embedder_hidden_layers,
     )
 
