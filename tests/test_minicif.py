@@ -13,6 +13,8 @@ from decifer.minicif import (
     allowed_minicif_next_token_ids,
     canonicalize_cif,
     mask_minicif_logits,
+    minicif_to_structure,
+    parse_minicif,
 )
 
 
@@ -106,6 +108,21 @@ class MinicifTest(unittest.TestCase):
         self.assertEqual(masked[0, tokenizer.token_to_id["Na"]].item(), 0)
         self.assertEqual(masked[0, tokenizer.token_to_id["Cl"]].item(), 0)
         self.assertTrue(torch.isneginf(masked[0, tokenizer.token_to_id["Fe"]]))
+
+    def test_minicif_can_be_rendered_to_structure(self):
+        minicif = (
+            "<mcif> Na Cl cs_7 sg_221 cell "
+            "5.640 5.640 5.640 90.000 90.000 90.000 "
+            "<atom> Na 1 0.000 0.000 0.000 1.000 "
+            "<atom> Cl 1 0.500 0.500 0.500 1.000 </mcif>"
+        )
+
+        parsed = parse_minicif(minicif)
+        structure = minicif_to_structure(minicif)
+
+        self.assertEqual(parsed.space_group, 221)
+        self.assertEqual(structure.composition.reduced_formula, "NaCl")
+        self.assertEqual(len(structure), 2)
 
 
 if __name__ == "__main__":

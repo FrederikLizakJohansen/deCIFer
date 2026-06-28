@@ -2,10 +2,11 @@
 
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
-from pymatgen.core import Element
+from pymatgen.core import Element, Lattice, Structure
 from pymatgen.io.cif import CifParser
+from pymatgen.symmetry.groups import SpaceGroup
 
 from decifer.tokenizer import DIGITS, PAD_TOKEN, UNK_TOKEN
 from decifer.utility import (
@@ -38,6 +39,25 @@ CRYSTAL_SYSTEM_SPACE_GROUPS = {
 class MinicifConfig:
     decimal_places: int = 4
     element_order: str = "atomic_number"
+
+
+@dataclass
+class MinicifAtom:
+    element: str
+    multiplicity: int
+    x: float
+    y: float
+    z: float
+    occupancy: float
+
+
+@dataclass
+class ParsedMinicif:
+    elements: List[str]
+    crystal_system: int
+    space_group: int
+    cell: Tuple[float, float, float, float, float, float]
+    atoms: List[MinicifAtom]
 
 
 def canonicalize_cif(cif_string: str, config: Optional[MinicifConfig] = None) -> str:
@@ -205,6 +225,81 @@ def mask_minicif_logits(logits, sequences, tokenizer: Optional[MinicifTokenizer]
         row_mask[allowed] = False
         masked_logits[row_idx, row_mask] = -float("inf")
     return masked_logits
+
+
+def parse_minicif(minicif_string: str) -> ParsedMinicif:
+    fields = minicif_string.strip().split()
+    if not fields or fields[0] != START_TOKEN:
+        raise ValueError("minicif does not start with <mcif>")
+
+    index = 1
+    elements = []
+    while index < len(fields) and not fields[index].startswith("cs_"):
+        elements.append(fields[index])
+        index += 1
+    if not elements:
+        raise ValueError("minicif does not contain constituent elements")
+
+    if index >= len(fields):
+        raise ValueError("minicif missing crystal system")
+    crystal_system = _require_prefixed_int(fields[index], "cs_")
+    if crystal_system not in CRYSTAL_SYSTEM_SPACE_GROUPS:
+        raise ValueError(f"invalid crystal system: {crystal_system}")
+    index += 1
+
+    if index >= len(fields):
+        raise ValueError("minicif missing space group")
+    space_group = _require_prefixed_int(fields[index], "sg_")
+    if space_group not in CRYSTAL_SYSTEM_SPACE_GROUPS[crystal_system]:
+        raise ValueError(f"space group {space_group} is incompatible with crystal system {crystal_system}")
+    index += 1
+
+    if index >= len(fields) or fields[index] != CELL_TOKEN:
+        raise ValueError("minicif missing cell token")
+    index += 1
+    if index + 6 > len(fields):
+        raise ValueError("minicif missing cell parameters")
+    cell = tuple(float(value) for value in fields[index:index + 6])
+    index += 6
+
+    atoms = []
+    while index < len(fields):
+        if fields[index] == END_TOKEN:
+            if index != len(fields) - 1:
+                raise ValueError("tokens found after </mcif>")
+            if not atoms:
+                raise ValueError("minicif does not contain atom rows")
+            return ParsedMinicif(elements, crystal_system, space_group, cell, atoms)
+        if fields[index] != ATOM_TOKEN:
+            raise ValueError(f"expected <atom> or </mcif>, found {fields[index]}")
+        if index + 7 > len(fields):
+            raise ValueError("incomplete atom row")
+        element = fields[index + 1]
+        if element not in elements:
+            raise ValueError(f"atom element {element} is not in minicif prefix")
+        atoms.append(MinicifAtom(
+            element=element,
+            multiplicity=int(float(fields[index + 2])),
+            x=float(fields[index + 3]),
+            y=float(fields[index + 4]),
+            z=float(fields[index + 5]),
+            occupancy=float(fields[index + 6]),
+        ))
+        index += 7
+
+    raise ValueError("minicif missing </mcif>")
+
+
+def minicif_to_structure(minicif_string: str) -> Structure:
+    parsed = parse_minicif(minicif_string)
+    lattice = Lattice.from_parameters(*parsed.cell)
+    species = [
+        atom.element if atom.occupancy >= 1.0 else {atom.element: atom.occupancy}
+        for atom in parsed.atoms
+    ]
+    coords = [[atom.x, atom.y, atom.z] for atom in parsed.atoms]
+    space_group = SpaceGroup.from_int_number(parsed.space_group).symbol
+    return Structure.from_spacegroup(space_group, lattice, species, coords)
 
 
 def _ordered_elements(block: Dict, element_order: str) -> List[str]:
@@ -398,6 +493,13 @@ def _parse_prefixed_int(value: str, prefix: str) -> Optional[int]:
         return int(value[len(prefix):])
     except ValueError:
         return None
+
+
+def _require_prefixed_int(value: str, prefix: str) -> int:
+    parsed = _parse_prefixed_int(value, prefix)
+    if parsed is None:
+        raise ValueError(f"expected {prefix} integer token, found {value}")
+    return parsed
 
 
 def _element_ids(tokenizer: MinicifTokenizer) -> Set[int]:

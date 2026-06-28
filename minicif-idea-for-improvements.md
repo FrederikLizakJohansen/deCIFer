@@ -12,6 +12,7 @@ Purpose: collect concrete ideas for improving the current deCIFer codebase, mode
 - 2026-06-27: Added a one-pass minicif dataset preparation path and moved PXRD conditioning toward sparse peak storage plus training-time Nyquist-aware augmentation.
 - 2026-06-27: Added first-pass minicif constrained decoding helpers: `sg_*` choices are masked by the emitted crystal system, and `<atom>` element choices are masked to the constituent elements emitted in the minicif prefix.
 - 2026-06-28: Added a configurable PXRD condition encoder. The old one-vector MLP remains available, and minicif can now use a small 1D convolutional PXRD encoder that emits multiple latent condition tokens per `<mcif>` start.
+- 2026-06-28: Verified conditioned attention masking with a regression test for packed minicif records, added minicif-to-structure rendering, and added `bin/visualize_minicif.py` for learning curves plus validation/test match-rate and Rwp reports.
 
 ## Review assumptions
 
@@ -310,6 +311,10 @@ Verification:
 
 - P0 - Define a minicif evaluation suite.
   Minimum metrics: token loss, CIF parse rate, pymatgen structure construction rate, composition match, space-group/crystal-system match when available, cell-parameter error, PXRD agreement, duplicate rate, and generation wall time.
+
+  Current implementation:
+  - Added `bin/visualize_minicif.py`, which loads a minicif checkpoint and validation/test HDF5 splits, plots learning curves, generates candidates, computes parse rate, candidate and best-of-K match rate, Rwp, RMSD, composition match, space-group accuracy, and crystal-system accuracy.
+  - Outputs per-candidate CSV, per-split summary CSV/JSON, `learning_curves.png`, `metric_summary.png`, and `rwp_distribution.png` when valid Rwp values are available.
 
 - P0 - Evaluate with multiple samples per PXRD.
   Because the inverse problem is ambiguous, top-1 generation is too narrow. Report best-of-K and diversity-aware metrics for K values such as 4, 16, and 64.

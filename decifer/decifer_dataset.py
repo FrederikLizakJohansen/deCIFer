@@ -49,6 +49,9 @@ class DeciferDataset(Dataset):
             if isinstance(sequence, np.ndarray):
                 dtype = torch.float32 if 'float' in str(sequence.dtype) else torch.long
                 sequence = torch.tensor(sequence, dtype=dtype)
+            elif isinstance(sequence, np.generic):
+                dtype = torch.float32 if 'float' in str(sequence.dtype) else torch.long
+                sequence = torch.tensor(sequence.item(), dtype=dtype)
             elif isinstance(sequence, (bytes, str)):
                 sequence = sequence.decode('utf-8') if isinstance(sequence, bytes) else sequence
             else:
