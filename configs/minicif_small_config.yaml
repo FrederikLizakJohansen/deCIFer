@@ -1,22 +1,22 @@
 # Small minicif config for smoke testing the compact CIF representation.
 # Prepare data first with:
-# python bin/prepare_minicif_dataset.py --raw-dir data/raw_cifs --out-dir data/minicif
+# python bin/prepare_minicif_dataset.py --raw-dir data/raw_cifs --out-dir data/noma
 
 out_dir: 'minicif_model_small'
 eval_interval: 100
 eval_iters_train: 25
 eval_iters_val: 25
-log_interval: 1
-metrics_log_interval: 1
+log_interval: 10
+metrics_log_interval: 10
 init_from: 'scratch'
 
 device: 'cuda'
-dtype: 'float16'
+dtype: 'bfloat16'
 
-always_save_checkpoint: True
+always_save_checkpoint: False
 validate: True
 
-dataset: 'data'
+dataset: 'data/noma'
 tokenizer: 'minicif'
 batch_size: 16
 block_size: 1024
