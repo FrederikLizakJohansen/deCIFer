@@ -853,18 +853,11 @@ if __name__ == "__main__":
             if C.validate:
                 should_stop = torch.zeros((), dtype=torch.int, device=C.device)
 
-                # Esimate loss on each rank, then average for logging.
-                losses = estimate_loss()
-                if distributed["ddp"]:
-                    loss_tensor = torch.tensor([losses["train"], losses["val"]], dtype=torch.float64, device=C.device)
-                    dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
-                    loss_tensor /= distributed["world_size"]
-                    losses = {
-                        "train": float(loss_tensor[0].item()),
-                        "val": float(loss_tensor[1].item()),
-                    }
-
                 if master_process:
+                    # Esimate loss on rank 0 only. Running validation on every rank
+                    # duplicates HDF5 reads and PXRD construction without improving the metric.
+                    losses = estimate_loss()
+
                     # Update metrics
                     training_metrics['train_losses'].append(losses['train'])
                     training_metrics['val_losses'].append(losses['val'])
