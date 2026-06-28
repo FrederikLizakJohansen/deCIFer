@@ -13,6 +13,7 @@ Purpose: collect concrete ideas for improving the current deCIFer codebase, mode
 - 2026-06-27: Added first-pass minicif constrained decoding helpers: `sg_*` choices are masked by the emitted crystal system, and `<atom>` element choices are masked to the constituent elements emitted in the minicif prefix.
 - 2026-06-28: Added a configurable PXRD condition encoder. The old one-vector MLP remains available, and minicif can now use a small 1D convolutional PXRD encoder that emits multiple latent condition tokens per `<mcif>` start.
 - 2026-06-28: Verified conditioned attention masking with a regression test for packed minicif records, added minicif-to-structure rendering, and added `bin/visualize_minicif.py` for learning curves plus validation/test match-rate and Rwp reports.
+- 2026-06-28: Added structured training metrics logs (`metrics.jsonl` and `metrics.csv`) and created `minicif-features-vs-decifer.md` to summarize core minicif changes relative to deCIFer.
 
 ## Review assumptions
 
@@ -220,6 +221,10 @@ Verification:
   - Record train loss, clean validation loss, tokens/sec, max GPU memory, checkpoint git commit, dataset path, q-grid size, and augmentation settings.
   - Generate a small fixed validation sample set with and without `minicif_constrained_decoding` so syntax/chemistry gains are separated from training-loss changes.
   - Treat later architecture changes as meaningful only if they beat this run at comparable tokens seen and parameter count.
+
+  Current implementation:
+  - Training now writes `metrics.jsonl` and `metrics.csv` in the run directory.
+  - Metrics include train/eval event type, iteration, learning rate, train/validation loss, step loss, step time, token throughput, gradient norm, max GPU memory, q-step, tokenizer, condition encoder, condition token count, batch size, block size, and accumulation steps.
 
 - P0 - Add curriculum over PXRD difficulty.
   Start with clean, fixed-width simulated patterns and gradually introduce peak broadening, noise, missing regions, intensity scaling, preferred-orientation-like perturbations, and background. This can make the conditioning problem easier early and more robust later.

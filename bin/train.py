@@ -7,6 +7,8 @@ CrystaLLM: https://github.com/lantunes/CrystaLLM/blob/main/bin/train.py
 """
 import os
 import copy
+import csv
+import json
 import math
 import time
 import yaml
@@ -179,6 +181,7 @@ class TrainConfig:
     validate: bool = False  # whether to evaluate the model using the validation set
     seed: int = 1337
     debug_batch_assertions: bool = False
+    metrics_log_interval: int = 1
 
     # Early stopping
     early_stopping_patience: int = 50
@@ -274,6 +277,82 @@ def write_run_metadata(C, metadata):
     metadata_path = os.path.join(C.out_dir, "run_metadata.yaml")
     with open(metadata_path, "w") as f:
         yaml.safe_dump(metadata, f, sort_keys=False)
+
+METRIC_LOG_FIELDS = [
+    "event",
+    "iteration",
+    "local_iteration",
+    "time_seconds",
+    "lr",
+    "train_loss",
+    "val_loss",
+    "step_loss",
+    "time_ms",
+    "tokens",
+    "tokens_per_second",
+    "grad_norm",
+    "max_gpu_memory_mb",
+    "best_val_loss",
+    "patience_counter",
+    "qstep",
+    "condition",
+    "condition_encoder",
+    "condition_n_tokens",
+    "tokenizer",
+    "batch_size",
+    "block_size",
+    "gradient_accumulation_steps",
+]
+
+def initialize_metrics_logs(C):
+    jsonl_path = os.path.join(C.out_dir, "metrics.jsonl")
+    csv_path = os.path.join(C.out_dir, "metrics.csv")
+    if C.init_from == "scratch":
+        for path in [jsonl_path, csv_path]:
+            if os.path.exists(path):
+                os.remove(path)
+    if not os.path.exists(csv_path):
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=METRIC_LOG_FIELDS)
+            writer.writeheader()
+    return jsonl_path, csv_path
+
+def write_metric_event(C, metrics_paths, event):
+    jsonl_path, csv_path = metrics_paths
+    row = {field: event.get(field) for field in METRIC_LOG_FIELDS}
+    for key, value in list(row.items()):
+        if isinstance(value, torch.Tensor):
+            row[key] = value.item()
+        if isinstance(row[key], float) and not math.isfinite(row[key]):
+            row[key] = None
+    with open(jsonl_path, "a") as f:
+        f.write(json.dumps(row) + "\n")
+    with open(csv_path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=METRIC_LOG_FIELDS)
+        writer.writerow(row)
+
+def base_metric_event(C, training_metrics, local_iteration_number, lr, event_type):
+    max_gpu_memory_mb = None
+    if torch.cuda.is_available() and torch.device(C.device).type == "cuda":
+        max_gpu_memory_mb = torch.cuda.max_memory_allocated(torch.device(C.device)) / (1024 ** 2)
+    return {
+        "event": event_type,
+        "iteration": training_metrics["iteration_number"],
+        "local_iteration": local_iteration_number,
+        "time_seconds": time.time(),
+        "lr": lr,
+        "best_val_loss": training_metrics["best_val_loss"],
+        "patience_counter": training_metrics["patience_counter"],
+        "qstep": effective_qstep(C),
+        "condition": C.condition,
+        "condition_encoder": C.condition_encoder,
+        "condition_n_tokens": C.condition_n_tokens,
+        "tokenizer": C.tokenizer,
+        "batch_size": C.batch_size,
+        "block_size": C.block_size,
+        "gradient_accumulation_steps": C.gradient_accumulation_steps,
+        "max_gpu_memory_mb": max_gpu_memory_mb,
+    }
 
 def build_xrd_kwargs(C, augment=True):
     qstep = effective_qstep(C)
@@ -551,6 +630,7 @@ if __name__ == "__main__":
     raw_model = model._orig_mod if hasattr(model, "_orig_mod") else model
     checkpoint["run_metadata"] = build_run_metadata(C, raw_model)
     write_run_metadata(C, checkpoint["run_metadata"])
+    metrics_paths = initialize_metrics_logs(C)
     
     # Initialize a dictionary to keep data iterators per split
     data_iters = {}
@@ -723,6 +803,13 @@ if __name__ == "__main__":
                         print("Patience score resetting.")
                         training_metrics['patience_counter'] = 0
 
+                eval_event = base_metric_event(C, training_metrics, local_iteration_number, lr, "eval")
+                eval_event.update({
+                    "train_loss": losses["train"],
+                    "val_loss": losses["val"],
+                })
+                write_metric_event(C, metrics_paths, eval_event)
+
                 if C.always_save_checkpoint or found_new_best:
                     save_checkpoint(C, checkpoint, raw_model, optimizer, training_metrics, local_iteration_number)
 
@@ -742,11 +829,13 @@ if __name__ == "__main__":
         # and using the GradScaler if data type is float16
         small_step_pbar = tqdm(desc='Accumulating losses...', total=C.gradient_accumulation_steps, leave=False, disable=not C.accumulative_pbar)
         loss_accum = 0.0
+        tokens_accum = 0
         for micro_step in range(C.gradient_accumulation_steps):
             with ctx:
                 logits, loss = model(X, cond, Y, start_indices)
                 loss = loss / C.gradient_accumulation_steps
-                
+            tokens_accum += int(X.numel())
+
             # immediately async prefetch next batch while model is doing the forward pass on the GPU
             X, Y, cond, start_indices = get_batch("train")
             # backward pass, with gradient scaling if training in fp16
@@ -755,10 +844,11 @@ if __name__ == "__main__":
             small_step_pbar.update(1)
 
         small_step_pbar.close()
+        grad_norm = None
         # clip the gradient
         if C.grad_clip != 0.0:
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), C.grad_clip)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), C.grad_clip)
         # step the optimizer and scaler if training in fp16
         scaler.step(optimizer)
         scaler.update()
@@ -773,6 +863,16 @@ if __name__ == "__main__":
         if training_metrics['iteration_number'] % C.log_interval == 0:
             lossf = loss_accum.item()  # loss as float. note: this is a CPU-GPU sync point
             print(f"iter {training_metrics['iteration_number']}: loss {lossf:.4f}, time {dt * 1000:.2f}ms", flush=True)
+        if training_metrics['iteration_number'] % C.metrics_log_interval == 0:
+            train_event = base_metric_event(C, training_metrics, local_iteration_number, lr, "train")
+            train_event.update({
+                "step_loss": float(loss_accum.item()),
+                "time_ms": dt * 1000,
+                "tokens": tokens_accum,
+                "tokens_per_second": tokens_accum / dt if dt > 0 else None,
+                "grad_norm": grad_norm,
+            })
+            write_metric_event(C, metrics_paths, train_event)
         training_metrics['iteration_number'] += 1
         local_iteration_number += 1
 

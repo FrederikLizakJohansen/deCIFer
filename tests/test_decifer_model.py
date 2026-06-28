@@ -55,6 +55,26 @@ class DeciferModelTest(unittest.TestCase):
         self.assertEqual(logits.shape, (1, idx.size(1) + 4, tokenizer.vocab_size))
         self.assertIsNotNone(loss)
 
+    def test_conv_condition_encoder_parameters_are_grouped_for_optimizer(self):
+        tokenizer = MinicifTokenizer()
+        model = Decifer(DeciferConfig(
+            tokenizer="minicif",
+            vocab_size=tokenizer.vocab_size,
+            block_size=16,
+            n_layer=1,
+            n_head=1,
+            n_embd=16,
+            condition=True,
+            condition_size=32,
+            condition_encoder="conv",
+            condition_n_tokens=4,
+            pxrd_encoder_channels=8,
+        ))
+
+        optimizer = model.configure_optimizers(0.1, 1e-3, (0.9, 0.95))
+
+        self.assertEqual(len(optimizer.param_groups), 2)
+
     def test_condition_attention_mask_blocks_attention_between_packed_records(self):
         tokenizer = MinicifTokenizer()
         model = Decifer(DeciferConfig(
