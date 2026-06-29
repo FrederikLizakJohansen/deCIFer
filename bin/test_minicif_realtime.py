@@ -286,7 +286,7 @@ def main():
     parser.add_argument("--eta", type=float, default=None)
     parser.add_argument("--wavelength", default="CuKa")
     parser.add_argument("--seed", type=int, default=1337)
-    parser.add_argument("--print-minicifs", action="store_true", help="Print each generated minicif string")
+    parser.add_argument("--no-print-minicifs", action="store_true", help="Do not print generated minicif strings")
     parser.add_argument("--show-pbar", action="store_true")
     args = parser.parse_args()
 
@@ -324,7 +324,7 @@ def main():
         xrd_kwargs,
         args.wavelength,
     )
-    print_results(rows, args.print_minicifs)
+    print_results(rows, not args.no_print_minicifs)
 
 
 if __name__ == "__main__":

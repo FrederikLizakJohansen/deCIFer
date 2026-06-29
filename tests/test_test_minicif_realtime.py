@@ -1,7 +1,9 @@
 import importlib.util
+import io
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 
 import h5py
 import numpy as np
@@ -14,6 +16,7 @@ test_minicif_realtime = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(test_minicif_realtime)
 
 prompt_from_minicif = test_minicif_realtime.prompt_from_minicif
+print_results = test_minicif_realtime.print_results
 read_sample = test_minicif_realtime.read_sample
 
 
@@ -64,6 +67,27 @@ class TestMinicifRealtimeScript(unittest.TestCase):
             tokenizer.decode(prompt_from_minicif(minicif, "formula-cs-sg", tokenizer).tolist()),
             "<mcif> Na Cl cs_7 sg_221",
         )
+
+    def test_print_results_can_show_decoded_minicifs(self):
+        rows = [{
+            "rep": 0,
+            "parse_ok": True,
+            "structure_ok": True,
+            "structure_match": False,
+            "composition_match": True,
+            "space_group_match": True,
+            "crystal_system_match": True,
+            "rwp": 0.123,
+            "rmsd": None,
+            "error": "",
+            "generated_minicif": "<mcif> Na Cl cs_7 sg_221 cell 1.000 1.000 1.000 90.000 90.000 90.000 </mcif>",
+        }]
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            print_results(rows, print_minicifs=True)
+
+        self.assertIn("<mcif> Na Cl cs_7 sg_221 cell", output.getvalue())
 
 
 if __name__ == "__main__":
