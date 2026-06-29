@@ -55,6 +55,38 @@ class PxrdTest(unittest.TestCase):
         self.assertGreaterEqual(float(out["iq"].min()), 0.0)
         self.assertLessEqual(float(out["iq"].max()), 1.0 + 1e-6)
 
+    def test_discrete_to_continuous_xrd_can_cap_peaks(self):
+        batch_q = torch.tensor([[1.0, 2.0, 3.0]], dtype=torch.float32)
+        batch_iq = torch.tensor([[1.0, 0.1, 0.9]], dtype=torch.float32)
+
+        capped = discrete_to_continuous_xrd(
+            batch_q,
+            batch_iq,
+            qmin=0.0,
+            qmax=4.0,
+            qstep=0.02,
+            fwhm_range=(0.04, 0.04),
+            eta_range=(0.5, 0.5),
+            noise_range=None,
+            intensity_scale_range=None,
+            mask_prob=None,
+            max_peaks=1,
+        )
+        expected = discrete_to_continuous_xrd(
+            torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float32),
+            torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float32),
+            qmin=0.0,
+            qmax=4.0,
+            qstep=0.02,
+            fwhm_range=(0.04, 0.04),
+            eta_range=(0.5, 0.5),
+            noise_range=None,
+            intensity_scale_range=None,
+            mask_prob=None,
+        )
+
+        self.assertTrue(torch.allclose(capped["iq"], expected["iq"]))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -22,6 +22,19 @@ class DeciferDatasetTest(unittest.TestCase):
 
             self.assertEqual(item["spacegroup"].item(), 221)
 
+    def test_lazy_open_reopens_file_on_access(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "data.h5")
+            with h5py.File(path, "w") as h5:
+                h5.create_dataset("spacegroup", data=np.asarray([221, 225], dtype=np.int32))
+
+            dataset = DeciferDataset(path, ["spacegroup"], lazy_open=True)
+
+            self.assertIsNone(dataset.h5_file)
+            self.assertEqual(len(dataset), 2)
+            self.assertEqual(dataset[1]["spacegroup"].item(), 225)
+            self.assertIsNotNone(dataset.h5_file)
+
     def test_crystal_system_balanced_training_sampler_is_weighted(self):
         from bin.train import setup_datasets
 

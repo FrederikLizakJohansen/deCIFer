@@ -107,6 +107,7 @@ class TrainConfig:
     dataset: str = ""  # Path to the dataset hdf5 files
     gradient_accumulation_steps: int = 40  # used to simulate larger batch sizes
     batch_size: int = 64  # if gradient_accumulation_steps > 1, this is the micro-batch size
+    batch_token_budget: int = 0  # collect records until this many raw tokens per microbatch; 0 uses batch_size records
     accumulative_pbar: bool = False
     num_workers_dataloader: int = 0 # Default; single process
     sampling_strategy: str = "random"
@@ -163,6 +164,8 @@ class TrainConfig:
     peak_asymmetry_range_min: float = 0.0
     peak_asymmetry_range_max: float = 0.0
     final_normalize_xrd: bool = False
+    max_xrd_peaks: int = 0
+    xrd_augmentation_on_device: bool = False
 
     # AdamW optimizer
     learning_rate: float = 6e-4  # max learning rate
@@ -388,8 +391,10 @@ def base_metric_event(C, training_metrics, local_iteration_number, lr, event_typ
         "sampling_strategy": C.sampling_strategy,
         "tokenizer": C.tokenizer,
         "batch_size": C.batch_size,
+        "batch_token_budget": C.batch_token_budget,
         "block_size": C.block_size,
         "gradient_accumulation_steps": C.gradient_accumulation_steps,
+        "max_xrd_peaks": C.max_xrd_peaks,
         "max_gpu_memory_mb": max_gpu_memory_mb,
     }
 
@@ -416,6 +421,7 @@ def build_xrd_kwargs(C, augment=True):
             'particle_size_range': _range_or_none(C.particle_size_range_min, C.particle_size_range_max, 0.0),
             'peak_asymmetry_range': _range_or_none(C.peak_asymmetry_range_min, C.peak_asymmetry_range_max, 0.0),
             'final_normalize': C.final_normalize_xrd,
+            'max_peaks': C.max_xrd_peaks if C.max_xrd_peaks > 0 else None,
         }
 
     fwhm = 0.5 * (C.fwhm_range_min + C.fwhm_range_max)
@@ -431,6 +437,7 @@ def build_xrd_kwargs(C, augment=True):
         'intensity_scale_range': None,
         'mask_prob': None,
         'final_normalize': C.final_normalize_xrd,
+        'max_peaks': C.max_xrd_peaks if C.max_xrd_peaks > 0 else None,
     }
 
 def _range_or_none(range_min, range_max, identity):
@@ -472,7 +479,9 @@ def make_grad_scaler(device_type, dtype):
         return torch.amp.GradScaler("cuda", enabled=enabled)
     return torch.cuda.amp.GradScaler(enabled=enabled)
 
-def setup_datasets(C, distributed):
+def setup_datasets(C, distributed=None):
+    if distributed is None:
+        distributed = {"ddp": False, "rank": 0, "world_size": 1}
     
     # Custom collate function
     def collate_fn(batch):
@@ -501,13 +510,17 @@ def setup_datasets(C, distributed):
     pin_memory = torch.device(C.device).type == "cuda"
 
     # Initialise datasets/loaders 
-    train_dataset = DeciferDataset(os.path.join(C.dataset, "serialized/train.h5"), dataset_fields)
-    val_dataset = DeciferDataset(os.path.join(C.dataset, "serialized/val.h5"), dataset_fields)
-    test_dataset = DeciferDataset(os.path.join(C.dataset, "serialized/test.h5"), dataset_fields)
+    lazy_open = C.num_workers_dataloader > 0
+    train_dataset = DeciferDataset(os.path.join(C.dataset, "serialized/train.h5"), dataset_fields, lazy_open=lazy_open)
+    val_dataset = DeciferDataset(os.path.join(C.dataset, "serialized/val.h5"), dataset_fields, lazy_open=lazy_open)
+    test_dataset = DeciferDataset(os.path.join(C.dataset, "serialized/test.h5"), dataset_fields, lazy_open=lazy_open)
         
     # Random batching sampler, train
     if C.sampling_strategy == "crystal_system_balanced":
+        train_dataset._open_file()
         crystal_systems = [int(train_dataset.data["crystal_system"][idx]) for idx in range(len(train_dataset))]
+        if lazy_open:
+            train_dataset.close()
         counts = {value: crystal_systems.count(value) for value in set(crystal_systems)}
         weights = torch.tensor([1.0 / counts[value] for value in crystal_systems], dtype=torch.double)
         num_samples = math.ceil(len(train_dataset) / distributed["world_size"])
@@ -535,6 +548,7 @@ def setup_datasets(C, distributed):
         pin_memory=pin_memory,
         worker_init_fn=seed_worker if C.seed is not None else None,
         generator=make_generator(None if C.seed is None else C.seed + 1),
+        persistent_workers=C.num_workers_dataloader > 0,
     )
     
     # Sequential batching sampler, val/test
@@ -548,6 +562,7 @@ def setup_datasets(C, distributed):
         pin_memory=pin_memory,
         worker_init_fn=seed_worker if C.seed is not None else None,
         generator=make_generator(None if C.seed is None else C.seed + 2),
+        persistent_workers=C.num_workers_dataloader > 0,
     )
     
     test_sampler = SequentialSampler(test_dataset)
@@ -560,6 +575,7 @@ def setup_datasets(C, distributed):
         pin_memory=pin_memory,
         worker_init_fn=seed_worker if C.seed is not None else None,
         generator=make_generator(None if C.seed is None else C.seed + 3),
+        persistent_workers=C.num_workers_dataloader > 0,
     )
 
     # Combine loaders for easy access
@@ -705,6 +721,11 @@ if __name__ == "__main__":
     # Initialize a dictionary to keep data iterators per split
     data_iters = {}
 
+    def move_tensor_to_device(tensor):
+        if device_type == "cuda" and tensor.device.type == "cpu":
+            return tensor.pin_memory().to(C.device, non_blocking=True)
+        return tensor.to(C.device)
+
     #@profile
     def get_batch(split, augment=True):
 
@@ -718,9 +739,11 @@ if __name__ == "__main__":
         start_indices_list = []
         cond_list = []
 
-        # Collect sequences until we have enough to fill the batch
+        # Collect sequences until we have enough records or raw tokens to fill the microbatch
         total_sequences = []
-        while len(total_sequences) < C.batch_size:
+        total_token_count = 0
+        token_budget = max(C.batch_token_budget, C.block_size) if C.batch_token_budget > 0 else None
+        while (total_token_count < token_budget) if token_budget is not None else (len(total_sequences) < C.batch_size):
             try:
                 batch = next(data_iter)
             except StopIteration:
@@ -733,11 +756,17 @@ if __name__ == "__main__":
             sequence_separator = torch.tensor(SEPARATOR_IDS, dtype=torch.long)
             sequences = [torch.cat([seq[seq != PADDING_ID], sequence_separator]) for seq in sequences]
             total_sequences.extend(sequences)
+            total_token_count += sum(len(seq) for seq in sequences)
 
             # Fetch conditioning and augment to cont signals
             if C.condition:
                 xrd_kwargs = augmentation_kwargs if augment else clean_xrd_kwargs
-                cond_list.extend(discrete_to_continuous_xrd(batch['xrd.q'], batch['xrd.iq'], **xrd_kwargs)['iq'])
+                batch_q = batch['xrd.q']
+                batch_iq = batch['xrd.iq']
+                if C.xrd_augmentation_on_device:
+                    batch_q = move_tensor_to_device(batch_q)
+                    batch_iq = move_tensor_to_device(batch_iq)
+                cond_list.extend(discrete_to_continuous_xrd(batch_q, batch_iq, **xrd_kwargs)['iq'])
 
         # Now pack sequences into batches without loops
         # Concatenate all sequences into one long tensor
@@ -789,16 +818,10 @@ if __name__ == "__main__":
                     )
         
         # Send to device (CUDA/CPU)
-        if device_type == "cuda":
-            X_batch = X_batch.pin_memory().to(C.device, non_blocking=True)
-            Y_batch = Y_batch.pin_memory().to(C.device, non_blocking=True)
-            if cond_batch is not None:
-                cond_batch = cond_batch.pin_memory().to(C.device, non_blocking=True)
-        else:
-            X_batch = X_batch.to(C.device)
-            Y_batch = Y_batch.to(C.device)
-            if cond_batch is not None:
-                cond_batch = cond_batch.to(C.device)
+        X_batch = move_tensor_to_device(X_batch)
+        Y_batch = move_tensor_to_device(Y_batch)
+        if cond_batch is not None:
+            cond_batch = move_tensor_to_device(cond_batch)
 
         # Return the batch data and start indices
         return X_batch, Y_batch, cond_batch, start_indices_list

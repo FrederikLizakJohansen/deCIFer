@@ -64,6 +64,7 @@ def discrete_to_continuous_xrd(
     particle_size_range: Optional[Tuple[float, float]] = None,
     peak_asymmetry_range: Optional[Tuple[float, float]] = None,
     final_normalize: bool = False,
+    max_peaks: Optional[int] = None,
     **kwargs,
 ):
     if nyquist_points_per_fwhm is not None:
@@ -78,6 +79,7 @@ def discrete_to_continuous_xrd(
     batch_q = batch_q.clone()
     batch_iq = batch_iq.clone()
     valid_peaks = batch_q != 0
+    batch_q, batch_iq, valid_peaks = _cap_peaks(batch_q, batch_iq, valid_peaks, max_peaks)
 
     if q_scale_range is not None:
         q_scale = _uniform(batch_size, 1, range_=q_scale_range, like=batch_q)
@@ -152,6 +154,20 @@ def discrete_to_continuous_xrd(
 
 def _uniform(*shape, range_, like):
     return torch.empty(*shape, dtype=like.dtype, device=like.device).uniform_(*range_)
+
+
+def _cap_peaks(batch_q, batch_iq, valid_peaks, max_peaks):
+    if max_peaks is None or max_peaks <= 0 or batch_q.size(1) <= max_peaks:
+        return batch_q, batch_iq, valid_peaks
+
+    scores = batch_iq.masked_fill(~valid_peaks, float("-inf"))
+    peak_indices = torch.topk(scores, k=max_peaks, dim=1).indices
+    batch_q = torch.gather(batch_q, 1, peak_indices)
+    batch_iq = torch.gather(batch_iq, 1, peak_indices)
+    valid_peaks = torch.gather(valid_peaks, 1, peak_indices)
+    batch_q = torch.where(valid_peaks, batch_q, torch.zeros_like(batch_q))
+    batch_iq = torch.where(valid_peaks, batch_iq, torch.zeros_like(batch_iq))
+    return batch_q, batch_iq, valid_peaks
 
 
 def _pseudo_voigt_sum(delta_q, peak_iq, valid_peaks, fwhm, eta):

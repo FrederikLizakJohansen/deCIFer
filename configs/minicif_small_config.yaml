@@ -3,11 +3,11 @@
 # python bin/prepare_minicif_dataset.py --raw-dir data/raw_cifs --out-dir data/noma
 
 out_dir: 'minicif_model_small'
-eval_interval: 100
-eval_iters_train: 25
-eval_iters_val: 25
-log_interval: 10
-metrics_log_interval: 10
+eval_interval: 500
+eval_iters_train: 10
+eval_iters_val: 10
+log_interval: 20
+metrics_log_interval: 20
 init_from: 'resume'
 
 device: 'cuda'
@@ -18,8 +18,10 @@ validate: True
 
 dataset: 'data/noma'
 tokenizer: 'minicif'
-batch_size: 16
-block_size: 1024
+batch_size: 32
+batch_token_budget: 6400
+block_size: 640
+num_workers_dataloader: 2
 sampling_strategy: 'crystal_system_balanced'
 
 n_layer: 4
@@ -28,7 +30,7 @@ n_embd: 128
 dropout: 0.0
 
 learning_rate: 1e-3
-gradient_accumulation_steps: 10
+gradient_accumulation_steps: 5
 max_iters: 50_000
 lr_decay_iters: 50_000
 min_lr: 1e-6
@@ -47,7 +49,7 @@ pxrd_encoder_kernel_size: 7
 
 qmin: 0.0
 qmax: 10.0
-nyquist_points_per_fwhm: 4
+nyquist_points_per_fwhm: 3
 fwhm_range_min: 0.04
 fwhm_range_max: 0.08
 eta_range_min: 0.5
@@ -76,3 +78,5 @@ particle_size_range_max: 0.0
 peak_asymmetry_range_min: -0.1
 peak_asymmetry_range_max: 0.1
 final_normalize_xrd: True
+max_xrd_peaks: 512
+xrd_augmentation_on_device: True
