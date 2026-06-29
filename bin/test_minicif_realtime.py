@@ -19,6 +19,7 @@ from pymatgen.analysis.structure_matcher import StructureMatcher
 from decifer.decifer_model import Decifer, DeciferConfig
 from decifer.minicif import START_TOKEN, MinicifTokenizer, minicif_to_structure, parse_minicif
 from decifer.pxrd import discrete_to_continuous_xrd, nyquist_qstep
+from bin.train import TrainConfig
 
 PROMPT_MODE_ALIASES = {
     "pxrd": "start",
