@@ -31,6 +31,7 @@ from decifer.minicif import (
     canonicalize_cif_block,
     space_group_number_from_cif_block,
 )
+from decifer.pxrd import q_range_to_two_theta_range
 from decifer.utility import space_group_to_crystal_system
 
 STOP_REQUESTED = False
@@ -93,13 +94,7 @@ def process_cif(args):
     cif_tokens = np.asarray(tokenizer.encode(tokenizer.tokenize_minicif(minicif_string)), dtype=np.int32)
 
     xrd_calc = XRDCalculator(wavelength=config.wavelength)
-    max_q = ((4 * np.pi) / xrd_calc.wavelength) * np.sin(np.radians(90))
-    if config.qmax >= max_q:
-        two_theta_range = None
-    else:
-        tth_min = np.degrees(2 * np.arcsin((config.qmin * xrd_calc.wavelength) / (4 * np.pi)))
-        tth_max = np.degrees(2 * np.arcsin((config.qmax * xrd_calc.wavelength) / (4 * np.pi)))
-        two_theta_range = (tth_min, tth_max)
+    _, two_theta_range = q_range_to_two_theta_range(config.qmin, config.qmax, xrd_calc.wavelength)
 
     pattern = xrd_calc.get_pattern(structure, two_theta_range=two_theta_range)
     theta = np.radians(pattern.x / 2)

@@ -159,6 +159,33 @@ class DeciferModelTest(unittest.TestCase):
 
         self.assertEqual(out[0, -1].item(), tokenizer.token_to_id["Na"])
 
+    def test_minicif_generation_mask_blocks_invalid_cubic_cell_value(self):
+        tokenizer = MinicifTokenizer()
+        model = Decifer(DeciferConfig(
+            tokenizer="minicif",
+            vocab_size=tokenizer.vocab_size,
+            block_size=64,
+            n_layer=1,
+            n_head=1,
+            n_embd=16,
+            minicif_constrained_decoding=True,
+        ))
+        prompt = torch.tensor([tokenizer.encode(tokenizer.tokenize_minicif(
+            "<mcif> Na Cl cs_7 sg_221 cell 5.640 "
+        ))])
+
+        def forward_with_bad_b(self, idx, **kwargs):
+            logits = torch.full((idx.size(0), idx.size(1), tokenizer.vocab_size), -100.0)
+            logits[:, -1, tokenizer.token_to_id["6"]] = 100.0
+            logits[:, -1, tokenizer.token_to_id["5"]] = 0.0
+            return logits, None
+
+        model.forward = MethodType(forward_with_bad_b, model)
+
+        out = model.generate(prompt, max_new_tokens=1, top_k=1, disable_pbar=True)
+
+        self.assertEqual(out[0, -1].item(), tokenizer.token_to_id["5"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -23,7 +23,7 @@ from tqdm.auto import tqdm
 from decifer.decifer_dataset import DeciferDataset
 from decifer.decifer_model import Decifer, DeciferConfig
 from decifer.minicif import END_TOKEN, START_TOKEN, MinicifTokenizer, minicif_to_structure, parse_minicif
-from decifer.pxrd import discrete_to_continuous_xrd, nyquist_qstep
+from decifer.pxrd import clamp_qmax_for_wavelength, discrete_to_continuous_xrd, nyquist_qstep, q_range_to_two_theta_range
 from bin.train import TrainConfig
 
 PROMPT_MODE_ALIASES = {
@@ -81,7 +81,9 @@ def _config_to_dict(config):
 
 def clean_xrd_kwargs(config, args):
     qmin = args.qmin if args.qmin is not None else float(config.get("qmin", 0.0))
-    qmax = args.qmax if args.qmax is not None else float(config.get("qmax", 10.0))
+    requested_qmax = args.qmax if args.qmax is not None else float(config.get("qmax", 10.0))
+    wavelength = XRDCalculator(wavelength=args.wavelength).wavelength
+    qmax = clamp_qmax_for_wavelength(requested_qmax, wavelength)
     if args.qstep is not None:
         qstep = args.qstep
     elif float(config.get("nyquist_points_per_fwhm", 0.0)) > 0:
@@ -146,15 +148,7 @@ def continuous_from_sparse(q, iq, xrd_kwargs):
 
 def structure_to_continuous_xrd(structure, xrd_kwargs, wavelength):
     calculator = XRDCalculator(wavelength=wavelength)
-    qmax = xrd_kwargs["qmax"]
-    max_q = ((4 * np.pi) / calculator.wavelength) * np.sin(np.radians(90))
-    if qmax >= max_q:
-        two_theta_range = None
-    else:
-        qmin = xrd_kwargs["qmin"]
-        tth_min = np.degrees(2 * np.arcsin((qmin * calculator.wavelength) / (4 * np.pi)))
-        tth_max = np.degrees(2 * np.arcsin((qmax * calculator.wavelength) / (4 * np.pi)))
-        two_theta_range = (tth_min, tth_max)
+    _, two_theta_range = q_range_to_two_theta_range(xrd_kwargs["qmin"], xrd_kwargs["qmax"], calculator.wavelength)
     pattern = calculator.get_pattern(structure, two_theta_range=two_theta_range)
     theta = np.radians(pattern.x / 2)
     q_disc = torch.tensor(4 * np.pi * np.sin(theta) / calculator.wavelength, dtype=torch.float32)

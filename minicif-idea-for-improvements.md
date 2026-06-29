@@ -14,6 +14,7 @@ Purpose: collect concrete ideas for improving the current deCIFer codebase, mode
 - 2026-06-28: Added a configurable PXRD condition encoder. The old one-vector MLP remains available, and minicif can now use a small 1D convolutional PXRD encoder that emits multiple latent condition tokens per `<mcif>` start.
 - 2026-06-28: Verified conditioned attention masking with a regression test for packed minicif records, added minicif-to-structure rendering, and added `bin/visualize_minicif.py` for learning curves plus validation/test match-rate and Rwp reports.
 - 2026-06-28: Added structured training metrics logs (`metrics.jsonl` and `metrics.csv`) and created `minicif-features-vs-decifer.md` to summarize core minicif changes relative to deCIFer.
+- 2026-06-29: Added follow-up ideas around COD data, more realistic PXRD simulation, multi-phase generation, on-the-fly synthetic minicifs, and stronger lattice/space-group constraints.
 
 ## Review assumptions
 
@@ -254,6 +255,14 @@ Verification:
 
 ### Augmented data
 
+- P0 - Add COD as an additional training data source.
+  The Crystallography Open Database could substantially increase structure diversity beyond the current NOMA-centered workflow. The main risk is not ingestion, but inconsistent CIF quality, duplicates, disorder, occupancies, nonstandard settings, and data leakage into evaluation sets.
+  Experiment: build a COD ingestion path that canonicalizes through the same minicif converter, records failure reasons, deduplicates against existing NOMA structures by reduced formula/space group/cell fingerprint where possible, and trains NOMA-only vs COD-only vs NOMA+COD ablations.
+
+  Verification:
+  - Report parse/canonicalization success rate, duplicate rate, element coverage, crystal-system/space-group distribution, token length distribution, and filtered failure categories.
+  - Keep a fixed non-COD validation/test set initially so gains from more data are not confused with easier splits.
+
 - P0 - Make the PXRD augmentation model more physically realistic.
   Current augmentation covers broadening, noise, intensity scale, and masking. Real experimental patterns also include background, zero shift, sample displacement, preferred orientation, finite crystallite size/strain effects, impurity peaks, peak overlap, and detector/q calibration artifacts.
   Experiment: add one perturbation family at a time and evaluate robustness on experimental or intentionally shifted validation patterns.
@@ -269,12 +278,28 @@ Verification:
   - Experimental-background templates or Chebyshev background coefficients if we want richer background distributions than the current smooth random baseline.
   - A calibration sweep to choose q-grid size from the minimum useful FWHM instead of blindly preserving the old dense `qstep=0.01`.
 
+- P0 - Evaluate Till's realistic PXRD simulation pipeline.
+  A more believable simulated-PXRD pipeline from Till could be a high-value bridge between clean synthetic patterns and real experimental data. Treat this as a data-generation backend swap, not a model change, so its effect can be measured cleanly.
+  Experiment: generate matched PXRD conditions for the same structures with the current simulator and Till's pipeline, train/evaluate paired configs, and compare real-pattern robustness, best-of-K Rwp, and whether added realism hurts clean simulated validation.
+
+  Verification:
+  - Keep the CIF/minicif tokens, splits, q range, and model config fixed across the comparison.
+  - Log which simulation parameters are sampled so improvements can be traced to physically meaningful perturbations rather than hidden dataset drift.
+
 - P0 - Train with hard negatives and ambiguous PXRD neighborhoods.
   Many structures can have similar diffraction patterns. Construct batches or auxiliary tasks where the model must distinguish near-neighbor patterns, polymorphs, same-composition structures, and decoys with similar peak positions.
   Experiment: build nearest-neighbor sets in PXRD embedding space and add contrastive ranking loss.
 
 - P1 - Expand synthetic data with controlled perturbations of structures.
   Generate physically plausible variants through small lattice/coordinate perturbations, symmetry lowering/restoration, supercell reductions, and composition-preserving distortions, then filter by validity and PXRD similarity.
+
+- P1 - Try on-the-fly random minicif generation under hard constraints.
+  Because minicif has a compact, tightly constrained grammar, we may be able to synthesize training examples by sampling crystal system, space group, lattice parameters, elements, Wyckoff-like multiplicities, fractional coordinates, and occupancies, then filtering through structure construction and PXRD simulation. This could create unlimited syntax-valid data, but random validity is not the same as physical plausibility.
+  Experiment: start with a narrow generator that samples simple one- or two-element structures inside conservative cell ranges, enforces crystal-system lattice constraints, rejects overlapping/degenerate structures, and only then simulates PXRD. Compare pretraining or mixed training against real-only data.
+
+  Verification:
+  - Track rejection rate, composition/cell distributions, nearest-neighbor distance to real structures, parse/structure success, and whether pretraining improves downstream NOMA/COD validation.
+  - Keep generated data clearly labeled so evaluation never mixes synthetic targets with curated held-out structures.
 
 - P1 - Domain adaptation from simulated to real PXRD.
   If real-world CSP is the goal, create a held-out real/experimental benchmark and add augmentation specifically targeted at the sim-to-real gap.
@@ -327,6 +352,27 @@ Verification:
 - P1 - Numeric tokenization for crystallographic values.
   Character-like numeric generation is inefficient and brittle. Consider digit-position tokens, quantized numeric bins, or structured numeric heads for cell parameters and coordinates.
 
+- P0 - Constrain lattice parameters by crystal system and space group.
+  This should be high priority. The crystal system and `sg_*` token already imply strong constraints on `a`, `b`, `c`, `alpha`, `beta`, and `gamma`; letting the model freely emit impossible combinations wastes probability mass and creates invalid structures that a deterministic mask could prevent.
+
+  First-pass constraints:
+  - Cubic: require `a = b = c` and `alpha = beta = gamma = 90`.
+  - Tetragonal: require `a = b`, allow `c`, and require all angles to be `90`.
+  - Orthorhombic: require all angles to be `90`.
+  - Hexagonal: require `a = b`, `alpha = beta = 90`, and `gamma = 120`.
+  - Trigonal: enforce either the hexagonal-axis convention or the rhombohedral-axis convention, but only after confirming which setting the minicif converter emits.
+  - Monoclinic: require the canonical unique-axis convention, usually `alpha = gamma = 90` with `beta` free.
+  - Triclinic: leave lengths and angles free within valid numeric ranges.
+
+  Proposed implementation:
+  - Canonicalize training data into the same setting before applying masks, otherwise valid nonstandard settings may be rejected.
+  - During training/evaluation, mask or score numeric tokens with the same lattice constraints used at generation time, analogous to the existing crystal-system-to-space-group and component-element constraints.
+  - Start with crystal-system constraints, then tighten by space-group-specific conventional settings only after confirming how the minicif converter represents settings.
+
+  Verification:
+  - Unit test each crystal system with valid and invalid `cell` sequences.
+  - Report generation validity and cell-constraint violation rate before/after constrained decoding.
+
 - P1 - Separate structure semantics from serialization.
   Train on an intermediate JSON-like or table-like representation, then render CIF deterministically. This may sharply reduce syntax errors at the cost of building a renderer/parser path.
 
@@ -352,6 +398,19 @@ Verification:
   The current debug assertion catches one failure mode, but a tiny deterministic unit test should pin down sequence truncation and condition-vector mapping.
 
 ### Generation and inference
+
+- P0 - Plan a multi-phase generation path.
+  Real PXRD often contains mixtures, so single-phase generation will eventually be too narrow. Multi-phase generation should probably be staged after strong single-phase validity and reranking, because the search space expands quickly.
+  Experiment: generate a small set of candidate phases whose weighted simulated PXRD sum matches the input pattern. Start with known number of phases and known or constrained composition, then relax to unknown phase count and mixture weights.
+
+  Candidate formulation:
+  - Generate phase 1, simulate and subtract/explain its PXRD contribution, then generate residual phases.
+  - Or generate K single-phase candidates first, then solve a nonnegative least-squares mixture over their simulated patterns.
+  - Add explicit mixture tokens later, for example `<phase>` blocks with learned phase weights, only after the reranking baseline is understood.
+
+  Verification:
+  - Build synthetic two-phase benchmarks from held-out single-phase structures with known mixture weights.
+  - Report phase recovery, mixture-weight error, best-of-K mixture Rwp, and failure cases where one phase dominates.
 
 - P0 - Rerank generated CIFs by forward-simulated PXRD agreement.
   Generate K candidates, parse each valid CIF, simulate PXRD, and rerank by agreement to the input pattern plus syntax/chemistry penalties.
