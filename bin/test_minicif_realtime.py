@@ -18,11 +18,11 @@ import numpy as np
 import torch
 from pymatgen.analysis.diffraction.xrd import XRDCalculator
 from pymatgen.analysis.structure_matcher import StructureMatcher
-from pymatgen.core import Element
+from pymatgen.core import Element, Lattice, Structure
 
 from decifer.decifer_model import Decifer, DeciferConfig
 from decifer.minicif import START_TOKEN, MinicifTokenizer, minicif_to_structure, parse_minicif
-from decifer.pxrd import discrete_to_continuous_xrd, nyquist_qstep
+from decifer.pxrd import clamp_qmax_for_wavelength, discrete_to_continuous_xrd, nyquist_qstep, q_range_to_two_theta_range
 from bin.train import TrainConfig
 
 PROMPT_MODE_ALIASES = {
@@ -78,7 +78,9 @@ def _config_to_dict(config):
 
 def clean_xrd_kwargs(config: Dict, args):
     qmin = args.qmin if args.qmin is not None else float(config.get("qmin", 0.0))
-    qmax = args.qmax if args.qmax is not None else float(config.get("qmax", 10.0))
+    requested_qmax = args.qmax if args.qmax is not None else float(config.get("qmax", 10.0))
+    wavelength = XRDCalculator(wavelength=args.wavelength).wavelength
+    qmax = clamp_qmax_for_wavelength(requested_qmax, wavelength)
     if args.qstep is not None:
         qstep = args.qstep
     elif float(config.get("nyquist_points_per_fwhm", 0.0)) > 0:
@@ -156,15 +158,7 @@ def continuous_from_sparse(q, iq, xrd_kwargs):
 
 def structure_to_continuous_xrd(structure, xrd_kwargs, wavelength):
     calculator = XRDCalculator(wavelength=wavelength)
-    qmax = xrd_kwargs["qmax"]
-    max_q = ((4 * np.pi) / calculator.wavelength) * np.sin(np.radians(90))
-    if qmax >= max_q:
-        two_theta_range = None
-    else:
-        qmin = xrd_kwargs["qmin"]
-        tth_min = np.degrees(2 * np.arcsin((qmin * calculator.wavelength) / (4 * np.pi)))
-        tth_max = np.degrees(2 * np.arcsin((qmax * calculator.wavelength) / (4 * np.pi)))
-        two_theta_range = (tth_min, tth_max)
+    _, two_theta_range = q_range_to_two_theta_range(xrd_kwargs["qmin"], xrd_kwargs["qmax"], calculator.wavelength)
     pattern = calculator.get_pattern(structure, two_theta_range=two_theta_range)
     theta = np.radians(pattern.x / 2)
     q_disc = torch.tensor(4 * np.pi * np.sin(theta) / calculator.wavelength, dtype=torch.float32)
@@ -220,6 +214,8 @@ def evaluate_candidates(candidates, reference_parsed, reference_structure, refer
             generated_parsed = parse_minicif(generated_minicif)
             row.update({
                 "parse_ok": True,
+                "generated_space_group": generated_parsed.space_group,
+                "generated_crystal_system": generated_parsed.crystal_system,
                 "space_group_match": generated_parsed.space_group == reference_parsed.space_group,
                 "crystal_system_match": generated_parsed.crystal_system == reference_parsed.crystal_system,
             })
@@ -270,6 +266,118 @@ def print_results(rows, print_minicifs):
 
 def best_row_by_rwp(rows):
     return min((row for row in rows if row["rwp"] is not None), key=lambda row: row["rwp"], default=None)
+
+
+def refine_best_candidate(rows, reference_iq, xrd_kwargs, wavelength, max_nfev):
+    best = best_row_by_rwp(rows)
+    if best is None:
+        return None
+    try:
+        from scipy.optimize import least_squares
+    except Exception as exc:
+        raise RuntimeError("--refine-best requires scipy") from exc
+
+    structure = best["generated_structure"]
+    crystal_system = best.get("generated_crystal_system")
+    if crystal_system is None:
+        return None
+    x0, bounds = _lattice_refinement_parameters(structure.lattice, crystal_system)
+
+    def residual(params):
+        trial_structure = _structure_with_refined_lattice(structure, params, crystal_system)
+        trial_iq = structure_to_continuous_xrd(trial_structure, xrd_kwargs, wavelength)
+        return trial_iq - reference_iq
+
+    result = least_squares(
+        residual,
+        x0,
+        bounds=bounds,
+        max_nfev=max_nfev,
+        xtol=1e-4,
+        ftol=1e-4,
+        gtol=1e-4,
+    )
+    refined_structure = _structure_with_refined_lattice(structure, result.x, crystal_system)
+    refined_iq = structure_to_continuous_xrd(refined_structure, xrd_kwargs, wavelength)
+    return {
+        "source_rep": best["rep"],
+        "success": bool(result.success),
+        "message": result.message,
+        "nfev": int(result.nfev),
+        "rwp_before": best["rwp"],
+        "rwp_after": rwp(reference_iq, refined_iq),
+        "generated_iq": refined_iq,
+        "generated_structure": refined_structure,
+        "params": [float(value) for value in result.x],
+    }
+
+
+def _lattice_refinement_parameters(lattice, crystal_system):
+    a, b, c = lattice.abc
+    alpha, beta, gamma = lattice.angles
+    length_bounds = lambda value: (max(0.2, 0.75 * float(value)), 1.25 * float(value))
+    angle_bounds = lambda value: (max(30.0, float(value) - 15.0), min(150.0, float(value) + 15.0))
+
+    if crystal_system == 7:
+        low, high = length_bounds(a)
+        return np.asarray([a], dtype=float), (np.asarray([low]), np.asarray([high]))
+    if crystal_system in (5, 6):
+        a_low, a_high = length_bounds(a)
+        c_low, c_high = length_bounds(c)
+        return np.asarray([a, c], dtype=float), (np.asarray([a_low, c_low]), np.asarray([a_high, c_high]))
+    if crystal_system == 4:
+        a_low, a_high = length_bounds(a)
+        c_low, c_high = length_bounds(c)
+        return np.asarray([a, c], dtype=float), (np.asarray([a_low, c_low]), np.asarray([a_high, c_high]))
+    if crystal_system == 3:
+        lows, highs = zip(*(length_bounds(value) for value in (a, b, c)))
+        return np.asarray([a, b, c], dtype=float), (np.asarray(lows), np.asarray(highs))
+    if crystal_system == 2:
+        length_lows, length_highs = zip(*(length_bounds(value) for value in (a, b, c)))
+        beta_low, beta_high = angle_bounds(beta)
+        return (
+            np.asarray([a, b, c, beta], dtype=float),
+            (np.asarray([*length_lows, beta_low]), np.asarray([*length_highs, beta_high])),
+        )
+    if crystal_system == 1:
+        length_lows, length_highs = zip(*(length_bounds(value) for value in (a, b, c)))
+        angle_lows, angle_highs = zip(*(angle_bounds(value) for value in (alpha, beta, gamma)))
+        return (
+            np.asarray([a, b, c, alpha, beta, gamma], dtype=float),
+            (np.asarray([*length_lows, *angle_lows]), np.asarray([*length_highs, *angle_highs])),
+        )
+    lows, highs = zip(*(length_bounds(value) for value in (a, b, c)))
+    return np.asarray([a, b, c], dtype=float), (np.asarray(lows), np.asarray(highs))
+
+
+def _structure_with_refined_lattice(structure, params, crystal_system):
+    params = [float(value) for value in params]
+    if crystal_system == 7:
+        lattice = Lattice.cubic(params[0])
+    elif crystal_system in (5, 6):
+        lattice = Lattice.hexagonal(params[0], params[1])
+    elif crystal_system == 4:
+        lattice = Lattice.tetragonal(params[0], params[1])
+    elif crystal_system == 3:
+        lattice = Lattice.orthorhombic(params[0], params[1], params[2])
+    elif crystal_system == 2:
+        lattice = Lattice.monoclinic(params[0], params[1], params[2], params[3])
+    elif crystal_system == 1:
+        lattice = Lattice.from_parameters(*params)
+    else:
+        lattice = Lattice.from_parameters(*params, *structure.lattice.angles)
+    return Structure(lattice, [site.species for site in structure], structure.frac_coords)
+
+
+def print_refinement_result(refinement):
+    if refinement is None:
+        print("\nRefinement skipped: no valid best candidate with crystal-system metadata")
+        return
+    print("\nBest-candidate lattice refinement")
+    print(f"source_rep={refinement['source_rep']}")
+    print(f"success={refinement['success']} nfev={refinement['nfev']}")
+    print(f"Rwp_before={refinement['rwp_before']:.6f} Rwp_after={refinement['rwp_after']:.6f}")
+    print(f"params={refinement['params']}")
 
 
 def save_fit_figure(path, q_grid, reference_iq, reference_structure, rows, sample_name, figure_supercell):
@@ -433,6 +541,8 @@ def main():
     parser.add_argument("--no-print-minicifs", action="store_true", help="Do not print generated minicif strings")
     parser.add_argument("--figure-out", default="", help="Optional path to save a PXRD/structure comparison figure")
     parser.add_argument("--figure-supercell", type=int, default=2, help="Supercell repeat count for structure panels")
+    parser.add_argument("--refine-best", action="store_true", help="Run a lightweight lattice refinement on the best generated candidate")
+    parser.add_argument("--refine-max-nfev", type=int, default=30, help="Maximum simulator evaluations for --refine-best")
     parser.add_argument("--show-pbar", action="store_true")
     args = parser.parse_args()
 
@@ -471,8 +581,19 @@ def main():
         args.wavelength,
     )
     print_results(rows, not args.no_print_minicifs)
+    figure_rows = rows
+    if args.refine_best:
+        refinement = refine_best_candidate(rows, reference_iq, xrd_kwargs, args.wavelength, args.refine_max_nfev)
+        print_refinement_result(refinement)
+        if refinement is not None and refinement["rwp_after"] <= refinement["rwp_before"]:
+            figure_rows = rows + [{
+                "rep": f"refined {refinement['source_rep']}",
+                "rwp": refinement["rwp_after"],
+                "generated_iq": refinement["generated_iq"],
+                "generated_structure": refinement["generated_structure"],
+            }]
     if args.figure_out:
-        save_fit_figure(args.figure_out, q_grid, reference_iq, reference_structure, rows, name, args.figure_supercell)
+        save_fit_figure(args.figure_out, q_grid, reference_iq, reference_structure, figure_rows, name, args.figure_supercell)
         print(f"\nSaved figure: {os.path.abspath(args.figure_out)}")
 
 

@@ -4,12 +4,14 @@ import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from types import SimpleNamespace
 
 import h5py
 import numpy as np
 from pymatgen.core import Lattice, Structure
 
 from decifer.minicif import MinicifTokenizer
+from decifer.pxrd import max_q_for_wavelength
 
 MODULE_PATH = os.path.join(os.path.dirname(__file__), "..", "bin", "test_minicif_realtime.py")
 spec = importlib.util.spec_from_file_location("test_minicif_realtime", MODULE_PATH)
@@ -19,6 +21,8 @@ spec.loader.exec_module(test_minicif_realtime)
 prompt_from_minicif = test_minicif_realtime.prompt_from_minicif
 print_results = test_minicif_realtime.print_results
 read_sample = test_minicif_realtime.read_sample
+clean_xrd_kwargs = test_minicif_realtime.clean_xrd_kwargs
+refine_best_candidate = test_minicif_realtime.refine_best_candidate
 save_fit_figure = test_minicif_realtime.save_fit_figure
 
 
@@ -70,6 +74,20 @@ class TestMinicifRealtimeScript(unittest.TestCase):
             "<mcif> Na Cl cs_7 sg_221",
         )
 
+    def test_clean_xrd_kwargs_clamps_qmax_below_singularity(self):
+        args = SimpleNamespace(
+            qmin=None,
+            qmax=None,
+            qstep=None,
+            clean_fwhm=None,
+            eta=None,
+            wavelength="CuKa",
+        )
+
+        kwargs = clean_xrd_kwargs({"qmax": 10.0, "fwhm_range_min": 0.04, "fwhm_range_max": 0.08}, args)
+
+        self.assertLess(kwargs["qmax"], max_q_for_wavelength(1.5406))
+
     def test_print_results_can_show_decoded_minicifs(self):
         rows = [{
             "rep": 0,
@@ -113,6 +131,37 @@ class TestMinicifRealtimeScript(unittest.TestCase):
 
             self.assertTrue(os.path.exists(out_path))
             self.assertGreater(os.path.getsize(out_path), 0)
+
+    def test_refine_best_candidate_keeps_valid_candidate(self):
+        structure = Structure(
+            Lattice.cubic(3.0),
+            ["Na"],
+            [[0, 0, 0]],
+        )
+        q_grid = np.linspace(0, 4, 200)
+        reference_iq = np.exp(-((q_grid - 2.0) ** 2))
+        rows = [{
+            "rep": 0,
+            "rwp": 0.5,
+            "generated_crystal_system": 7,
+            "generated_structure": structure,
+        }]
+        xrd_kwargs = {
+            "qmin": 0.0,
+            "qmax": 4.0,
+            "qstep": 0.02,
+            "fwhm_range": (0.08, 0.08),
+            "eta_range": (0.5, 0.5),
+            "noise_range": None,
+            "intensity_scale_range": None,
+            "mask_prob": None,
+            "final_normalize": True,
+        }
+
+        refined = refine_best_candidate(rows, reference_iq, xrd_kwargs, "CuKa", max_nfev=2)
+
+        self.assertIsNotNone(refined)
+        self.assertIn("rwp_after", refined)
 
 
 if __name__ == "__main__":

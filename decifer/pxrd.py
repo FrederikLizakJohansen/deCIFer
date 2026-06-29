@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 
+import math
 from typing import Optional, Tuple
 
 import torch
+
+DEFAULT_QMAX_LIMIT_FRACTION = 0.95
 
 
 def nyquist_qstep(fwhm: float, points_per_fwhm: float = 2.0) -> float:
@@ -11,6 +14,32 @@ def nyquist_qstep(fwhm: float, points_per_fwhm: float = 2.0) -> float:
     if points_per_fwhm <= 0:
         raise ValueError("points_per_fwhm must be positive")
     return float(fwhm) / float(points_per_fwhm)
+
+
+def max_q_for_wavelength(wavelength: float) -> float:
+    return float(4 * math.pi / float(wavelength))
+
+
+def clamp_qmax_for_wavelength(
+    qmax: float,
+    wavelength: float,
+    limit_fraction: float = DEFAULT_QMAX_LIMIT_FRACTION,
+) -> float:
+    if not 0 < limit_fraction < 1:
+        raise ValueError("limit_fraction must satisfy 0 < limit_fraction < 1")
+    return min(float(qmax), limit_fraction * max_q_for_wavelength(float(wavelength)))
+
+
+def q_range_to_two_theta_range(
+    qmin: float,
+    qmax: float,
+    wavelength: float,
+    limit_fraction: float = DEFAULT_QMAX_LIMIT_FRACTION,
+):
+    qmax = clamp_qmax_for_wavelength(qmax, wavelength, limit_fraction=limit_fraction)
+    tth_min = math.degrees(2 * math.asin((float(qmin) * float(wavelength)) / (4 * math.pi)))
+    tth_max = math.degrees(2 * math.asin((qmax * float(wavelength)) / (4 * math.pi)))
+    return qmax, (tth_min, tth_max)
 
 
 def discrete_to_continuous_xrd(
