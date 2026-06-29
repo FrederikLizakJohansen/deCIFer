@@ -23,6 +23,8 @@ START_TOKEN = "<mcif>"
 ATOM_TOKEN = "<atom>"
 END_TOKEN = "</mcif>"
 CELL_TOKEN = "cell"
+LENGTH_TOLERANCE = 1e-3
+ANGLE_TOLERANCE = 1e-2
 
 CRYSTAL_SYSTEM_SPACE_GROUPS = {
     1: range(1, 3),
@@ -32,6 +34,16 @@ CRYSTAL_SYSTEM_SPACE_GROUPS = {
     5: range(143, 168),
     6: range(168, 195),
     7: range(195, 231),
+}
+
+CRYSTAL_SYSTEM_NAMES = {
+    1: "triclinic",
+    2: "monoclinic",
+    3: "orthorhombic",
+    4: "tetragonal",
+    5: "trigonal",
+    6: "hexagonal",
+    7: "cubic",
 }
 
 
@@ -93,6 +105,7 @@ def canonicalize_cif_block(block: Dict, config: Optional[MinicifConfig] = None, 
             structure.lattice.beta,
             structure.lattice.gamma,
         )
+    validate_lattice_constraints(cell, crystal_system, space_group_number)
 
     parts = [
         START_TOKEN,
@@ -184,8 +197,9 @@ def allowed_minicif_next_token_ids(token_ids, tokenizer: Optional[MinicifTokeniz
 
     if not fresh_field:
         current = completed_fields[-1]
-        if _current_field_is_numeric(completed_fields):
-            return _numeric_next_ids(current, token_to_id)
+        expected = _current_numeric_field(completed_fields)
+        if expected is not None:
+            return _numeric_next_ids(current, token_to_id, expected.get("exact_text"), expected.get("cell_index"))
         if current == END_TOKEN:
             return {padding_id}
         return {token_to_id[" "]}
@@ -208,6 +222,11 @@ def allowed_minicif_next_token_ids(token_ids, tokenizer: Optional[MinicifTokeniz
     if kind == "cell":
         return {token_to_id[CELL_TOKEN]}
     if kind == "number":
+        exact_text = expected.get("exact_text")
+        if exact_text is not None:
+            return {token_to_id[exact_text[0]]}
+        if "cell_index" in expected:
+            return {token_to_id[token] for token in DIGITS + ["."]}
         return {token_to_id[token] for token in DIGITS + ["+", "-", "."]}
     if kind == "atom_or_end":
         return {token_to_id[ATOM_TOKEN], token_to_id[END_TOKEN]}
@@ -273,6 +292,7 @@ def parse_minicif(minicif_string: str) -> ParsedMinicif:
     if index + 6 > len(fields):
         raise ValueError("minicif missing cell parameters")
     cell = tuple(float(value) for value in fields[index:index + 6])
+    validate_lattice_constraints(cell, crystal_system, space_group)
     index += 6
 
     atoms = []
@@ -313,6 +333,83 @@ def minicif_to_structure(minicif_string: str) -> Structure:
     coords = [[atom.x, atom.y, atom.z] for atom in parsed.atoms]
     space_group = SpaceGroup.from_int_number(parsed.space_group).symbol
     return Structure.from_spacegroup(space_group, lattice, species, coords)
+
+
+def validate_lattice_constraints(
+    cell: Tuple[float, float, float, float, float, float],
+    crystal_system: int,
+    space_group: Optional[int] = None,
+) -> None:
+    """Validate conventional lattice constraints implied by crystal system."""
+    violations = lattice_constraint_violations(cell, crystal_system, space_group)
+    if violations:
+        name = CRYSTAL_SYSTEM_NAMES.get(crystal_system, f"cs_{crystal_system}")
+        sg_text = "" if space_group is None else f" sg_{space_group}"
+        raise ValueError(f"{name}{sg_text} cell violates lattice constraints: " + "; ".join(violations))
+
+
+def lattice_constraint_violations(
+    cell: Tuple[float, float, float, float, float, float],
+    crystal_system: int,
+    space_group: Optional[int] = None,
+) -> List[str]:
+    """Return lattice-constraint violations for a minicif cell."""
+    if len(cell) != 6:
+        return ["cell must contain six parameters"]
+    a, b, c, alpha, beta, gamma = [float(value) for value in cell]
+    violations = []
+    for name, value in [("a", a), ("b", b), ("c", c)]:
+        if value <= 0:
+            violations.append(f"{name} must be positive")
+    for name, value in [("alpha", alpha), ("beta", beta), ("gamma", gamma)]:
+        if not 0 < value < 180:
+            violations.append(f"{name} must be between 0 and 180")
+    if violations:
+        return violations
+
+    def same_length(left_name, left, right_name, right):
+        if not _close(left, right, LENGTH_TOLERANCE):
+            violations.append(f"{left_name} must equal {right_name}")
+
+    def same_angle(name, value, expected):
+        if not _close(value, expected, ANGLE_TOLERANCE):
+            violations.append(f"{name} must equal {expected:g}")
+
+    if space_group is not None and space_group not in CRYSTAL_SYSTEM_SPACE_GROUPS.get(crystal_system, []):
+        violations.append(f"sg_{space_group} is incompatible with cs_{crystal_system}")
+        return violations
+
+    if crystal_system == 1:
+        return violations
+    if crystal_system == 2:
+        same_angle("alpha", alpha, 90.0)
+        same_angle("gamma", gamma, 90.0)
+    elif crystal_system == 3:
+        same_angle("alpha", alpha, 90.0)
+        same_angle("beta", beta, 90.0)
+        same_angle("gamma", gamma, 90.0)
+    elif crystal_system == 4:
+        same_length("a", a, "b", b)
+        same_angle("alpha", alpha, 90.0)
+        same_angle("beta", beta, 90.0)
+        same_angle("gamma", gamma, 90.0)
+    elif crystal_system == 5:
+        if not (_is_hexagonal_axis_cell(cell) or _is_rhombohedral_axis_cell(cell)):
+            violations.append("trigonal cell must use hexagonal or rhombohedral axes")
+    elif crystal_system == 6:
+        same_length("a", a, "b", b)
+        same_angle("alpha", alpha, 90.0)
+        same_angle("beta", beta, 90.0)
+        same_angle("gamma", gamma, 120.0)
+    elif crystal_system == 7:
+        same_length("a", a, "b", b)
+        same_length("a", a, "c", c)
+        same_angle("alpha", alpha, 90.0)
+        same_angle("beta", beta, 90.0)
+        same_angle("gamma", gamma, 90.0)
+    else:
+        violations.append(f"invalid crystal system: {crystal_system}")
+    return violations
 
 
 def _ordered_elements(block: Dict, element_order: str) -> List[str]:
@@ -476,9 +573,20 @@ def _expected_next_field(fields: List[str]) -> Optional[Dict]:
         return None
     index += 1
 
-    for _ in range(6):
+    cell_values = []
+    for cell_index in range(6):
         if index == len(fields):
-            return {"kind": "number"}
+            return {
+                "kind": "number",
+                "crystal_system": crystal_system,
+                "space_group": space_group,
+                "cell_index": cell_index,
+                "cell_values": cell_values,
+                "exact_text": _expected_cell_value_text(crystal_system, space_group, cell_values, cell_index),
+            }
+        cell_values.append(fields[index])
+        if not _cell_prefix_is_valid(crystal_system, space_group, cell_values):
+            return None
         index += 1
 
     while index < len(fields):
@@ -500,23 +608,154 @@ def _expected_next_field(fields: List[str]) -> Optional[Dict]:
     return {"kind": "atom_or_end"}
 
 
-def _current_field_is_numeric(fields: List[str]) -> bool:
+def _current_numeric_field(fields: List[str]) -> Optional[Dict]:
     previous_fields = fields[:-1]
     expected = _expected_next_field(previous_fields)
-    return expected is not None and expected["kind"] == "number"
+    if expected is not None and expected["kind"] == "number":
+        return expected
+    return None
 
 
-def _numeric_next_ids(current: str, token_to_id: Dict[str, int]) -> Set[int]:
+def _numeric_next_ids(
+    current: str,
+    token_to_id: Dict[str, int],
+    exact_text: Optional[str] = None,
+    cell_index: Optional[int] = None,
+) -> Set[int]:
+    if exact_text is not None:
+        return _exact_numeric_next_ids(current, exact_text, token_to_id)
     allowed = {token_to_id[digit] for digit in DIGITS}
     if "." not in current:
         allowed.add(token_to_id["."])
+    if cell_index is None:
+        if "+" not in current and "-" not in current and current == "":
+            allowed.update([token_to_id["+"], token_to_id["-"]])
     if _is_complete_number(current):
         allowed.add(token_to_id[" "])
     return allowed
 
 
+def _exact_numeric_next_ids(current: str, exact_text: str, token_to_id: Dict[str, int]) -> Set[int]:
+    if not exact_text.startswith(current):
+        return set()
+    if current == exact_text:
+        return {token_to_id[" "]}
+    return {token_to_id[exact_text[len(current)]]}
+
+
 def _is_complete_number(value: str) -> bool:
     return re.fullmatch(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)", value) is not None
+
+
+def _cell_prefix_is_valid(crystal_system: int, space_group: int, cell_values: List[str]) -> bool:
+    if not cell_values:
+        return True
+    if not all(_is_complete_number(value) for value in cell_values):
+        return False
+    values = [float(value) for value in cell_values]
+    for index, value in enumerate(values):
+        if index < 3 and value <= 0:
+            return False
+        if index >= 3 and not 0 < value < 180:
+            return False
+
+    for index, value in enumerate(values):
+        expected = _expected_cell_value(cell_values[:index], index, crystal_system, space_group)
+        if expected is not None and not _close(value, expected, _cell_tolerance(index)):
+            return False
+
+    return True
+
+
+def _expected_cell_value_text(
+    crystal_system: int,
+    space_group: int,
+    cell_values: List[str],
+    cell_index: int,
+) -> Optional[str]:
+    expected = _expected_cell_value(cell_values, cell_index, crystal_system, space_group)
+    if expected is None:
+        return None
+    if isinstance(expected, str):
+        return expected
+    return _format_fixed_cell_value(expected, cell_values)
+
+
+def _expected_cell_value(
+    cell_values: List[str],
+    cell_index: int,
+    crystal_system: int,
+    space_group: int,
+):
+    if crystal_system == 7:
+        if cell_index in (1, 2) and cell_values:
+            return cell_values[0]
+        if cell_index in (3, 4, 5):
+            return 90.0
+    if crystal_system == 6:
+        if cell_index == 1 and cell_values:
+            return cell_values[0]
+        if cell_index in (3, 4):
+            return 90.0
+        if cell_index == 5:
+            return 120.0
+    if crystal_system == 5:
+        # The minicif converter writes conventional trigonal cells on hexagonal axes.
+        if cell_index == 1 and cell_values:
+            return cell_values[0]
+        if cell_index in (3, 4):
+            return 90.0
+        if cell_index == 5:
+            return 120.0
+    if crystal_system == 4:
+        if cell_index == 1 and cell_values:
+            return cell_values[0]
+        if cell_index in (3, 4, 5):
+            return 90.0
+    if crystal_system == 3:
+        if cell_index in (3, 4, 5):
+            return 90.0
+    if crystal_system == 2:
+        if cell_index in (3, 5):
+            return 90.0
+    return None
+
+
+def _format_fixed_cell_value(value: float, previous_cell_values: List[str]) -> str:
+    decimal_places = 0
+    for previous in previous_cell_values:
+        if "." in previous:
+            decimal_places = len(previous.split(".", 1)[1])
+            break
+    return f"{float(value):.{decimal_places}f}"
+
+
+def _cell_tolerance(cell_index: int) -> float:
+    return LENGTH_TOLERANCE if cell_index < 3 else ANGLE_TOLERANCE
+
+
+def _close(left: float, right: float, atol: float) -> bool:
+    return abs(float(left) - float(right)) <= max(atol, 1e-4 * max(abs(float(left)), abs(float(right)), 1.0))
+
+
+def _is_hexagonal_axis_cell(cell: Tuple[float, float, float, float, float, float]) -> bool:
+    a, b, _, alpha, beta, gamma = cell
+    return (
+        _close(a, b, LENGTH_TOLERANCE)
+        and _close(alpha, 90.0, ANGLE_TOLERANCE)
+        and _close(beta, 90.0, ANGLE_TOLERANCE)
+        and _close(gamma, 120.0, ANGLE_TOLERANCE)
+    )
+
+
+def _is_rhombohedral_axis_cell(cell: Tuple[float, float, float, float, float, float]) -> bool:
+    a, b, c, alpha, beta, gamma = cell
+    return (
+        _close(a, b, LENGTH_TOLERANCE)
+        and _close(a, c, LENGTH_TOLERANCE)
+        and _close(alpha, beta, ANGLE_TOLERANCE)
+        and _close(alpha, gamma, ANGLE_TOLERANCE)
+    )
 
 
 def _parse_prefixed_int(value: str, prefix: str) -> Optional[int]:
