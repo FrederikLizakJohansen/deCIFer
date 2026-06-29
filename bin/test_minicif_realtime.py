@@ -11,10 +11,14 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 import h5py
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from pymatgen.analysis.diffraction.xrd import XRDCalculator
 from pymatgen.analysis.structure_matcher import StructureMatcher
+from pymatgen.core import Element
 
 from decifer.decifer_model import Decifer, DeciferConfig
 from decifer.minicif import START_TOKEN, MinicifTokenizer, minicif_to_structure, parse_minicif
@@ -229,6 +233,8 @@ def evaluate_candidates(candidates, reference_parsed, reference_structure, refer
                 "composition_match": generated_structure.composition.reduced_formula == reference_structure.composition.reduced_formula,
                 "rwp": rwp(reference_iq, generated_iq),
                 "rmsd": rmsd_value,
+                "generated_iq": generated_iq,
+                "generated_structure": generated_structure,
             })
         except Exception as exc:
             row["error"] = str(exc)
@@ -262,6 +268,144 @@ def print_results(rows, print_minicifs):
         print(f"best_rep={best['rep']} best_Rwp={best['rwp']:.6f}")
 
 
+def best_row_by_rwp(rows):
+    return min((row for row in rows if row["rwp"] is not None), key=lambda row: row["rwp"], default=None)
+
+
+def save_fit_figure(path, q_grid, reference_iq, reference_structure, rows, sample_name, figure_supercell):
+    best = best_row_by_rwp(rows)
+    if best is None:
+        raise ValueError("cannot create figure because no generated candidate produced a valid Rwp")
+
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    generated_iq = best["generated_iq"]
+    generated_structure = best["generated_structure"]
+    residual = reference_iq - generated_iq
+
+    fig = plt.figure(figsize=(14, 10), dpi=180, constrained_layout=True)
+    grid = fig.add_gridspec(3, 2, height_ratios=[1.35, 0.55, 2.0])
+    ax_fit = fig.add_subplot(grid[0, :])
+    ax_residual = fig.add_subplot(grid[1, :], sharex=ax_fit)
+    ax_ref = fig.add_subplot(grid[2, 0], projection="3d")
+    ax_gen = fig.add_subplot(grid[2, 1], projection="3d")
+
+    ax_fit.plot(q_grid, reference_iq, color="#202124", linewidth=1.35, label="reference")
+    ax_fit.plot(q_grid, generated_iq, color="#0072B2", linewidth=1.15, alpha=0.9, label=f"best generated, rep {best['rep']}")
+    ax_fit.fill_between(q_grid, reference_iq, generated_iq, color="#0072B2", alpha=0.12, linewidth=0)
+    ax_fit.set_ylabel("normalized intensity")
+    ax_fit.set_title(f"{sample_name} PXRD fit, best Rwp={best['rwp']:.4f}")
+    ax_fit.legend(frameon=False, loc="upper right")
+    ax_fit.grid(alpha=0.18)
+
+    ax_residual.axhline(0, color="#444444", linewidth=0.8)
+    ax_residual.plot(q_grid, residual, color="#D55E00", linewidth=0.9)
+    ax_residual.set_xlabel("q")
+    ax_residual.set_ylabel("residual")
+    ax_residual.grid(alpha=0.18)
+
+    _plot_structure_panel(ax_ref, reference_structure, figure_supercell, "reference structure")
+    _plot_structure_panel(ax_gen, generated_structure, figure_supercell, "best generated structure")
+
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _plot_structure_panel(ax, structure, repeats, title):
+    repeats = max(1, int(repeats))
+    repeated = structure.copy()
+    repeated.make_supercell([repeats, repeats, repeats])
+
+    coords = np.asarray(repeated.cart_coords)
+    species = [site.species_string for site in repeated]
+    colors = {element: _element_color(element) for element in sorted(set(species))}
+    for element in sorted(colors):
+        element_coords = coords[[species_i == element for species_i in species]]
+        ax.scatter(
+            element_coords[:, 0],
+            element_coords[:, 1],
+            element_coords[:, 2],
+            s=_element_marker_size(element),
+            color=colors[element],
+            edgecolor="white",
+            linewidth=0.35,
+            alpha=0.92,
+            label=element,
+        )
+
+    _draw_repeated_unit_cells(ax, structure.lattice.matrix, repeats)
+    _set_axes_equal(ax, coords, structure.lattice.matrix, repeats)
+    ax.set_title(title)
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_zlabel("z")
+    ax.view_init(elev=20, azim=35)
+    ax.legend(frameon=False, loc="upper left", bbox_to_anchor=(0.0, 1.0), fontsize=8)
+    ax.grid(False)
+
+
+def _draw_repeated_unit_cells(ax, lattice_matrix, repeats):
+    a_vec, b_vec, c_vec = np.asarray(lattice_matrix)
+    edge_specs = [
+        (np.zeros(3), a_vec),
+        (np.zeros(3), b_vec),
+        (np.zeros(3), c_vec),
+        (a_vec, b_vec),
+        (a_vec, c_vec),
+        (b_vec, a_vec),
+        (b_vec, c_vec),
+        (c_vec, a_vec),
+        (c_vec, b_vec),
+        (a_vec + b_vec, c_vec),
+        (a_vec + c_vec, b_vec),
+        (b_vec + c_vec, a_vec),
+    ]
+    for i in range(repeats):
+        for j in range(repeats):
+            for k in range(repeats):
+                origin = i * a_vec + j * b_vec + k * c_vec
+                for start, delta in edge_specs:
+                    points = np.vstack([origin + start, origin + start + delta])
+                    ax.plot(points[:, 0], points[:, 1], points[:, 2], color="#555555", linewidth=0.55, alpha=0.38)
+
+
+def _set_axes_equal(ax, coords, lattice_matrix, repeats):
+    a_vec, b_vec, c_vec = np.asarray(lattice_matrix)
+    corners = []
+    for i in [0, repeats]:
+        for j in [0, repeats]:
+            for k in [0, repeats]:
+                corners.append(i * a_vec + j * b_vec + k * c_vec)
+    all_points = np.vstack([coords, np.asarray(corners)])
+    mins = all_points.min(axis=0)
+    maxs = all_points.max(axis=0)
+    center = 0.5 * (mins + maxs)
+    radius = 0.5 * float(np.max(maxs - mins))
+    if radius == 0:
+        radius = 1.0
+    ax.set_xlim(center[0] - radius, center[0] + radius)
+    ax.set_ylim(center[1] - radius, center[1] + radius)
+    ax.set_zlim(center[2] - radius, center[2] + radius)
+    if hasattr(ax, "set_box_aspect"):
+        ax.set_box_aspect((1, 1, 1))
+
+
+def _element_color(element):
+    palette = plt.get_cmap("tab20").colors
+    try:
+        index = Element(element).Z - 1
+    except Exception:
+        index = abs(hash(element))
+    return palette[index % len(palette)]
+
+
+def _element_marker_size(element):
+    try:
+        radius = Element(element).atomic_radius or 1.0
+        return float(85 * max(0.6, min(radius, 1.8)))
+    except Exception:
+        return 85.0
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate minicifs for one PXRD sample from a minicif HDF5 split.")
     parser.add_argument("--checkpoint", required=True, help="Path to ckpt.pt")
@@ -287,6 +431,8 @@ def main():
     parser.add_argument("--wavelength", default="CuKa")
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--no-print-minicifs", action="store_true", help="Do not print generated minicif strings")
+    parser.add_argument("--figure-out", default="", help="Optional path to save a PXRD/structure comparison figure")
+    parser.add_argument("--figure-supercell", type=int, default=2, help="Supercell repeat count for structure panels")
     parser.add_argument("--show-pbar", action="store_true")
     args = parser.parse_args()
 
@@ -301,7 +447,7 @@ def main():
     index, name, reference_minicif, q_disc, iq_disc = read_sample(args.h5, args.index, args.seed)
     reference_parsed = parse_minicif(reference_minicif)
     reference_structure = minicif_to_structure(reference_minicif)
-    _, reference_iq, cond_iq = continuous_from_sparse(q_disc, iq_disc, xrd_kwargs)
+    q_grid, reference_iq, cond_iq = continuous_from_sparse(q_disc, iq_disc, xrd_kwargs)
     prompt = prompt_from_minicif(reference_minicif, args.prompt_mode, tokenizer)
 
     print(f"checkpoint: {os.path.abspath(args.checkpoint)}")
@@ -325,6 +471,9 @@ def main():
         args.wavelength,
     )
     print_results(rows, not args.no_print_minicifs)
+    if args.figure_out:
+        save_fit_figure(args.figure_out, q_grid, reference_iq, reference_structure, rows, name, args.figure_supercell)
+        print(f"\nSaved figure: {os.path.abspath(args.figure_out)}")
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ from contextlib import redirect_stdout
 
 import h5py
 import numpy as np
+from pymatgen.core import Lattice, Structure
 
 from decifer.minicif import MinicifTokenizer
 
@@ -18,6 +19,7 @@ spec.loader.exec_module(test_minicif_realtime)
 prompt_from_minicif = test_minicif_realtime.prompt_from_minicif
 print_results = test_minicif_realtime.print_results
 read_sample = test_minicif_realtime.read_sample
+save_fit_figure = test_minicif_realtime.save_fit_figure
 
 
 class TestMinicifRealtimeScript(unittest.TestCase):
@@ -88,6 +90,29 @@ class TestMinicifRealtimeScript(unittest.TestCase):
             print_results(rows, print_minicifs=True)
 
         self.assertIn("<mcif> Na Cl cs_7 sg_221 cell", output.getvalue())
+
+    def test_save_fit_figure_writes_file_for_best_candidate(self):
+        structure = Structure(
+            Lattice.cubic(3.0),
+            ["Na"],
+            [[0, 0, 0]],
+        )
+        q_grid = np.linspace(0, 5, 64)
+        reference_iq = np.exp(-((q_grid - 2.0) ** 2))
+        generated_iq = np.exp(-((q_grid - 2.1) ** 2))
+        rows = [{
+            "rep": 0,
+            "rwp": 0.12,
+            "generated_iq": generated_iq,
+            "generated_structure": structure,
+        }]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = os.path.join(tmpdir, "fit.png")
+            save_fit_figure(out_path, q_grid, reference_iq, structure, rows, "toy", 1)
+
+            self.assertTrue(os.path.exists(out_path))
+            self.assertGreater(os.path.getsize(out_path), 0)
 
 
 if __name__ == "__main__":
