@@ -171,6 +171,10 @@ sbatch minislurm/pretrain_pxrd_encoder.sh \
 
 Analyze each output directory and compare the `embedding_spaces.pooled` metrics in `analysis_summary.json`.
 
+The pretraining configs resume automatically. If a run is stopped by `Ctrl-C` locally or `scancel <job_id>` on SLURM, the script saves `pxrd_encoder_pretrain.pt` at the next safe point. Rerun the same command to continue. To force a fresh run, set `resume: False` or remove the output directory.
+
+If a job appears stuck in data loading, set `num_workers_dataloader: 0`. If some iterations are just slow, reduce `max_raw_peaks_per_sample` from `2048` to `1024`.
+
 Single-node multi-GPU training uses PyTorch DDP automatically when Slurm exposes more than one GPU:
 
 ```bash

@@ -504,3 +504,56 @@ augmentation_invariance_by_space.pooled.margin_mean
 ```
 
 The target is not just lower contrastive loss. Prefer the run that improves pooled-space PXRD/Rwp correlation and label kNN agreement while keeping a positive augmentation-invariance margin.
+
+### Stop, Resume, and Slow Iterations
+
+The real PXRD pretraining configs now include:
+
+```yaml
+resume: True
+save_on_interrupt: True
+dataloader_timeout_seconds: 120
+max_raw_peaks_per_sample: 2048
+```
+
+To stop a local run, press `Ctrl-C` once. To stop a SLURM run, cancel it normally:
+
+```bash
+scancel <job_id>
+```
+
+The script catches `SIGINT`/`SIGTERM`, saves `pxrd_encoder_pretrain.pt` at the next safe point, and exits the loop. Rerun the same command to continue:
+
+```bash
+PYTHONPATH=. python bin/pretrain_pxrd_encoder.py \
+  --config configs/minicif_pxrd_encoder_pretrain_hybrid_aux_metric.yaml
+```
+
+To resume from a specific checkpoint, set:
+
+```yaml
+resume: False
+resume_from: 'path/to/pxrd_encoder_pretrain.pt'
+```
+
+To force a completely fresh run, either delete/rename the output directory or set:
+
+```yaml
+resume: False
+resume_from: ''
+```
+
+If an iteration hangs on data loading, lower worker count first:
+
+```yaml
+num_workers_dataloader: 0
+dataloader_timeout_seconds: 0
+```
+
+If individual iterations are just very slow, lower the raw peak cap:
+
+```yaml
+max_raw_peaks_per_sample: 1024
+```
+
+This cap is applied before padding, dense PXRD rendering, and peak-list augmentation, so extreme peak lists cannot dominate a batch.

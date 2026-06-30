@@ -25,6 +25,23 @@ class PretrainPxrdEncoderTest(unittest.TestCase):
         self.assertTrue(torch.all(batch["xrd.q"] >= 0.0))
         self.assertTrue(torch.all(batch["xrd.q"] <= 10.0))
 
+    def test_collate_caps_raw_peaks_before_padding(self):
+        batch = [
+            {
+                "xrd.q": torch.arange(6, dtype=torch.float32),
+                "xrd.iq": torch.tensor([0.1, 0.9, 0.2, 0.8, 0.3, 0.7]),
+            },
+            {
+                "xrd.q": torch.arange(4, dtype=torch.float32),
+                "xrd.iq": torch.tensor([0.1, 0.2, 0.3, 0.4]),
+            },
+        ]
+
+        collated = collate_fn(batch, max_raw_peaks_per_sample=3)
+
+        self.assertEqual(collated["xrd.q"].shape, (2, 3))
+        self.assertTrue(torch.all(collated["xrd.iq"][0] >= 0.7))
+
     def test_pxrd_similarity_loss_prefers_pxrd_neighbor_geometry(self):
         z1 = torch.nn.functional.normalize(torch.eye(4), dim=-1)
         z2_good = z1.clone()

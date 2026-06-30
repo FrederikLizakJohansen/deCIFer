@@ -8,7 +8,13 @@ seed: 1337
 batch_size: 256
 num_workers_dataloader: 4
 dataloader_multiprocessing_context: 'spawn'
+dataloader_timeout_seconds: 120
 pin_memory: False
+max_raw_peaks_per_sample: 2048
+resume: True
+resume_from: ''
+save_on_interrupt: True
+max_runtime_seconds: 0
 max_iters: 20_000
 eval_interval: 500
 log_interval: 20

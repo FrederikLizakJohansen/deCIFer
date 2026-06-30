@@ -8,10 +8,16 @@ seed: 1337
 batch_size: 32
 num_workers_dataloader: 0
 dataloader_multiprocessing_context: ''
+dataloader_timeout_seconds: 0
 pin_memory: False
 preload_dataset_to_memory: False
 synthetic_debug_data: True
 synthetic_debug_size: 256
+max_raw_peaks_per_sample: 2048
+resume: False
+resume_from: ''
+save_on_interrupt: True
+max_runtime_seconds: 0
 max_iters: 50
 eval_interval: 25
 log_interval: 5

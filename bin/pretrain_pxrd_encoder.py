@@ -7,6 +7,7 @@ import json
 import math
 import os
 import random
+import signal
 import time
 import yaml
 from dataclasses import asdict, dataclass, field
@@ -46,6 +47,9 @@ METRIC_FIELDS = [
     "time_seconds",
 ]
 
+STOP_REQUESTED = False
+STOP_SIGNAL = None
+
 
 @dataclass
 class PxrdEncoderPretrainConfig:
@@ -55,10 +59,16 @@ class PxrdEncoderPretrainConfig:
     batch_size: int = 128
     num_workers_dataloader: int = 4
     dataloader_multiprocessing_context: str = "spawn"
+    dataloader_timeout_seconds: int = 0
     pin_memory: bool = False
     preload_dataset_to_memory: bool = False
     synthetic_debug_data: bool = False
     synthetic_debug_size: int = 256
+    max_raw_peaks_per_sample: int = 2048
+    resume: bool = False
+    resume_from: str = ""
+    save_on_interrupt: bool = True
+    max_runtime_seconds: int = 0
     max_iters: int = 10_000
     eval_interval: int = 500
     log_interval: int = 20
@@ -141,6 +151,30 @@ def parse_config():
     return config
 
 
+def request_stop(signum, _frame):
+    global STOP_REQUESTED, STOP_SIGNAL
+    STOP_REQUESTED = True
+    STOP_SIGNAL = signum
+    print(f"Stop requested by signal {signum}; saving at the next safe checkpoint point.", flush=True)
+
+
+def install_signal_handlers():
+    signal.signal(signal.SIGINT, request_stop)
+    signal.signal(signal.SIGTERM, request_stop)
+
+
+def checkpoint_path(config):
+    return os.path.join(config.out_dir, "pxrd_encoder_pretrain.pt")
+
+
+def requested_resume_path(config):
+    if config.resume_from:
+        return config.resume_from
+    if config.resume:
+        return checkpoint_path(config)
+    return ""
+
+
 def resolve_dtype(config, device):
     if config.dtype == "bfloat16" and device.type == "cuda" and not torch.cuda.is_bf16_supported():
         print("CUDA device does not report bfloat16 support; falling back to float16.", flush=True)
@@ -151,9 +185,10 @@ def resolve_dtype(config, device):
 def dataloader_kwargs(config, device):
     kwargs = {
         "num_workers": config.num_workers_dataloader,
-        "collate_fn": collate_fn,
+        "collate_fn": make_collate_fn(config),
         "pin_memory": bool(config.pin_memory and device.type == "cuda"),
         "drop_last": True,
+        "timeout": config.dataloader_timeout_seconds if config.num_workers_dataloader > 0 else 0,
     }
     if config.num_workers_dataloader > 0:
         context = str(config.dataloader_multiprocessing_context or "").strip()
@@ -396,10 +431,31 @@ def contrastive_batch_metrics(z1, z2):
     }
 
 
-def collate_fn(batch):
+def cap_single_peak_list(q, iq, max_peaks):
+    if max_peaks <= 0 or q.numel() <= max_peaks:
+        return q, iq
+    valid = q != 0
+    scores = iq.masked_fill(~valid, float("-inf"))
+    peak_indices = torch.topk(scores, k=max_peaks).indices
+    return q[peak_indices], iq[peak_indices]
+
+
+def make_collate_fn(config):
+    def _collate_fn(batch):
+        return collate_fn(batch, config.max_raw_peaks_per_sample)
+    return _collate_fn
+
+
+def collate_fn(batch, max_raw_peaks_per_sample=0):
+    xrd_q = []
+    xrd_iq = []
+    for item in batch:
+        q, iq = cap_single_peak_list(item["xrd.q"], item["xrd.iq"], max_raw_peaks_per_sample)
+        xrd_q.append(q)
+        xrd_iq.append(iq)
     collated = {
-        "xrd.q": pad_sequence([item["xrd.q"] for item in batch], batch_first=True, padding_value=0.0),
-        "xrd.iq": pad_sequence([item["xrd.iq"] for item in batch], batch_first=True, padding_value=0.0),
+        "xrd.q": pad_sequence(xrd_q, batch_first=True, padding_value=0.0),
+        "xrd.iq": pad_sequence(xrd_iq, batch_first=True, padding_value=0.0),
     }
     for key in ("crystal_system", "spacegroup"):
         if key in batch[0]:
@@ -469,6 +525,20 @@ def write_metrics_header(path):
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=METRIC_FIELDS)
         writer.writeheader()
+
+
+def ensure_metrics_file(path, resume_iteration):
+    if resume_iteration <= 0 or not os.path.exists(path):
+        write_metrics_header(path)
+        return
+    with open(path, newline="") as f:
+        header = f.readline().strip().split(",")
+    if header == METRIC_FIELDS:
+        return
+    backup_path = path + f".legacy_{int(time.time())}"
+    os.replace(path, backup_path)
+    print(f"Existing metric header is incompatible; moved old metrics to {backup_path}", flush=True)
+    write_metrics_header(path)
 
 
 def append_metric(path, latest_path, row):
@@ -542,7 +612,7 @@ def update_live_plot(metrics_path, plot_path, plot_window):
         plt.close(fig)
 
 
-def save_checkpoint(config, model, optimizer, iteration):
+def save_checkpoint(config, model, optimizer, iteration, path=None):
     decifer_config = OmegaConf.to_container(OmegaConf.create(asdict(model_config(config))), resolve=True)
     checkpoint = {
         "encoder_state": model.encoder.state_dict(),
@@ -554,11 +624,43 @@ def save_checkpoint(config, model, optimizer, iteration):
         "model_args": OmegaConf.to_container(config, resolve=True),
         "decifer_config": decifer_config,
     }
-    torch.save(checkpoint, os.path.join(config.out_dir, "pxrd_encoder_pretrain.pt"))
+    path = path or checkpoint_path(config)
+    tmp_path = path + ".tmp"
+    torch.save(checkpoint, tmp_path)
+    os.replace(tmp_path, path)
+
+
+def load_resume_checkpoint(config, model, optimizer, device):
+    path = requested_resume_path(config)
+    if not path:
+        return 0
+    if not os.path.exists(path):
+        if config.resume_from:
+            raise FileNotFoundError(f"resume_from checkpoint not found: {path}")
+        print(f"resume=True but no checkpoint exists at {path}; starting from scratch.", flush=True)
+        return 0
+    print(f"Resuming PXRD encoder pretraining from {path}", flush=True)
+    try:
+        checkpoint = torch.load(path, map_location=device, weights_only=False)
+    except TypeError:
+        checkpoint = torch.load(path, map_location=device)
+    model.encoder.load_state_dict(checkpoint["encoder_state"], strict=True)
+    if "projector_state" in checkpoint:
+        model.projector.load_state_dict(checkpoint["projector_state"], strict=True)
+    if "crystal_system_head_state" in checkpoint:
+        model.crystal_system_head.load_state_dict(checkpoint["crystal_system_head_state"], strict=False)
+    if "spacegroup_head_state" in checkpoint:
+        model.spacegroup_head.load_state_dict(checkpoint["spacegroup_head_state"], strict=False)
+    if "optimizer_state" in checkpoint:
+        optimizer.load_state_dict(checkpoint["optimizer_state"])
+    iteration = int(checkpoint.get("iteration", 0))
+    print(f"Resumed at iteration {iteration}", flush=True)
+    return iteration
 
 
 def main():
     config = parse_config()
+    install_signal_handlers()
     if config.contrastive_embedding not in {"projected", "pooled"}:
         raise ValueError("contrastive_embedding must be 'projected' or 'pooled'")
     if config.synthetic_debug_data and needs_label_fields(config):
@@ -568,7 +670,13 @@ def main():
     print(f"Using device: {device}", flush=True)
     print(
         f"DataLoader workers={config.num_workers_dataloader}, "
-        f"context={config.dataloader_multiprocessing_context!r}, pin_memory={config.pin_memory}",
+        f"context={config.dataloader_multiprocessing_context!r}, pin_memory={config.pin_memory}, "
+        f"timeout={config.dataloader_timeout_seconds}s",
+        flush=True,
+    )
+    print(
+        f"max_raw_peaks_per_sample={config.max_raw_peaks_per_sample}, "
+        f"resume={config.resume}, resume_from={config.resume_from!r}",
         flush=True,
     )
     if config.num_workers_dataloader > 0 and config.dataloader_multiprocessing_context not in {"spawn", "forkserver"}:
@@ -598,12 +706,13 @@ def main():
     if device.type == "cuda":
         print(f"Using CUDA device: {torch.cuda.get_device_name(device)}", flush=True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, betas=(config.beta1, config.beta2), weight_decay=config.weight_decay)
+    resume_iteration = load_resume_checkpoint(config, model, optimizer, device)
     kwargs = xrd_kwargs(config)
     clean_kwargs = clean_xrd_kwargs(config)
     metrics_path = os.path.join(config.out_dir, "contrastive_metrics.csv")
     latest_metrics_path = os.path.join(config.out_dir, "latest_metrics.json")
     live_plot_path = os.path.join(config.out_dir, "contrastive_live.png")
-    write_metrics_header(metrics_path)
+    ensure_metrics_file(metrics_path, resume_iteration)
     with open(os.path.join(config.out_dir, "pretrain_config.yaml"), "w") as f:
         yaml.safe_dump(OmegaConf.to_container(config, resolve=True), f, sort_keys=False)
 
@@ -611,7 +720,11 @@ def main():
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda" and dtype == torch.float16)
 
     model.train()
-    for iteration in range(1, config.max_iters + 1):
+    start_time = time.monotonic()
+    if resume_iteration >= config.max_iters:
+        print(f"Checkpoint iteration {resume_iteration} is already >= max_iters {config.max_iters}; nothing to do.", flush=True)
+        return
+    for iteration in range(resume_iteration + 1, config.max_iters + 1):
         try:
             batch = next(iterator)
         except StopIteration:
@@ -705,8 +818,18 @@ def main():
             update_live_plot(metrics_path, live_plot_path, config.plot_window)
         if iteration % config.eval_interval == 0:
             save_checkpoint(config, model, optimizer, iteration)
+        if STOP_REQUESTED:
+            if config.save_on_interrupt:
+                print(f"Saving checkpoint after stop request at iteration {iteration}.", flush=True)
+                save_checkpoint(config, model, optimizer, iteration)
+            break
+        if config.max_runtime_seconds > 0 and time.monotonic() - start_time >= config.max_runtime_seconds:
+            print(f"Reached max_runtime_seconds={config.max_runtime_seconds}; saving checkpoint at iteration {iteration}.", flush=True)
+            save_checkpoint(config, model, optimizer, iteration)
+            break
 
-    save_checkpoint(config, model, optimizer, config.max_iters)
+    else:
+        save_checkpoint(config, model, optimizer, config.max_iters)
 
 
 if __name__ == "__main__":
