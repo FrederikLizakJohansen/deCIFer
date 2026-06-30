@@ -440,9 +440,18 @@ def update_live_plot(metrics_path, plot_path, plot_window):
     fig.suptitle("PXRD contrastive encoder pretraining")
     fig.tight_layout()
     tmp_path = plot_path + ".tmp.png"
-    fig.savefig(tmp_path)
-    plt.close(fig)
-    os.replace(tmp_path, plot_path)
+    try:
+        fig.savefig(tmp_path)
+        os.replace(tmp_path, plot_path)
+    except OSError as exc:
+        print(f"Could not write live plot: {exc}", flush=True)
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+    finally:
+        plt.close(fig)
 
 
 def save_checkpoint(config, model, optimizer, iteration):

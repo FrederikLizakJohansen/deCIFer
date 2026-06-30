@@ -408,3 +408,38 @@ freeze_pretrained_condition_encoder: False
 ```
 
 For an encoder-only comparison, set `freeze_pretrained_condition_encoder: True`.
+
+### Analyze a Finished PXRD Encoder
+
+After pretraining finishes, create publication-style diagnostics for the encoder:
+
+```bash
+PYTHONPATH=. python bin/analyze_pxrd_encoder.py \
+  --checkpoint minicif_pxrd_encoder_pretrain_hybrid/pxrd_encoder_pretrain.pt \
+  --dataset-dir data/noma \
+  --split val \
+  --max-samples 2000 \
+  --batch-size 64 \
+  --tsne
+```
+
+The script writes an `encoder_analysis_val/` folder beside the checkpoint. Important outputs:
+
+```text
+analysis_summary.json
+figure_manifest.json
+training_metrics.png/.pdf
+pca2_by_crystal_system.png/.pdf
+tsne2_by_crystal_system.png/.pdf
+pca_explained_variance.png/.pdf
+embedding_similarity_heatmap.png/.pdf
+pxrd_similarity_vs_embedding_similarity.png/.pdf
+augmentation_invariance.png/.pdf
+sample_pxrd_traces.png/.pdf
+encoder_embeddings.npz
+sample_summary.csv
+hard_negatives_by_crystal_system.csv
+representative_samples_by_crystal_system.csv
+```
+
+Use the summary JSON for numbers in tables: final contrastive metrics, k-nearest-neighbor label agreement, silhouette scores, low-dimensional trustworthiness, PXRD-similarity correlation, and augmentation-invariance margins. Use the hard-negative CSV to inspect structures that the encoder considers similar even though their labels differ.

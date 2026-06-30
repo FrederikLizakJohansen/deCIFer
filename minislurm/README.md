@@ -142,6 +142,20 @@ PYTHONPATH=. python bin/pretrain_pxrd_encoder.py \
 
 If the default pretraining config segfaults locally, set `num_workers_dataloader: 0` first and keep `pin_memory: False`. As an opt-in diagnostic fallback, use `preload_dataset_to_memory: True`. HDF5-backed datasets can crash with PyTorch worker multiprocessing on some systems.
 
+Analyze a finished PXRD encoder checkpoint:
+
+```bash
+PYTHONPATH=. python bin/analyze_pxrd_encoder.py \
+  --checkpoint minicif_pxrd_encoder_pretrain_hybrid/pxrd_encoder_pretrain.pt \
+  --dataset-dir data/noma \
+  --split val \
+  --max-samples 2000 \
+  --batch-size 64 \
+  --tsne
+```
+
+This writes publication-style diagnostics, CSVs, and PDFs to `minicif_pxrd_encoder_pretrain_hybrid/encoder_analysis_val`.
+
 Single-node multi-GPU training uses PyTorch DDP automatically when Slurm exposes more than one GPU:
 
 ```bash
