@@ -133,14 +133,14 @@ PYTHONPATH=. python bin/pretrain_pxrd_encoder.py \
   --config configs/minicif_pxrd_encoder_pretrain_synthetic_debug.yaml
 ```
 
-This bypasses HDF5 completely. If it works, test real serialized data with the conservative preload config:
+This bypasses HDF5 completely. If it works, test real serialized data with the conservative smoke config:
 
 ```bash
 PYTHONPATH=. python bin/pretrain_pxrd_encoder.py \
   --config configs/minicif_pxrd_encoder_pretrain_hybrid_laptop_smoke.yaml
 ```
 
-If the default pretraining config segfaults locally, set `num_workers_dataloader: 0` first, keep `pin_memory: False`, and use `preload_dataset_to_memory: True`. HDF5-backed datasets can crash with PyTorch worker multiprocessing on some systems.
+If the default pretraining config segfaults locally, set `num_workers_dataloader: 0` first and keep `pin_memory: False`. As an opt-in diagnostic fallback, use `preload_dataset_to_memory: True`. HDF5-backed datasets can crash with PyTorch worker multiprocessing on some systems.
 
 Single-node multi-GPU training uses PyTorch DDP automatically when Slurm exposes more than one GPU:
 

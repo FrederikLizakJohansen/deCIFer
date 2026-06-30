@@ -9,7 +9,7 @@ batch_size: 32
 num_workers_dataloader: 0
 dataloader_multiprocessing_context: ''
 pin_memory: False
-preload_dataset_to_memory: True
+preload_dataset_to_memory: False
 synthetic_debug_data: False
 synthetic_debug_size: 256
 max_iters: 100

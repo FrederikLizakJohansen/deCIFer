@@ -372,12 +372,12 @@ This uses:
 ```yaml
 num_workers_dataloader: 0
 pin_memory: False
-preload_dataset_to_memory: True
+preload_dataset_to_memory: False
 dtype: 'float32'
 live_plot: False
 ```
 
-This reads `train.h5` into CPU memory once, closes the HDF5 file, and only then enters the CUDA training loop. If the synthetic probe works but this config segfaults, inspect the local HDF5/h5py stack or the serialized data file.
+If the synthetic probe works but this config segfaults, inspect the local HDF5/h5py stack or the serialized data file. As an opt-in diagnostic fallback, set `preload_dataset_to_memory: True`; that reads `train.h5` into CPU memory once, closes the HDF5 file, and only then enters the CUDA training loop.
 
 If that works, turn options back on one at a time:
 
