@@ -99,6 +99,33 @@ sbatch minislurm/run_minicif_condition_ablation.sh \
             configs/minicif_condition_ablation/small_hybrid_cross.yaml
 ```
 
+Pretrain the PXRD condition encoder contrastively:
+
+```bash
+sbatch minislurm/pretrain_pxrd_encoder.sh
+```
+
+Use a custom pretraining config:
+
+```bash
+sbatch minislurm/pretrain_pxrd_encoder.sh \
+  --config configs/minicif_pxrd_encoder_pretrain_hybrid.yaml
+```
+
+The checkpoint is written to:
+
+```text
+minicif_pxrd_encoder_pretrain_hybrid/pxrd_encoder_pretrain.pt
+```
+
+Live diagnostics are updated during training:
+
+```text
+minicif_pxrd_encoder_pretrain_hybrid/contrastive_live.png
+minicif_pxrd_encoder_pretrain_hybrid/latest_metrics.json
+minicif_pxrd_encoder_pretrain_hybrid/contrastive_metrics.csv
+```
+
 Single-node multi-GPU training uses PyTorch DDP automatically when Slurm exposes more than one GPU:
 
 ```bash

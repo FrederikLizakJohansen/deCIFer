@@ -1,9 +1,10 @@
 import unittest
+import tempfile
 from types import MethodType
 
 import torch
 
-from decifer.decifer_model import Decifer, DeciferConfig
+from decifer.decifer_model import Decifer, DeciferConfig, PeakListEncoder
 from decifer.minicif import MinicifTokenizer
 
 
@@ -76,6 +77,30 @@ class DeciferModelTest(unittest.TestCase):
 
         self.assertEqual(len(optimizer.param_groups), 2)
 
+    def test_condition_encoder_state_loads_from_pretrain_checkpoint_shape(self):
+        tokenizer = MinicifTokenizer()
+        config = DeciferConfig(
+            tokenizer="minicif",
+            vocab_size=tokenizer.vocab_size,
+            block_size=16,
+            n_layer=1,
+            n_head=1,
+            n_embd=16,
+            condition=True,
+            condition_encoder="conv",
+            condition_n_tokens=4,
+            pxrd_encoder_channels=8,
+        )
+        source = Decifer(config)
+        target = Decifer(config)
+        with tempfile.NamedTemporaryFile(suffix=".pt") as tmp:
+            torch.save({"encoder_state": source.transformer.cond_embedding.state_dict()}, tmp.name)
+            checkpoint = torch.load(tmp.name, map_location="cpu", weights_only=False)
+        missing, unexpected = target.transformer.cond_embedding.load_state_dict(checkpoint["encoder_state"], strict=False)
+
+        self.assertEqual(missing, [])
+        self.assertEqual(unexpected, [])
+
     def test_peak_condition_encoder_inserts_peak_tokens(self):
         tokenizer = MinicifTokenizer()
         model = Decifer(DeciferConfig(
@@ -100,6 +125,25 @@ class DeciferModelTest(unittest.TestCase):
 
         self.assertEqual(logits.shape, (1, idx.size(1) + 3, tokenizer.vocab_size))
         self.assertIsNotNone(loss)
+
+    def test_peak_condition_encoder_preserves_absolute_q_positions(self):
+        torch.manual_seed(0)
+        encoder = PeakListEncoder(DeciferConfig(
+            n_head=1,
+            n_embd=16,
+            condition_n_tokens=2,
+            peak_encoder_hidden_dim=8,
+            condition_qmin=0.0,
+            condition_qmax=10.0,
+        ))
+        peak_iq = torch.tensor([[1.0, 0.5, 0.0]], dtype=torch.float32)
+        low_q = torch.tensor([[1.0, 2.0, 0.0]], dtype=torch.float32)
+        high_q = torch.tensor([[2.0, 4.0, 0.0]], dtype=torch.float32)
+
+        low_tokens = encoder(low_q, peak_iq)
+        high_tokens = encoder(high_q, peak_iq)
+
+        self.assertFalse(torch.allclose(low_tokens, high_tokens))
 
     def test_hybrid_cross_attention_keeps_token_sequence_length(self):
         tokenizer = MinicifTokenizer()

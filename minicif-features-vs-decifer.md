@@ -53,17 +53,24 @@ This file lists the core minicif changes relative to the original deCIFer workfl
 ## Conditioning architecture
 
 - Kept the original single-vector MLP conditioning path available.
-- Added configurable condition encoders with `condition_encoder: mlp|conv`.
+- Added configurable condition encoders with `condition_encoder: mlp|conv|peak|hybrid`.
 - Added `condition_n_tokens`, allowing PXRD conditioning to use multiple non-generated condition tokens per minicif record.
 - Added a 1D convolutional PXRD encoder over dense q-grid intensity traces.
 - The conv encoder adaptively pools q-space to latent condition tokens and projects them to transformer width.
+- Added a sparse peak-list encoder over `xrd_disc.q` and `xrd_disc.iq`.
+- Peak-list q positions are normalized against the configured training q range rather than the per-sample maximum q, preserving absolute q-position information.
+- Added a hybrid PXRD encoder that concatenates dense-trace tokens and peak-list tokens.
 - Condition tokens are inserted at each `<mcif>` start, preserving packed-batch condition alignment.
+- Added optional true cross-attention from generated minicif tokens into PXRD memory tokens through `condition_cross_attention`.
+- Added `condition_cross_attention_every_n_layers` to control how often transformer blocks attend to PXRD memory.
 
 ## Attention and packing
 
 - Preserved boundary masking for packed records.
 - Extended conditioned attention masking to support multiple condition tokens per packed minicif record.
 - Added a regression test that verifies a token in one packed minicif record cannot attend to tokens from a previous packed record.
+- Added cross-attention masking so each packed minicif record attends only to its own PXRD memory tokens.
+- Added handling for packed continuation blocks without an in-block `<mcif>` start token.
 
 ## Grammar-aware generation
 
@@ -98,3 +105,29 @@ This file lists the core minicif changes relative to the original deCIFer workfl
   - gradient norm
   - GPU memory
   - q-grid and condition-encoder settings
+- Added a contrastive PXRD encoder pretraining workflow:
+  - two independently augmented PXRD views per structure
+  - shared condition encoder plus projection head
+  - NT-Xent contrastive loss
+  - checkpoint containing `encoder_state` for initializing minicif training
+  - optional downstream freezing through `freeze_pretrained_condition_encoder`
+  - live diagnostics through `contrastive_live.png`, `latest_metrics.json`, and `contrastive_metrics.csv`
+
+## Evaluation and ablation workflow
+
+- Added small conditioning ablation configs for:
+  - no conditioning
+  - dense MLP insertion
+  - dense conv insertion
+  - peak-list insertion
+  - hybrid dense-plus-peak insertion
+  - dense conv cross-attention
+  - hybrid dense-plus-peak cross-attention
+- Added a sequential ablation runner for local and SLURM runs.
+- Extended minicif evaluation to support multiple prompt modes in one run:
+  - `pxrd`
+  - `pxrd-elements`
+  - `pxrd-elements-cs`
+  - `pxrd-elements-cs-sg`
+- Added generation metrics for finish rate, generated token count, extra elements, and missing elements.
+- Added README instructions for running the ablations and evaluating checkpoints on the cluster.

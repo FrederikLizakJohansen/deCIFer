@@ -53,6 +53,7 @@ small_hybrid_cross.yaml       dense PXRD + peak-list encoder, cross-attention
 ```
 
 All configs use clean PXRD settings: no noise, no peak dropout, no q-shift, no impurity peaks, and no background augmentation.
+For `peak` and `hybrid` configs, `qmin` and `qmax` also define the fixed q range used to normalize peak-list q positions.
 
 ## 4. Sanity Check Before Launching
 
@@ -163,7 +164,71 @@ python bin/visualize_minicif.py \
   --prompt-modes pxrd pxrd-elements
 ```
 
-## 8. Compare Results
+## 8. Evaluate Checkpoints On The Cluster
+
+Use the existing SLURM evaluation wrapper for a single checkpoint:
+
+```bash
+sbatch minislurm/evaluate_minicif.sh \
+  --checkpoint minicif_ablation_small_hybrid_cross/ckpt.pt \
+  --dataset-dir data/noma \
+  --out-dir minicif_ablation_small_hybrid_cross/report \
+  --splits val test \
+  --max-items 200 \
+  --num-reps 8 \
+  --generation-batch-size 8 \
+  --prompt-modes pxrd pxrd-elements pxrd-elements-cs pxrd-elements-cs-sg \
+  --top-k 50
+```
+
+Submit one evaluation job per ablation checkpoint:
+
+```bash
+for run in \
+  minicif_ablation_small_no_condition \
+  minicif_ablation_small_mlp_insert \
+  minicif_ablation_small_conv_insert \
+  minicif_ablation_small_peak_insert \
+  minicif_ablation_small_hybrid_insert \
+  minicif_ablation_small_conv_cross \
+  minicif_ablation_small_hybrid_cross
+do
+  sbatch minislurm/evaluate_minicif.sh \
+    --checkpoint "${run}/ckpt.pt" \
+    --dataset-dir data/noma \
+    --out-dir "${run}/report" \
+    --splits val test \
+    --max-items 200 \
+    --num-reps 8 \
+    --generation-batch-size 8 \
+    --prompt-modes pxrd pxrd-elements pxrd-elements-cs pxrd-elements-cs-sg \
+    --top-k 50
+done
+```
+
+For a quick cluster smoke test before launching full evaluations:
+
+```bash
+sbatch minislurm/evaluate_minicif.sh \
+  --checkpoint minicif_ablation_small_hybrid_cross/ckpt.pt \
+  --dataset-dir data/noma \
+  --out-dir minicif_ablation_small_hybrid_cross/report_smoke \
+  --splits val \
+  --max-items 10 \
+  --num-reps 2 \
+  --generation-batch-size 2 \
+  --prompt-modes pxrd pxrd-elements
+```
+
+SLURM logs are written here:
+
+```text
+logs/minicif_eval_<jobid>_0.out
+```
+
+The evaluation report for each run is written to its `--out-dir`.
+
+## 9. Compare Results
 
 After evaluating several models, compare the summaries:
 
@@ -196,7 +261,7 @@ print(summary[cols].sort_values(["split", "prompt_mode", "best_of_k_match_rate"]
 PY
 ```
 
-## 9. Interpret The Main Signals
+## 10. Interpret The Main Signals
 
 Use these first:
 
@@ -221,3 +286,86 @@ small_hybrid_cross vs small_conv_cross
 ```
 
 If `pxrd-elements` has high `mean_extra_elements`, use constrained decoding and shorter `max_new_tokens` first, then compare whether cross-attention or hybrid conditioning improves it.
+
+## 11. Next Experiments After This Ablation
+
+Use the first ablation results to choose the next config family.
+
+If cross-attention helps:
+
+```text
+Try q-aware dense patch tokens instead of adaptive pooled conv tokens.
+Try cross-attention every 2 layers instead of every layer.
+Try hybrid cross-attention with fewer peak tokens and more dense tokens.
+```
+
+If peak-list or hybrid conditioning helps:
+
+```text
+Add peak width, prominence, and confidence channels.
+Add a real-PXRD preprocessing path that detects peaks from measured traces.
+Keep dense trace + detected peaks together for real PXRD; do not rely on peak picking alone.
+```
+
+If `pxrd-elements` still adds wrong elements:
+
+```text
+Add explicit element-set or formula conditioning tokens.
+Train with PXRD-only, PXRD+elements, PXRD+formula, and PXRD+formula+crystal-system variants.
+Use component dropout so the model can run both with and without known components.
+```
+
+If shifted or real patterns perform poorly:
+
+```text
+Add PXRD pre-alignment experiments.
+Compare raw PXRD, aligned PXRD, PXRD+components, and aligned PXRD+components.
+Evaluate on synthetic q-shift/q-scale sweeps before trusting real-pattern gains.
+```
+
+The detailed backlog for these ideas is in:
+
+```text
+minicif-idea-for-improvements.md
+```
+
+The next implementation target is contrastive PXRD encoder pretraining:
+
+```text
+1. Pretrain the condition encoder on two augmented PXRD views of the same structure.
+2. Save the pretrained condition encoder checkpoint.
+3. Initialize minicif training from that encoder.
+4. Compare against the same config trained from scratch.
+```
+
+Run the default hybrid encoder pretraining job:
+
+```bash
+sbatch minislurm/pretrain_pxrd_encoder.sh
+```
+
+Or run it locally:
+
+```bash
+python bin/pretrain_pxrd_encoder.py \
+  --config configs/minicif_pxrd_encoder_pretrain_hybrid.yaml
+```
+
+Watch these files while it trains:
+
+```text
+minicif_pxrd_encoder_pretrain_hybrid/contrastive_live.png
+minicif_pxrd_encoder_pretrain_hybrid/latest_metrics.json
+minicif_pxrd_encoder_pretrain_hybrid/contrastive_metrics.csv
+```
+
+The live plot updates every `plot_interval` iterations. Good signs are decreasing loss, positive similarity rising above negative similarity, and retrieval top-1 increasing above the random baseline.
+
+Then copy one of the matching hybrid configs and add:
+
+```yaml
+pretrained_condition_encoder_path: 'minicif_pxrd_encoder_pretrain_hybrid/pxrd_encoder_pretrain.pt'
+freeze_pretrained_condition_encoder: False
+```
+
+For an encoder-only comparison, set `freeze_pretrained_condition_encoder: True`.

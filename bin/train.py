@@ -136,6 +136,8 @@ class TrainConfig:
     pxrd_encoder_channels: int = 64
     pxrd_encoder_kernel_size: int = 7
     condition_embedder_hidden_layers: List[int] = field(default_factory=lambda: [512])
+    pretrained_condition_encoder_path: str = ""
+    freeze_pretrained_condition_encoder: bool = False
 
     # Augmentation at training time
     qmin: float = 0.0
@@ -474,6 +476,51 @@ def save_checkpoint(C, checkpoint, model, optimizer, training_metrics, local_ite
     print(f"saving checkpoint to {C.out_dir}...", flush=True)
     torch.save(checkpoint, os.path.join(C.out_dir, "ckpt.pt"))
 
+def load_pretrained_condition_encoder(C, model):
+    if not C.pretrained_condition_encoder_path:
+        return
+    if not C.condition:
+        raise ValueError("pretrained_condition_encoder_path requires condition: True")
+    print(f"Loading pretrained condition encoder from {C.pretrained_condition_encoder_path}...", flush=True)
+    try:
+        checkpoint = torch.load(C.pretrained_condition_encoder_path, map_location=C.device, weights_only=False)
+    except TypeError:
+        checkpoint = torch.load(C.pretrained_condition_encoder_path, map_location=C.device)
+    pretrained_config = checkpoint.get("decifer_config", {})
+    expected_values = {
+        "condition_encoder": C.condition_encoder,
+        "condition_n_tokens": C.condition_n_tokens,
+        "dense_condition_n_tokens": C.dense_condition_n_tokens,
+        "peak_condition_n_tokens": C.peak_condition_n_tokens,
+        "n_embd": C.n_embd,
+        "condition_qmin": C.qmin,
+        "condition_qmax": C.qmax,
+    }
+    for key, expected in expected_values.items():
+        if key not in pretrained_config:
+            continue
+        actual = pretrained_config[key]
+        if isinstance(expected, float):
+            matches = math.isclose(float(actual), expected, rel_tol=0.0, abs_tol=1e-9)
+        else:
+            matches = actual == expected
+        if not matches:
+            raise ValueError(
+                f"pretrained condition encoder {key}={actual!r} does not match "
+                f"current config value {expected!r}"
+            )
+    state = checkpoint.get("encoder_state", checkpoint)
+    missing, unexpected = model.transformer.cond_embedding.load_state_dict(state, strict=False)
+    if missing or unexpected:
+        raise RuntimeError(
+            "pretrained condition encoder state did not match current encoder: "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+    if C.freeze_pretrained_condition_encoder:
+        for parameter in model.transformer.cond_embedding.parameters():
+            parameter.requires_grad = False
+        print("Pretrained condition encoder is frozen.", flush=True)
+
 def autocast_context(device_type, dtype):
     if device_type != "cuda":
         return nullcontext()
@@ -649,6 +696,8 @@ if __name__ == "__main__":
         dense_condition_n_tokens=C.dense_condition_n_tokens,
         peak_condition_n_tokens=C.peak_condition_n_tokens,
         peak_encoder_hidden_dim=C.peak_encoder_hidden_dim,
+        condition_qmin=C.qmin,
+        condition_qmax=C.qmax,
         condition_cross_attention=C.condition_cross_attention,
         condition_cross_attention_every_n_layers=C.condition_cross_attention_every_n_layers,
         pxrd_encoder_channels=C.pxrd_encoder_channels,
@@ -706,6 +755,8 @@ if __name__ == "__main__":
 
     # Send model to device
     model.to(C.device)
+    if C.init_from == "scratch":
+        load_pretrained_condition_encoder(C, model)
 
     # initialize a GradScaler; if enabled=False scaler is a no-op
     scaler = make_grad_scaler(device_type, C.dtype)

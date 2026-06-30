@@ -38,6 +38,8 @@ class DeciferConfig:
     dense_condition_n_tokens: int = 16
     peak_condition_n_tokens: int = 16
     peak_encoder_hidden_dim: int = 128
+    condition_qmin: float = 0.0
+    condition_qmax: float = 10.0
     condition_cross_attention: bool = False
     condition_cross_attention_every_n_layers: int = 1
     pxrd_encoder_channels: int = 64
@@ -288,6 +290,8 @@ class PeakListEncoder(nn.Module):
     def __init__(self, config: DeciferConfig, n_tokens: Optional[int] = None):
         super().__init__()
         self.n_tokens = n_tokens or config.condition_n_tokens
+        self.qmin = float(config.condition_qmin)
+        self.qrange = max(float(config.condition_qmax) - self.qmin, 1e-6)
         self.peak_mlp = nn.Sequential(
             nn.Linear(2, config.peak_encoder_hidden_dim, bias=config.bias),
             nn.GELU(),
@@ -315,8 +319,8 @@ class PeakListEncoder(nn.Module):
         if peak_iq.numel() > 0:
             iq_scale = peak_iq.amax(dim=1, keepdim=True).clamp_min(1e-16)
             peak_iq = peak_iq / iq_scale
-        q_scale = peak_q.amax(dim=1, keepdim=True).clamp_min(1e-16)
-        peak_features = torch.stack((peak_q / q_scale, peak_iq), dim=-1)
+        peak_q = ((peak_q - self.qmin) / self.qrange).clamp(0.0, 1.0)
+        peak_features = torch.stack((peak_q, peak_iq), dim=-1)
         peak_emb = self.peak_mlp(peak_features)
         peak_emb = peak_emb.masked_fill(~valid.unsqueeze(-1), 0.0)
 
@@ -359,6 +363,31 @@ def _replace_condition_tokens(config: DeciferConfig, n_tokens: int) -> DeciferCo
     )
 
 
+def build_condition_encoder(config: DeciferConfig) -> nn.Module:
+    if config.condition_encoder == "mlp":
+        return nn.Sequential(
+            nn.Linear(config.condition_size, config.condition_embedder_hidden_layers[0]),
+            nn.ReLU(),
+            *[
+                nn.Sequential(nn.Linear(hidden_size, hidden_size), nn.ReLU())
+                for hidden_size in config.condition_embedder_hidden_layers[:-1]
+            ],
+            nn.Linear(config.condition_embedder_hidden_layers[-1], config.n_embd * config.condition_n_tokens)
+        )
+    if config.condition_encoder == "conv":
+        return PxrdConvEncoder(config)
+    if config.condition_encoder == "peak":
+        return PeakListEncoder(config)
+    if config.condition_encoder == "hybrid":
+        if config.condition_n_tokens != config.dense_condition_n_tokens + config.peak_condition_n_tokens:
+            raise ValueError(
+                "condition_n_tokens must equal dense_condition_n_tokens + peak_condition_n_tokens "
+                "for condition_encoder='hybrid'"
+            )
+        return HybridPxrdEncoder(config)
+    raise ValueError(f"unknown condition_encoder: {config.condition_encoder}")
+
+
 class Decifer(nn.Module):
 
     def __init__(self, config: DeciferConfig):
@@ -392,29 +421,7 @@ class Decifer(nn.Module):
 
         # Condtional embedding: either dense PXRD, sparse peak-list, or hybrid encoders.
         if config.condition:
-            if config.condition_encoder == "mlp":
-                cond_embedding = nn.Sequential(
-                    nn.Linear(config.condition_size, config.condition_embedder_hidden_layers[0]),
-                    nn.ReLU(),
-                    *[
-                        nn.Sequential(nn.Linear(hidden_size, hidden_size), nn.ReLU())
-                        for hidden_size in config.condition_embedder_hidden_layers[:-1]
-                    ],
-                    nn.Linear(config.condition_embedder_hidden_layers[-1], config.n_embd * config.condition_n_tokens)
-                )
-            elif config.condition_encoder == "conv":
-                cond_embedding = PxrdConvEncoder(config)
-            elif config.condition_encoder == "peak":
-                cond_embedding = PeakListEncoder(config)
-            elif config.condition_encoder == "hybrid":
-                if config.condition_n_tokens != config.dense_condition_n_tokens + config.peak_condition_n_tokens:
-                    raise ValueError(
-                        "condition_n_tokens must equal dense_condition_n_tokens + peak_condition_n_tokens "
-                        "for condition_encoder='hybrid'"
-                    )
-                cond_embedding = HybridPxrdEncoder(config)
-            else:
-                raise ValueError(f"unknown condition_encoder: {config.condition_encoder}")
+            cond_embedding = build_condition_encoder(config)
         else:
             cond_embedding = nn.Identity() # nn's version of None
 

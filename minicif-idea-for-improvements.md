@@ -15,12 +15,47 @@ Purpose: collect concrete ideas for improving the current deCIFer codebase, mode
 - 2026-06-28: Verified conditioned attention masking with a regression test for packed minicif records, added minicif-to-structure rendering, and added `bin/visualize_minicif.py` for learning curves plus validation/test match-rate and Rwp reports.
 - 2026-06-28: Added structured training metrics logs (`metrics.jsonl` and `metrics.csv`) and created `minicif-features-vs-decifer.md` to summarize core minicif changes relative to deCIFer.
 - 2026-06-29: Added follow-up ideas around COD data, more realistic PXRD simulation, multi-phase generation, on-the-fly synthetic minicifs, and stronger lattice/space-group constraints.
+- 2026-06-30: Added peak-list and hybrid PXRD conditioning, true cross-attention conditioning, small conditioning-ablation configs, sequential ablation SLURM workflow, and extended minicif evaluation with multiple prompt modes, finish rate, generated-token length, and extra/missing element metrics.
 
 ## Review assumptions
 
 - This file is an idea backlog, not a commitment to implement everything.
 - Immediate items below are based on a code read of `bin/train.py` and the model interface in `decifer/decifer_model.py`.
 - Priority means expected value for stabilizing or accelerating experiments, not necessarily scientific novelty.
+
+## Research-backed top-five model directions
+
+These are the current highest-value directions after checking recent PXRD/crystal-generation and preference-optimization work.
+
+1. Rwp reranking and preference fine-tuning.
+   Use the forward PXRD simulator as an expert scorer: generate K candidates, parse/build structures, compute Rwp, rerank, then build preferred/rejected pairs for DPO/IPO-style fine-tuning. This is the fastest way to exploit the end metric without unstable online RL.
+
+2. Contrastive PXRD encoder pretraining.
+   Train the PXRD encoder before autoregressive training so two augmented views of the same structure are close and different structures are far apart. This directly addresses the weakness that next-token loss alone gives the PXRD encoder a delayed and noisy learning signal.
+
+3. Q-aware and alignment-aware PXRD tokens.
+   Preserve local q position, peak spacing, q-shift/q-scale calibration, and dense trace shape with q-aware patches, peak-list tokens, and pre-alignment/multi-view shifted encodings.
+
+4. Explicit component/composition conditioning.
+   PXRD is ambiguous. If element sets, formula, crystal system, or approximate cell hints are available, encode them as structured condition memory instead of only placing them in the autoregressive text prefix.
+
+5. Structure-space refinement after minicif proposal.
+   Keep minicif as a fast proposal generator, then refine/rerank in structure space using lattice/PXRD agreement. This captures some benefits of structure-native diffusion/refinement methods without replacing the current model.
+
+Implementation order:
+- Start with contrastive PXRD pretraining and Rwp reranking because both can reuse the current model and evaluation stack.
+- Add q-aware/alignment-aware tokens after we know which of `conv`, `peak`, and `hybrid` wins the small ablation.
+- Add composition conditioning once we quantify extra/missing element errors across prompt modes.
+- Keep full structure-native generation as a later project; use post-generation refinement first.
+
+Research pointers:
+- DPO for preference fine-tuning: `https://arxiv.org/abs/2305.18290`
+- Classifier-free guidance: `https://arxiv.org/abs/2207.12598`
+- DiffCSP structure-native diffusion: `https://arxiv.org/abs/2309.04475`
+- EquiCSP equivariant crystal generation: `https://proceedings.mlr.press/v235/lin24b.html`
+- MatterGen conditional materials generation: `https://www.nature.com/articles/s41586-025-08628-5`
+- XtalNet/PXRD-conditioned generation direction: `https://arxiv.org/abs/2401.03862`
+- PXRDGen-style encoder/generator/refinement direction: `https://arxiv.org/abs/2409.04727`
 
 ## Immediate `bin/train.py` improvements
 
@@ -187,18 +222,102 @@ Verification:
   Experiment: implement a small PXRD encoder producing 32-128 latent tokens; add cross-attention blocks every N transformer layers or prefix the latents as non-generated memory tokens. Compare validation loss, generated structure validity, and PXRD agreement at fixed parameter count.
 
   Current implementation:
-  - Added `condition_encoder: mlp|conv`.
+  - Added `condition_encoder: mlp|conv|peak|hybrid`.
   - Added `condition_n_tokens`, allowing either encoder to emit multiple non-generated condition tokens per `<mcif>` start.
   - Added a compact 1D convolutional PXRD encoder with adaptive pooling over q-space, projection to transformer width, and learned latent-token positions.
+  - Added a sparse peak-list encoder over padded `xrd_disc.q`/`xrd_disc.iq` inputs.
+  - Added a hybrid encoder that concatenates dense-trace tokens and peak-list tokens.
   - Kept condition insertion aligned with packed batches by inserting the latent tokens at each start token, rather than adding one prefix for the whole row.
+  - Added true cross-attention from CIF tokens into PXRD memory tokens with `condition_cross_attention: True`.
+  - Added small ablation configs comparing no conditioning, dense insert, peak insert, hybrid insert, dense cross-attention, and hybrid cross-attention.
 
   Still needed:
-  - True cross-attention from CIF tokens into PXRD memory tokens.
-  - Peak-list or patch-aware encoders that preserve explicit q coordinates rather than only dense-grid intensity order.
+  - Compare ablation results at matched token budget, wall time, and parameter count.
+  - Add q-coordinate-aware patch encoders that preserve local q position and width information better than adaptive pooling.
+  - Add explicit composition/component channels so the PXRD encoder does not have to infer chemistry from diffraction alone.
+  - Add pre-alignment or calibration handling for q-shift/q-scale before or inside the conditioning encoder.
 
 - P0 - Add composition and lattice priors as explicit conditioning channels.
   PXRD alone is ambiguous, and CIF generation has hard chemistry/geometric constraints. If composition, formula, crystal system, or approximate cell parameters are available at generation time, encode them separately instead of expecting the language model to infer everything from diffraction.
   Experiment: train variants with PXRD-only, PXRD+composition, PXRD+space-group/crystal-system, and PXRD+cell hints. Measure validity and ambiguity reduction on held-out structures.
+
+- P0 - Add component-aware conditioning rather than only prompt text.
+  Current evaluation can prompt with known elements (`pxrd-elements`) and reports extra/missing element errors, but the training-time conditioning path still treats PXRD as the only external signal. If components/elements are known at inference time, they should be encoded as structured condition tokens as well as being present in the autoregressive prefix.
+
+  Candidate design:
+  - Add an element-set encoder that embeds a binary 118-element vector, a sorted element list, or a stoichiometric formula vector.
+  - Concatenate component tokens with PXRD memory tokens for cross-attention.
+  - Add classifier-free component dropout during training: sometimes provide PXRD only, sometimes PXRD+elements, sometimes PXRD+formula/crystal-system.
+  - Keep the existing generation mask that prevents atom elements outside the prefix, but make the model's hidden state aware of the component constraint before it generates the prefix.
+
+  Experiment:
+  - Compare `PXRD`, `PXRD+element-set`, `PXRD+formula`, and `PXRD+formula+crystal-system`.
+  - Use the existing `mean_extra_elements`, `mean_missing_elements`, `element_set_accuracy`, `finish_rate`, and `best_of_k_match_rate` metrics.
+  - Pay special attention to `pxrd-elements`: if explicit component conditioning works, extra elements should drop without sacrificing Rwp.
+
+- P0 - Pre-align or calibrate PXRD conditioning before the encoder.
+  Real and simulated patterns can be offset by zero shift, sample displacement, wavelength mismatch, or q-scale calibration errors. The current augmentation teaches robustness through random `q_shift` and `q_scale`, but the encoder still receives a raw pattern. A lightweight pre-alignment stage may make conditioning easier, especially for peak-list or hybrid conditioning.
+
+  Candidate designs:
+  - Deterministic preprocessing: normalize to q, subtract smooth background, resample to the training grid, and optionally estimate global q-shift/q-scale from prominent peaks.
+  - Learned alignment head: predict small `delta_q` and `scale_q` from the dense trace or peak list, then warp the dense trace and peak positions before encoding.
+  - Multi-view alignment: encode several shifted/scaled views and pool or cross-attend over them so the model can choose the best calibration.
+  - Peak-set alignment: for peak-list conditioning, use q-coordinate embeddings plus relative peak-spacing features so the model is less brittle to absolute calibration.
+
+  Component-aware variant:
+  - If elements or formula are known, use them only as a prior over plausible phases and cell scales, not as target leakage.
+  - Train/evaluate four variants: raw PXRD, aligned PXRD, PXRD+components, aligned PXRD+components.
+  - Report whether alignment helps most in `pxrd` mode, while components help most in `pxrd-elements` mode.
+
+  Verification:
+  - Create an evaluation sweep with known synthetic q-shift/q-scale offsets.
+  - Plot match rate and Rwp versus shift magnitude.
+  - Confirm the alignment step improves shifted validation without hurting clean validation.
+  - For real PXRD, log estimated shift/scale and inspect outliers rather than silently trusting the alignment.
+
+- P0 - Add a real-PXRD preprocessing front end.
+  Real PXRD input will not arrive as clean simulated peak positions. It will usually be intensity versus two-theta or q, with background, noise, broad peaks, missing ranges, instrument metadata, and sometimes mixtures. The peak-list encoder therefore needs a preprocessing path that can derive peak positions from raw measured traces while still preserving the dense trace.
+
+  Proposed pipeline:
+  - Convert two-theta to q using wavelength metadata when available.
+  - Resample to the training q-grid.
+  - Normalize intensity robustly.
+  - Estimate and subtract background.
+  - Detect peaks with width/prominence thresholds.
+  - Pass both the processed dense trace and detected peak list to `condition_encoder: hybrid`.
+  - Save preprocessing metadata next to evaluation outputs: wavelength, q range, background settings, detected peak count, and any q-shift/q-scale correction.
+
+  Experiment:
+  - Start with synthetic traces corrupted by known backgrounds, noise, shifts, and missing ranges so the correct target is known.
+  - Then evaluate on a small curated real-PXRD set where phase identity and approximate composition are known.
+
+- P1 - Replace adaptive dense pooling with q-aware patch tokens.
+  The current convolutional encoder compresses a dense trace with adaptive pooling. This is simple, but pooled bins can blur exact peak positions. A patch encoder can emit tokens for local q windows with explicit q-center embeddings.
+
+  Candidate designs:
+  - Split the q-grid into fixed windows and project `[intensity patch, q_center, q_width]`.
+  - Use Fourier or radial-basis q encodings.
+  - Add local conv layers before patch projection.
+  - Cross-attend from CIF tokens to these q-aware patch tokens.
+
+  Experiment: compare q-aware patches against `conv_cross` and `hybrid_cross` at matched parameter count.
+
+- P0 - Preserve absolute q positions in peak-list conditioning.
+  The first peak-list encoder normalized q positions by the maximum q value inside each sample. That makes peak sets such as `[1, 2]` and `[2, 4]` look identical in q-space even though they imply different d-spacings and cells. Peak intensities can be row-normalized, but q positions need a fixed global reference.
+
+  Current implementation:
+  - Peak q values are normalized with the configured training q range (`condition_qmin`, `condition_qmax`) instead of per-row max q.
+  - `bin/train.py` passes the configured `qmin`/`qmax` into `DeciferConfig`.
+  - Added a CPU regression test that checks shifted/scaled peak positions produce different peak tokens.
+
+  Immediate local feedback:
+  - Unit tests catch whether the encoder collapses absolute q shifts.
+  - A tiny synthetic overfit run can check whether peak-only conditioning can associate two structures with identical relative peak ratios but different absolute q scales.
+
+- P1 - Add peak-width and uncertainty channels.
+  Peak positions and intensities alone omit information about broadening, overlap, and confidence. The real-PXRD peak picker should be able to provide approximate width, prominence, and detection confidence.
+
+  Experiment: extend peak tokens from `[q, iq]` to `[q, iq, width, prominence, confidence]`, with zero-filled missing channels for simulated data.
 
 - P1 - Use a structure-aware decoder head or constrained field heads for numeric CIF values.
   Autoregressive text loss treats CIF numbers as character/token strings. Lattice constants, angles, fractional coordinates, occupancies, and symmetry labels have different semantics. Minicif could keep text generation for syntax but add auxiliary heads for key numeric fields, or generate an intermediate structured representation before formatting CIF.
@@ -248,6 +367,38 @@ Verification:
   - For structured numeric fields, explore differentiable losses on predicted cell/coordinate distributions before token sampling, but avoid pretending this is full Rwp backprop unless the renderer/simulator path is differentiable.
 
   Experiment: start with offline candidate generation and preference fine-tuning before RL. Generate K candidates per training/validation PXRD, compute validity and Rwp, build preferred/rejected pairs, and compare post-fine-tune best-of-K Rwp and match rate against the supervised baseline.
+
+- P0 - Expert reinforcement learning from Rwp signal.
+  Treat Rwp as an expert/scorer signal, but do not start with online RL. Rwp is expensive, noisy, and only meaningful after a candidate parses, builds a structure, and can be forward-simulated. The practical path is to use it first for reranking and offline preference construction.
+
+  Stage 1: Rwp reranking baseline.
+  - Generate K candidates for each PXRD.
+  - Parse valid minicifs, build structures, simulate PXRD, and compute Rwp.
+  - Rank by `Rwp + invalid_penalty + wrong_element_penalty + unfinished_penalty + geometry_penalty`.
+  - Report random/top-1 vs best-by-Rwp vs best-valid-by-Rwp.
+  - If best-of-K is good but ordinary samples are bad, the model has useful support and preference training is worth doing.
+  - If best-of-K is also poor, improve conditioning/model/data first.
+
+  Stage 2: offline preference dataset.
+  - For each input PXRD, store candidate minicifs, parse status, structure status, Rwp, element match, crystal-system match, and finish status.
+  - Build pairs where `preferred` is lower-Rwp and valid, while `rejected` is invalid, unfinished, wrong-composition, or higher-Rwp.
+  - Fine-tune with DPO/IPO-style preference loss instead of unstable online policy gradients.
+  - Keep a KL/reference term so the model does not drift away from minicif syntax.
+
+  Stage 3: expert critic / reward model.
+  - Train a small critic to predict Rwp or pairwise preference from PXRD condition plus generated minicif tokens and cheap parse features.
+  - Use it as a fast reranker before expensive full PXRD simulation.
+  - Optionally distill the critic signal into the generator as an auxiliary loss.
+
+  Stage 4: online RL only if needed.
+  - Reward can combine `-Rwp`, parse/structure bonuses, finish bonus, element consistency, crystal-system consistency, reasonable cell constraints, and duplicate penalties.
+  - Keep this late because every reward evaluation requires generation, parsing, structure construction, and simulation.
+  - Start with a frozen or slowly updated reward model, not raw online Rwp for every sampled sequence.
+
+  Immediate local feedback:
+  - Use a small checkpoint and `--max-items 5 --num-reps 8` evaluation to see whether best-by-Rwp beats ordinary sampling.
+  - Write the candidate table to CSV and inspect whether low-Rwp candidates are valid but under-ranked, or whether the generator never reaches low-Rwp structures.
+  - This can run on CPU for a tiny subset and tells us whether Rwp preference tuning is likely to help before spending cluster time.
 
 - P2 - Try EMA checkpoints for generation.
   An exponential moving average of weights often improves sample quality even when validation loss is similar.
@@ -428,6 +579,23 @@ Verification:
   Add systematic temperature/top-p/top-k sweeps and diversity penalties so best-of-K sampling explores genuinely different structures rather than formatting variants.
 
 ### Experiment infrastructure
+
+- P0 - Add local CPU feedback tests for model ideas before cluster training.
+  Not every model idea can be validated without a GPU, but several failure modes can be caught locally before launching expensive runs.
+
+  Useful local checks:
+  - Shape/finite tests for every conditioning path: `mlp`, `conv`, `peak`, `hybrid`, insertion, and cross-attention.
+  - Conditioning sensitivity tests: changing PXRD or peak positions should change condition tokens and logits.
+  - Invariance tests: padding order should not change peak-list outputs, while absolute q shifts should change them.
+  - Tiny overfit tests on a synthetic HDF5 dataset: train for 20-100 CPU iterations and verify loss decreases.
+  - Swap-condition tests after tiny overfit: the correct condition should score lower loss than a mismatched condition.
+  - Best-of-K Rwp smoke test on 5-10 validation samples: check whether reranking by forward-simulated Rwp beats random sampling.
+  - Parameter-count and CPU step-time reports for candidate blocks before GPU runs.
+
+  Interpreting results:
+  - Passing these tests does not prove a model will improve on the cluster.
+  - Failing these tests is strong evidence the idea is broken or underspecified.
+  - These checks are especially useful for conditioning changes because they reveal collapsed or ignored condition signals.
 
 - P0 - Create a tiny committed smoke dataset or synthetic test fixture.
   A minimal HDF5 fixture would let training, evaluation, checkpoint resume, and conditioning alignment be tested without access to NOMA data.
