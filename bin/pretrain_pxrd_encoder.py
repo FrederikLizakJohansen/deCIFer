@@ -12,14 +12,20 @@ import yaml
 from dataclasses import asdict, dataclass, field
 from typing import List
 
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
+faulthandler.enable()
+
 import numpy as np
 import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
 from torch.nn.utils.rnn import pad_sequence
-from torch.utils.data import DataLoader, RandomSampler
+from torch.utils.data import DataLoader, Dataset, RandomSampler
 
-from decifer.decifer_dataset import DeciferDataset
 from decifer.decifer_model import DeciferConfig, build_condition_encoder
 from decifer.pxrd import discrete_to_continuous_xrd, nyquist_qstep
 
@@ -33,6 +39,9 @@ class PxrdEncoderPretrainConfig:
     num_workers_dataloader: int = 4
     dataloader_multiprocessing_context: str = "spawn"
     pin_memory: bool = False
+    preload_dataset_to_memory: bool = False
+    synthetic_debug_data: bool = False
+    synthetic_debug_size: int = 256
     max_iters: int = 10_000
     eval_interval: int = 500
     log_interval: int = 20
@@ -99,7 +108,6 @@ class PxrdEncoderPretrainConfig:
 
 
 def parse_config():
-    faulthandler.enable()
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     args = parser.parse_args()
@@ -221,6 +229,50 @@ class ContrastivePxrdModel(nn.Module):
         tokens = self.encoder(condition)
         pooled = tokens.mean(dim=1)
         return nn.functional.normalize(self.projector(pooled), dim=-1)
+
+
+class InMemoryPxrdDataset(Dataset):
+    def __init__(self, h5_path):
+        from decifer.decifer_dataset import DeciferDataset
+
+        source = DeciferDataset(h5_path, ["xrd.q", "xrd.iq"], lazy_open=False)
+        try:
+            self.rows = []
+            for index in range(len(source)):
+                row = source[index]
+                self.rows.append({
+                    "xrd.q": row["xrd.q"].clone(),
+                    "xrd.iq": row["xrd.iq"].clone(),
+                })
+        finally:
+            source.close()
+
+    def __len__(self):
+        return len(self.rows)
+
+    def __getitem__(self, index):
+        return self.rows[index]
+
+
+class SyntheticPxrdDataset(Dataset):
+    def __init__(self, size, qmin, qmax, seed):
+        self.rows = []
+        rng = np.random.default_rng(seed)
+        for _ in range(size):
+            n_peaks = int(rng.integers(32, 129))
+            q = np.sort(rng.uniform(qmin + 0.1, qmax - 0.1, size=n_peaks)).astype(np.float32)
+            iq = rng.lognormal(mean=0.0, sigma=0.8, size=n_peaks).astype(np.float32)
+            iq = iq / max(float(iq.max()), 1e-6)
+            self.rows.append({
+                "xrd.q": torch.tensor(q, dtype=torch.float32),
+                "xrd.iq": torch.tensor(iq, dtype=torch.float32),
+            })
+
+    def __len__(self):
+        return len(self.rows)
+
+    def __getitem__(self, index):
+        return self.rows[index]
 
 
 def nt_xent_loss(z1, z2, temperature):
@@ -419,7 +471,18 @@ def main():
     if config.num_workers_dataloader > 0 and config.dataloader_multiprocessing_context not in {"spawn", "forkserver"}:
         print("WARNING: HDF5 DataLoader workers are safest with multiprocessing context 'spawn' or 'forkserver'.", flush=True)
     dataset_path = os.path.join(config.dataset, "serialized", f"{config.split}.h5")
-    dataset = DeciferDataset(dataset_path, ["xrd.q", "xrd.iq"], lazy_open=config.num_workers_dataloader > 0)
+    if config.synthetic_debug_data:
+        print(f"Using synthetic debug PXRD data: {config.synthetic_debug_size} samples", flush=True)
+        dataset = SyntheticPxrdDataset(config.synthetic_debug_size, config.qmin, config.qmax, config.seed)
+    elif config.preload_dataset_to_memory:
+        print(f"Preloading PXRD HDF5 data into memory: {dataset_path}", flush=True)
+        dataset = InMemoryPxrdDataset(dataset_path)
+    else:
+        from decifer.decifer_dataset import DeciferDataset
+
+        dataset = DeciferDataset(dataset_path, ["xrd.q", "xrd.iq"], lazy_open=config.num_workers_dataloader > 0)
+    if len(dataset) < config.batch_size:
+        raise ValueError(f"dataset has {len(dataset)} samples, but batch_size is {config.batch_size} and drop_last is enabled")
     loader = DataLoader(
         dataset,
         batch_size=config.batch_size,

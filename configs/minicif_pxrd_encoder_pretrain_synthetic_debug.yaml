@@ -1,4 +1,4 @@
-out_dir: 'minicif_pxrd_encoder_pretrain_laptop_smoke'
+out_dir: 'minicif_pxrd_encoder_pretrain_synthetic_debug'
 dataset: 'data/noma'
 split: 'train'
 device: 'cuda'
@@ -9,11 +9,11 @@ batch_size: 32
 num_workers_dataloader: 0
 dataloader_multiprocessing_context: ''
 pin_memory: False
-preload_dataset_to_memory: True
-synthetic_debug_data: False
+preload_dataset_to_memory: False
+synthetic_debug_data: True
 synthetic_debug_size: 256
-max_iters: 100
-eval_interval: 50
+max_iters: 50
+eval_interval: 25
 log_interval: 5
 plot_interval: 25
 plot_window: 100

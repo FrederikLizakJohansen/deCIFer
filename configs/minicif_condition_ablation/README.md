@@ -347,14 +347,23 @@ sbatch minislurm/pretrain_pxrd_encoder.sh
 Or run it locally:
 
 ```bash
-python bin/pretrain_pxrd_encoder.py \
+PYTHONPATH=. python bin/pretrain_pxrd_encoder.py \
   --config configs/minicif_pxrd_encoder_pretrain_hybrid.yaml
 ```
 
-For a CUDA laptop smoke test, start with the safer config:
+For a CUDA laptop smoke test, first run the synthetic probe:
 
 ```bash
-python bin/pretrain_pxrd_encoder.py \
+PYTHONPATH=. python bin/pretrain_pxrd_encoder.py \
+  --config configs/minicif_pxrd_encoder_pretrain_synthetic_debug.yaml
+```
+
+This does not import or read HDF5 data. If it segfaults, debug the CUDA/PyTorch/model path first: try `device: 'cpu'`, lower `batch_size`, and keep `dtype: 'float32'`.
+
+Then run the real-data smoke config:
+
+```bash
+PYTHONPATH=. python bin/pretrain_pxrd_encoder.py \
   --config configs/minicif_pxrd_encoder_pretrain_hybrid_laptop_smoke.yaml
 ```
 
@@ -363,9 +372,12 @@ This uses:
 ```yaml
 num_workers_dataloader: 0
 pin_memory: False
+preload_dataset_to_memory: True
 dtype: 'float32'
 live_plot: False
 ```
+
+This reads `train.h5` into CPU memory once, closes the HDF5 file, and only then enters the CUDA training loop. If the synthetic probe works but this config segfaults, inspect the local HDF5/h5py stack or the serialized data file.
 
 If that works, turn options back on one at a time:
 
@@ -376,7 +388,7 @@ num_workers_dataloader: 2
 dataloader_multiprocessing_context: 'spawn'
 ```
 
-If pretraining segfaults, the first thing to try is `num_workers_dataloader: 0`. HDF5 plus PyTorch worker multiprocessing can crash at the C-library level on some Linux/CUDA laptop setups.
+For the full run, keep `dataloader_multiprocessing_context: 'spawn'` when `num_workers_dataloader > 0`. HDF5 plus PyTorch worker multiprocessing can crash at the C-library level on some Linux/CUDA laptop setups.
 
 Watch these files while it trains:
 
