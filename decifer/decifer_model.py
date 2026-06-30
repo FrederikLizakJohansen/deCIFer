@@ -8,7 +8,7 @@ CrystaLLM: https://github.com/lantunes/CrystaLLM/blob/main/crystallm/_model.py
 
 import math
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 from h5py._hl.files import sys
 from tqdm.auto import tqdm
 
@@ -35,6 +35,11 @@ class DeciferConfig:
     condition_size: int = 1000
     condition_encoder: str = "mlp"
     condition_n_tokens: int = 1
+    dense_condition_n_tokens: int = 16
+    peak_condition_n_tokens: int = 16
+    peak_encoder_hidden_dim: int = 128
+    condition_cross_attention: bool = False
+    condition_cross_attention_every_n_layers: int = 1
     pxrd_encoder_channels: int = 64
     pxrd_encoder_kernel_size: int = 7
     condition_embedder_hidden_layers: List[int] = field(default_factory=lambda: [512])
@@ -100,16 +105,17 @@ class CausalSelfAttention(nn.Module):
 
         #causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash and not return_attn:
+            dropout_p = self.dropout if self.training else 0.0
             if attention_bias is not None:
                 # Expand attention_bias to match the number of heads
                 attention_bias = attention_bias.unsqueeze(1) # Shape (B, 1, T, T)
                 attention_bias = attention_bias.expand(B, self.n_head, T, T)  # Expand to (B, n_head, T, T)
                 y = torch.nn.functional.scaled_dot_product_attention(
-                    q, k, v, attn_mask=attention_bias, dropout_p=self.dropout
+                    q, k, v, attn_mask=attention_bias, dropout_p=dropout_p
                 )
             else:
                 y = torch.nn.functional.scaled_dot_product_attention(
-                    q, k, v, attn_mask=None, dropout_p=self.dropout, is_causal=True,
+                    q, k, v, attn_mask=None, dropout_p=dropout_p, is_causal=True,
                 )
         else:
             # manual implementation of attention
@@ -132,6 +138,48 @@ class CausalSelfAttention(nn.Module):
             return y
         else:
             return y, att
+
+
+class CrossAttention(nn.Module):
+
+    def __init__(self, config: DeciferConfig):
+        super().__init__()
+        assert config.n_embd % config.n_head == 0
+        self.q_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.k_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.v_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.out_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.dropout = nn.Dropout(config.dropout)
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+        self.flash = hasattr(torch.nn.functional, "scaled_dot_product_attention")
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        memory: torch.Tensor,
+        attention_bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        B, T, C = x.size()
+        M = memory.size(1)
+        q = self.q_proj(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        k = self.k_proj(memory).view(B, M, self.n_head, C // self.n_head).transpose(1, 2)
+        v = self.v_proj(memory).view(B, M, self.n_head, C // self.n_head).transpose(1, 2)
+        if self.flash:
+            dropout_p = self.dropout.p if self.training else 0.0
+            if attention_bias is not None:
+                attention_bias = attention_bias.unsqueeze(1).expand(B, self.n_head, T, M)
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attention_bias, dropout_p=dropout_p)
+        else:
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            if attention_bias is not None:
+                att = att + attention_bias.unsqueeze(1)
+            att = F.softmax(att, dim=-1)
+            att = self.dropout(att)
+            y = att @ v
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        return self.dropout(self.out_proj(y))
+
 
 def gelu(x: torch.Tensor) -> torch.Tensor:
     """
@@ -164,14 +212,32 @@ class MLP(nn.Module):
 
 class Block(nn.Module):
 
-    def __init__(self, config: DeciferConfig):
+    def __init__(self, config: DeciferConfig, layer_index: int = 0):
         super().__init__()
+        self.config = config
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
         self.attn = CausalSelfAttention(config)
+        self.use_cross_attention = (
+            config.condition
+            and config.condition_cross_attention
+            and config.condition_cross_attention_every_n_layers > 0
+            and layer_index % config.condition_cross_attention_every_n_layers == 0
+        )
+        if self.use_cross_attention:
+            self.ln_cross = LayerNorm(config.n_embd, bias=config.bias)
+            self.cross_attn = CrossAttention(config)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
-    def forward(self, x: torch.Tensor, attention_bias: Optional[torch.Tensor] = None, return_attn: bool = False, print_parameters: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor]]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        attention_bias: Optional[torch.Tensor] = None,
+        cross_memory: Optional[torch.Tensor] = None,
+        cross_attention_bias: Optional[torch.Tensor] = None,
+        return_attn: bool = False,
+        print_parameters: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor]]:
         """
         Forward pass for the Transformer Block module. A Block module includes causal self-attention,
         layer normalization, and MLP, and residual connections.
@@ -181,11 +247,15 @@ class Block(nn.Module):
         """
         if not return_attn:
             x = x + self.attn(self.ln_1(x), attention_bias)
+            if self.use_cross_attention and cross_memory is not None:
+                x = x + self.cross_attn(self.ln_cross(x), cross_memory, cross_attention_bias)
             x = x + self.mlp(self.ln_2(x))
             return x
         else:
             y, att = self.attn(self.ln_1(x), attention_bias, return_attn=return_attn)
             x = x + y
+            if self.use_cross_attention and cross_memory is not None:
+                x = x + self.cross_attn(self.ln_cross(x), cross_memory, cross_attention_bias)
             x = x + self.mlp(self.ln_2(x))
             return x, att
 
@@ -211,6 +281,82 @@ class PxrdConvEncoder(nn.Module):
         x = self.conv(x)
         x = x.transpose(1, 2)
         return self.proj(x) + self.token_pos
+
+
+class PeakListEncoder(nn.Module):
+
+    def __init__(self, config: DeciferConfig, n_tokens: Optional[int] = None):
+        super().__init__()
+        self.n_tokens = n_tokens or config.condition_n_tokens
+        self.peak_mlp = nn.Sequential(
+            nn.Linear(2, config.peak_encoder_hidden_dim, bias=config.bias),
+            nn.GELU(),
+            nn.Linear(config.peak_encoder_hidden_dim, config.n_embd, bias=config.bias),
+        )
+        self.token_queries = nn.Parameter(torch.zeros(self.n_tokens, config.n_embd))
+        self.q_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.k_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.v_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.out_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+
+    def forward(
+        self,
+        peak_q: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        peak_iq: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if isinstance(peak_q, dict):
+            peak_iq = peak_q["peak_iq"]
+            peak_q = peak_q["peak_q"]
+        if peak_iq is None:
+            raise ValueError("peak_iq is required for peak-list conditioning")
+        valid = peak_q != 0
+        if peak_iq.numel() > 0:
+            iq_scale = peak_iq.amax(dim=1, keepdim=True).clamp_min(1e-16)
+            peak_iq = peak_iq / iq_scale
+        q_scale = peak_q.amax(dim=1, keepdim=True).clamp_min(1e-16)
+        peak_features = torch.stack((peak_q / q_scale, peak_iq), dim=-1)
+        peak_emb = self.peak_mlp(peak_features)
+        peak_emb = peak_emb.masked_fill(~valid.unsqueeze(-1), 0.0)
+
+        B, P, C = peak_emb.size()
+        queries = self.token_queries.unsqueeze(0).expand(B, -1, -1)
+        q = self.q_proj(queries).view(B, self.n_tokens, self.n_head, C // self.n_head).transpose(1, 2)
+        k = self.k_proj(peak_emb).view(B, P, self.n_head, C // self.n_head).transpose(1, 2)
+        v = self.v_proj(peak_emb).view(B, P, self.n_head, C // self.n_head).transpose(1, 2)
+        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+        att = att.masked_fill(~valid.view(B, 1, 1, P), float("-inf"))
+        all_invalid = ~valid.any(dim=1)
+        if all_invalid.any():
+            att[all_invalid] = 0.0
+        att = F.softmax(att, dim=-1)
+        att = torch.where(torch.isfinite(att), att, torch.zeros_like(att))
+        y = att @ v
+        y = y.transpose(1, 2).contiguous().view(B, self.n_tokens, C)
+        return self.out_proj(y)
+
+
+class HybridPxrdEncoder(nn.Module):
+
+    def __init__(self, config: DeciferConfig):
+        super().__init__()
+        self.dense_encoder = PxrdConvEncoder(_replace_condition_tokens(config, config.dense_condition_n_tokens))
+        self.peak_encoder = PeakListEncoder(config, n_tokens=config.peak_condition_n_tokens)
+
+    def forward(self, cond: Dict[str, torch.Tensor]) -> torch.Tensor:
+        dense_tokens = self.dense_encoder(cond["dense"])
+        peak_tokens = self.peak_encoder(cond["peak_q"], cond["peak_iq"])
+        return torch.cat((dense_tokens, peak_tokens), dim=1)
+
+
+def _replace_condition_tokens(config: DeciferConfig, n_tokens: int) -> DeciferConfig:
+    return DeciferConfig(
+        **{
+            **config.__dict__,
+            "condition_n_tokens": n_tokens,
+        }
+    )
 
 
 class Decifer(nn.Module):
@@ -244,7 +390,7 @@ class Decifer(nn.Module):
         if config.pxrd_encoder_kernel_size < 1:
             raise ValueError("pxrd_encoder_kernel_size must be >= 1")
 
-        # Condtional embedding: either using straight MLP or a small PXRD convolutional encoder.
+        # Condtional embedding: either dense PXRD, sparse peak-list, or hybrid encoders.
         if config.condition:
             if config.condition_encoder == "mlp":
                 cond_embedding = nn.Sequential(
@@ -258,6 +404,15 @@ class Decifer(nn.Module):
                 )
             elif config.condition_encoder == "conv":
                 cond_embedding = PxrdConvEncoder(config)
+            elif config.condition_encoder == "peak":
+                cond_embedding = PeakListEncoder(config)
+            elif config.condition_encoder == "hybrid":
+                if config.condition_n_tokens != config.dense_condition_n_tokens + config.peak_condition_n_tokens:
+                    raise ValueError(
+                        "condition_n_tokens must equal dense_condition_n_tokens + peak_condition_n_tokens "
+                        "for condition_encoder='hybrid'"
+                    )
+                cond_embedding = HybridPxrdEncoder(config)
             else:
                 raise ValueError(f"unknown condition_encoder: {config.condition_encoder}")
         else:
@@ -268,7 +423,7 @@ class Decifer(nn.Module):
             wte=nn.Embedding(config.vocab_size, config.n_embd),
             wpe=nn.Embedding(config.block_size, config.n_embd),
             drop=nn.Dropout(config.dropout),
-            h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            h=nn.ModuleList([Block(config, layer_index=i) for i in range(config.n_layer)]),
             ln_f=LayerNorm(config.n_embd, bias=config.bias),
         ))
 
@@ -327,7 +482,7 @@ class Decifer(nn.Module):
 
     def _condition_embeddings(
         self,
-        cond_vec: Optional[torch.Tensor],
+        cond_vec: Optional[Union[torch.Tensor, Dict[str, torch.Tensor]]],
         custom_cond_emb: Optional[torch.Tensor],
         dtype: torch.dtype,
     ) -> torch.Tensor:
@@ -347,10 +502,40 @@ class Decifer(nn.Module):
             )
         return cond_emb
 
+    def _build_condition_memory(
+        self,
+        cond_emb: torch.Tensor,
+        start_indices_batch: List[List[int]],
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        memory_counts = [len(starts) * self.config.condition_n_tokens for starts in start_indices_batch]
+        max_memory = max(max(memory_counts), 1)
+        memory = torch.zeros(
+            (len(start_indices_batch), max_memory, self.config.n_embd),
+            dtype=dtype,
+            device=device,
+        )
+        memory_group_ids = torch.zeros(
+            (len(start_indices_batch), max_memory),
+            dtype=torch.long,
+            device=device,
+        )
+        cond_index = 0
+        for row_idx, start_indices in enumerate(start_indices_batch):
+            memory_pos = 0
+            for local_index, _ in enumerate(start_indices):
+                end_pos = memory_pos + self.config.condition_n_tokens
+                memory[row_idx, memory_pos:end_pos] = cond_emb[cond_index]
+                memory_group_ids[row_idx, memory_pos:end_pos] = local_index + 1
+                memory_pos = end_pos
+                cond_index += 1
+        return memory, memory_group_ids
+
     def forward(
         self,
         idx: torch.Tensor,
-        cond_vec: Optional[torch.Tensor] = None,
+        cond_vec: Optional[Union[torch.Tensor, Dict[str, torch.Tensor]]] = None,
         targets: Optional[torch.Tensor] = None,
         start_indices_batch: List[List[int]] = [[0]],
         custom_cond_emb: Optional[torch.Tensor] = None,
@@ -373,8 +558,53 @@ class Decifer(nn.Module):
 
         # Initialize variables
         attention_bias = None
+        cross_memory = None
+        cross_attention_bias = None
             
-        if self.config.condition:
+        if self.config.condition and self.config.condition_cross_attention:
+            start_indices_batch = [
+                [int(start) for start in start_indices if 0 <= int(start) < t]
+                for start_indices in start_indices_batch
+            ]
+            num_starts_per_seq = torch.tensor([len(s) for s in start_indices_batch], dtype=torch.long, device=device)
+            total_starts = int(num_starts_per_seq.sum().item())
+            cond_emb = self._condition_embeddings(cond_vec, custom_cond_emb, ptdtype)
+            if cond_emb.size(0) < total_starts:
+                raise RuntimeError(
+                    f"conditioning alignment error: {cond_emb.size(0)} condition embeddings "
+                    f"for {total_starts} start tokens"
+                )
+
+            start_mask = torch.zeros((b, t), dtype=torch.long, device=device)
+            for i, start_indices in enumerate(start_indices_batch):
+                valid_indices = torch.tensor(start_indices, dtype=torch.long, device=device)
+                valid_indices = valid_indices[(valid_indices >= 0) & (valid_indices < t)]
+                start_mask[i, valid_indices] = 1
+            group_ids = torch.cumsum(start_mask, dim=1)
+
+            causal_mask = positions.unsqueeze(2) >= positions.unsqueeze(1)
+            group_mask = group_ids.unsqueeze(2) == group_ids.unsqueeze(1)
+            attention_mask = causal_mask & group_mask
+            attention_bias = torch.where(
+                attention_mask,
+                torch.zeros(1, dtype=ptdtype, device=device),
+                torch.full((1,), float("-inf"), dtype=ptdtype, device=device),
+            )
+
+            cross_memory, memory_group_ids = self._build_condition_memory(
+                cond_emb[:total_starts],
+                start_indices_batch,
+                ptdtype,
+                device,
+            )
+            cross_mask = group_ids.unsqueeze(2) == memory_group_ids.unsqueeze(1)
+            cross_attention_bias = torch.where(
+                cross_mask,
+                torch.zeros(1, dtype=ptdtype, device=device),
+                torch.full((1,), float("-inf"), dtype=ptdtype, device=device),
+            )
+
+        elif self.config.condition:
             start_indices_batch = [
                 [int(start) for start in start_indices if 0 <= int(start) < t]
                 for start_indices in start_indices_batch
@@ -463,7 +693,7 @@ class Decifer(nn.Module):
 
                 start_mask = torch.zeros((b, t), dtype=torch.long, device=device)
                 for i, start_indices in enumerate(start_indices_batch):
-                    valid_indices = torch.tensor(start_indices, device=device)
+                    valid_indices = torch.tensor(start_indices, dtype=torch.long, device=device)
                     valid_indices = valid_indices[(valid_indices >= 0) & (valid_indices < t)]
                     start_mask[i, valid_indices] = 1
                 group_ids = torch.cumsum(start_mask, dim=1)
@@ -483,16 +713,28 @@ class Decifer(nn.Module):
         self.attn_scores = [] if capture_attention else None
         for i, block in enumerate(self.transformer.h):
             if capture_attention:
-                x, att = block(x, attention_bias=attention_bias, return_attn=True)
+                x, att = block(
+                    x,
+                    attention_bias=attention_bias,
+                    cross_memory=cross_memory,
+                    cross_attention_bias=cross_attention_bias,
+                    return_attn=True,
+                )
                 self.attn_scores.append(att.detach().cpu().mean(dim=1))
             else:
-                x = block(x, attention_bias=attention_bias, return_attn=False)
+                x = block(
+                    x,
+                    attention_bias=attention_bias,
+                    cross_memory=cross_memory,
+                    cross_attention_bias=cross_attention_bias,
+                    return_attn=False,
+                )
 
         x = self.transformer.ln_f(x)
 
         if targets is not None:
             logits = self.lm_head(x)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1)
         else:
             # Inference mode
             logits = self.lm_head(x[:, [-1], :])  # only the last token
@@ -529,7 +771,7 @@ class Decifer(nn.Module):
                 # random note: because named_modules and named_parameters are recursive
                 # we will see the same tensors p many many times. but doing it this way
                 # allows us to know which parent module any tensor p belongs to...
-                if pn.endswith("bias") or pn == "token_pos":
+                if pn.endswith("bias") or pn in {"token_pos", "token_queries"}:
                     # all biases will not be decayed
                     no_decay.add(fpn)
                 elif pn.endswith("weight") and isinstance(m, whitelist_weight_modules):

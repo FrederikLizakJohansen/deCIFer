@@ -128,6 +128,11 @@ class TrainConfig:
     condition: bool = False
     condition_encoder: str = "mlp"
     condition_n_tokens: int = 1
+    dense_condition_n_tokens: int = 16
+    peak_condition_n_tokens: int = 16
+    peak_encoder_hidden_dim: int = 128
+    condition_cross_attention: bool = False
+    condition_cross_attention_every_n_layers: int = 1
     pxrd_encoder_channels: int = 64
     pxrd_encoder_kernel_size: int = 7
     condition_embedder_hidden_layers: List[int] = field(default_factory=lambda: [512])
@@ -165,6 +170,7 @@ class TrainConfig:
     peak_asymmetry_range_max: float = 0.0
     final_normalize_xrd: bool = False
     max_xrd_peaks: int = 0
+    max_peak_list_peaks: int = 512
     xrd_augmentation_on_device: bool = False
 
     # AdamW optimizer
@@ -388,6 +394,7 @@ def base_metric_event(C, training_metrics, local_iteration_number, lr, event_typ
         "condition": C.condition,
         "condition_encoder": C.condition_encoder,
         "condition_n_tokens": C.condition_n_tokens,
+        "condition_cross_attention": C.condition_cross_attention,
         "sampling_strategy": C.sampling_strategy,
         "tokenizer": C.tokenizer,
         "batch_size": C.batch_size,
@@ -395,6 +402,7 @@ def base_metric_event(C, training_metrics, local_iteration_number, lr, event_typ
         "block_size": C.block_size,
         "gradient_accumulation_steps": C.gradient_accumulation_steps,
         "max_xrd_peaks": C.max_xrd_peaks,
+        "max_peak_list_peaks": C.max_peak_list_peaks,
         "max_gpu_memory_mb": max_gpu_memory_mb,
     }
 
@@ -638,6 +646,11 @@ if __name__ == "__main__":
         minicif_constrained_decoding=C.minicif_constrained_decoding,
         condition_encoder=C.condition_encoder,
         condition_n_tokens=C.condition_n_tokens,
+        dense_condition_n_tokens=C.dense_condition_n_tokens,
+        peak_condition_n_tokens=C.peak_condition_n_tokens,
+        peak_encoder_hidden_dim=C.peak_encoder_hidden_dim,
+        condition_cross_attention=C.condition_cross_attention,
+        condition_cross_attention_every_n_layers=C.condition_cross_attention_every_n_layers,
         pxrd_encoder_channels=C.pxrd_encoder_channels,
         pxrd_encoder_kernel_size=C.pxrd_encoder_kernel_size,
         condition_embedder_hidden_layers = C.condition_embedder_hidden_layers,
@@ -722,9 +735,61 @@ if __name__ == "__main__":
     data_iters = {}
 
     def move_tensor_to_device(tensor):
+        if isinstance(tensor, dict):
+            return {key: move_tensor_to_device(value) for key, value in tensor.items()}
         if device_type == "cuda" and tensor.device.type == "cpu":
             return tensor.pin_memory().to(C.device, non_blocking=True)
         return tensor.to(C.device)
+
+    def cap_peak_list(batch_q, batch_iq):
+        if C.max_peak_list_peaks <= 0 or batch_q.size(1) <= C.max_peak_list_peaks:
+            return batch_q, batch_iq
+        valid = batch_q != 0
+        scores = batch_iq.masked_fill(~valid, float("-inf"))
+        peak_indices = torch.topk(scores, k=C.max_peak_list_peaks, dim=1).indices
+        batch_q = torch.gather(batch_q, 1, peak_indices)
+        batch_iq = torch.gather(batch_iq, 1, peak_indices)
+        valid = torch.gather(valid, 1, peak_indices)
+        batch_q = torch.where(valid, batch_q, torch.zeros_like(batch_q))
+        batch_iq = torch.where(valid, batch_iq, torch.zeros_like(batch_iq))
+        return batch_q, batch_iq
+
+    def append_condition_batch(cond_list, batch, augment):
+        xrd_kwargs = augmentation_kwargs if augment else clean_xrd_kwargs
+        batch_q = batch['xrd.q']
+        batch_iq = batch['xrd.iq']
+        if C.condition_encoder in {"peak", "hybrid"}:
+            peak_q, peak_iq = cap_peak_list(batch_q, batch_iq)
+        if C.xrd_augmentation_on_device:
+            batch_q = move_tensor_to_device(batch_q)
+            batch_iq = move_tensor_to_device(batch_iq)
+            if C.condition_encoder in {"peak", "hybrid"}:
+                peak_q = move_tensor_to_device(peak_q)
+                peak_iq = move_tensor_to_device(peak_iq)
+
+        if C.condition_encoder == "peak":
+            for peak_q_item, peak_iq_item in zip(peak_q, peak_iq):
+                cond_list.append({"peak_q": peak_q_item, "peak_iq": peak_iq_item})
+        elif C.condition_encoder == "hybrid":
+            dense_iq = discrete_to_continuous_xrd(batch_q, batch_iq, **xrd_kwargs)['iq']
+            for dense_item, peak_q_item, peak_iq_item in zip(dense_iq, peak_q, peak_iq):
+                cond_list.append({"dense": dense_item, "peak_q": peak_q_item, "peak_iq": peak_iq_item})
+        else:
+            cond_list.extend(discrete_to_continuous_xrd(batch_q, batch_iq, **xrd_kwargs)['iq'])
+
+    def stack_conditions(cond_list):
+        if not cond_list:
+            return None
+        if isinstance(cond_list[0], dict):
+            stacked = {}
+            for key in cond_list[0]:
+                values = [condition[key] for condition in cond_list]
+                if key in {"peak_q", "peak_iq"}:
+                    stacked[key] = pad_sequence(values, batch_first=True, padding_value=0.0)
+                else:
+                    stacked[key] = torch.stack(values)
+            return stacked
+        return torch.stack(cond_list)
 
     #@profile
     def get_batch(split, augment=True):
@@ -760,13 +825,7 @@ if __name__ == "__main__":
 
             # Fetch conditioning and augment to cont signals
             if C.condition:
-                xrd_kwargs = augmentation_kwargs if augment else clean_xrd_kwargs
-                batch_q = batch['xrd.q']
-                batch_iq = batch['xrd.iq']
-                if C.xrd_augmentation_on_device:
-                    batch_q = move_tensor_to_device(batch_q)
-                    batch_iq = move_tensor_to_device(batch_iq)
-                cond_list.extend(discrete_to_continuous_xrd(batch_q, batch_iq, **xrd_kwargs)['iq'])
+                append_condition_batch(cond_list, batch, augment)
 
         # Now pack sequences into batches without loops
         # Concatenate all sequences into one long tensor
@@ -808,12 +867,13 @@ if __name__ == "__main__":
         if C.condition:
             index = torch.searchsorted(seq_cum_lengths, num_batches * C.block_size) + 1
             cond_list = cond_list[:index]
-            cond_batch = torch.stack(cond_list)
+            cond_batch = stack_conditions(cond_list)
             if C.debug_batch_assertions:
                 num_start_tokens = sum(len(indices) for indices in start_indices_list)
-                if cond_batch.size(0) < num_start_tokens:
+                cond_batch_size = next(iter(cond_batch.values())).size(0) if isinstance(cond_batch, dict) else cond_batch.size(0)
+                if cond_batch_size < num_start_tokens:
                     raise RuntimeError(
-                        f"conditioning alignment error: {cond_batch.size(0)} condition vectors "
+                        f"conditioning alignment error: {cond_batch_size} condition vectors "
                         f"for {num_start_tokens} start tokens"
                     )
         

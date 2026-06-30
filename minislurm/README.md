@@ -85,6 +85,20 @@ Custom config:
 sbatch minislurm/train_minicif.sh --config configs/minicif_small_config.yaml
 ```
 
+Run the small conditioning ablation configs sequentially on one GPU:
+
+```bash
+sbatch minislurm/run_minicif_condition_ablation.sh
+```
+
+Run only selected ablation configs:
+
+```bash
+sbatch minislurm/run_minicif_condition_ablation.sh \
+  --configs configs/minicif_condition_ablation/small_mlp_insert.yaml \
+            configs/minicif_condition_ablation/small_hybrid_cross.yaml
+```
+
 Single-node multi-GPU training uses PyTorch DDP automatically when Slurm exposes more than one GPU:
 
 ```bash

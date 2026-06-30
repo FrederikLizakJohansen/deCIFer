@@ -106,6 +106,7 @@ def clean_xrd_kwargs(config, args):
         "intensity_scale_range": None,
         "mask_prob": None,
         "final_normalize": bool(config.get("final_normalize_xrd", True)),
+        "max_peaks": int(config.get("max_xrd_peaks", 0) or 0) or None,
     }
 
 
@@ -146,6 +147,37 @@ def continuous_from_sparse(q, iq, xrd_kwargs):
     return xrd["q"].cpu().numpy(), xrd["iq"][0].cpu().numpy(), xrd["iq"]
 
 
+def cap_peak_list(q_tensor, iq_tensor, max_peaks):
+    if max_peaks <= 0 or q_tensor.numel() <= max_peaks:
+        return q_tensor, iq_tensor
+    valid = q_tensor != 0
+    scores = iq_tensor.masked_fill(~valid, float("-inf"))
+    peak_indices = torch.topk(scores, k=max_peaks).indices
+    q_tensor = q_tensor[peak_indices]
+    iq_tensor = iq_tensor[peak_indices]
+    valid = valid[peak_indices]
+    q_tensor = torch.where(valid, q_tensor, torch.zeros_like(q_tensor))
+    iq_tensor = torch.where(valid, iq_tensor, torch.zeros_like(iq_tensor))
+    return q_tensor, iq_tensor
+
+
+def condition_from_sparse(q, iq, xrd_kwargs, config):
+    q_tensor = q if torch.is_tensor(q) else torch.tensor(q, dtype=torch.float32)
+    iq_tensor = iq if torch.is_tensor(iq) else torch.tensor(iq, dtype=torch.float32)
+    encoder = config.get("condition_encoder", "mlp")
+    _, reference_iq, dense_iq = continuous_from_sparse(q_tensor, iq_tensor, xrd_kwargs)
+    if encoder not in {"peak", "hybrid"}:
+        return reference_iq, dense_iq
+
+    max_peaks = int(config.get("max_peak_list_peaks", 0) or 0)
+    peak_q, peak_iq = cap_peak_list(q_tensor, iq_tensor, max_peaks)
+    peak_q = peak_q.unsqueeze(0)
+    peak_iq = peak_iq.unsqueeze(0)
+    if encoder == "peak":
+        return reference_iq, {"peak_q": peak_q, "peak_iq": peak_iq}
+    return reference_iq, {"dense": dense_iq, "peak_q": peak_q, "peak_iq": peak_iq}
+
+
 def structure_to_continuous_xrd(structure, xrd_kwargs, wavelength):
     calculator = XRDCalculator(wavelength=wavelength)
     _, two_theta_range = q_range_to_two_theta_range(xrd_kwargs["qmin"], xrd_kwargs["qmax"], calculator.wavelength)
@@ -158,13 +190,21 @@ def structure_to_continuous_xrd(structure, xrd_kwargs, wavelength):
     return iq_cont
 
 
+def repeat_condition(cond_vec, batch_size, device):
+    if cond_vec is None:
+        return None
+    if isinstance(cond_vec, dict):
+        return {key: value.to(device).repeat(batch_size, *([1] * (value.dim() - 1))) for key, value in cond_vec.items()}
+    return cond_vec.to(device).repeat(batch_size, 1)
+
+
 def generate_candidates(model, prompt, cond_vec, args, tokenizer):
     generated = []
     remaining = args.num_reps
     while remaining > 0:
         batch_size = min(args.generation_batch_size, remaining)
         batch_prompt = prompt.to(model.device).unsqueeze(0).repeat(batch_size, 1)
-        batch_cond = cond_vec.to(model.device).repeat(batch_size, 1)
+        batch_cond = repeat_condition(cond_vec, batch_size, model.device)
         batch = model.generate_batched_reps(
             batch_prompt,
             args.max_new_tokens,
@@ -182,7 +222,7 @@ def generate_candidates(model, prompt, cond_vec, args, tokenizer):
     return generated
 
 
-def evaluate_split(split, h5_path, model, tokenizer, matcher, xrd_kwargs, args):
+def evaluate_split(split, h5_path, model, tokenizer, matcher, xrd_kwargs, config, args):
     dataset = DeciferDataset(h5_path, ["cif_name", "minicif_string", "cif_tokens", "xrd.q", "xrd.iq", "spacegroup", "crystal_system"])
     n_items = len(dataset) if args.max_items <= 0 else min(args.max_items, len(dataset))
     rows = []
@@ -192,89 +232,108 @@ def evaluate_split(split, h5_path, model, tokenizer, matcher, xrd_kwargs, args):
         try:
             reference_parsed = parse_minicif(reference_minicif)
             reference_structure = minicif_to_structure(reference_minicif)
-            _, reference_iq, cond_iq = continuous_from_sparse(item["xrd.q"], item["xrd.iq"], xrd_kwargs)
-            prompt = prompt_from_minicif(reference_minicif, args.prompt_mode, tokenizer)
-            candidates = generate_candidates(model, prompt, cond_iq, args, tokenizer)
+            reference_iq, cond = condition_from_sparse(item["xrd.q"], item["xrd.iq"], xrd_kwargs, config)
         except Exception as exc:
             rows.append({
                 "split": split,
                 "sample_index": sample_index,
                 "cif_name": item["cif_name"],
                 "rep": -1,
+                "prompt_mode": None,
                 "reference_error": str(exc),
                 "parse_ok": False,
                 "match": False,
             })
             continue
 
-        for rep, generated_minicif in enumerate(candidates):
-            row = {
-                "split": split,
-                "sample_index": sample_index,
-                "cif_name": item["cif_name"],
-                "rep": rep,
-                "reference_minicif": reference_minicif,
-                "generated_minicif": generated_minicif,
-                "reference_space_group": reference_parsed.space_group,
-                "reference_crystal_system": reference_parsed.crystal_system,
-                "parse_ok": False,
-                "structure_ok": False,
-                "match": False,
-            }
-            try:
-                generated_parsed = parse_minicif(generated_minicif)
-                row.update({
-                    "parse_ok": True,
-                    "generated_space_group": generated_parsed.space_group,
-                    "generated_crystal_system": generated_parsed.crystal_system,
-                    "space_group_match": generated_parsed.space_group == reference_parsed.space_group,
-                    "crystal_system_match": generated_parsed.crystal_system == reference_parsed.crystal_system,
-                    "element_set_match": set(generated_parsed.elements) == set(reference_parsed.elements),
-                })
-                generated_structure = minicif_to_structure(generated_minicif)
-                generated_iq = structure_to_continuous_xrd(generated_structure, xrd_kwargs, args.wavelength)
-                rmsd = matcher.get_rms_dist(reference_structure, generated_structure)
-                rmsd_value = None if rmsd is None else float(rmsd[0])
-                match = rmsd_value is not None
-                if args.rmsd_threshold > 0 and rmsd_value is not None:
-                    match = rmsd_value <= args.rmsd_threshold
-                row.update({
-                    "structure_ok": True,
-                    "rwp": rwp(reference_iq, generated_iq),
-                    "rmsd": rmsd_value,
-                    "match": match,
-                    "composition_match": generated_structure.composition.reduced_formula == reference_structure.composition.reduced_formula,
-                })
-            except Exception as exc:
-                row["error"] = str(exc)
-            rows.append(row)
+        for prompt_mode in args.prompt_modes:
+            prompt = prompt_from_minicif(reference_minicif, prompt_mode, tokenizer)
+            candidates = generate_candidates(model, prompt, cond, args, tokenizer)
+            for rep, generated_minicif in enumerate(candidates):
+                row = {
+                    "split": split,
+                    "sample_index": sample_index,
+                    "cif_name": item["cif_name"],
+                    "prompt_mode": prompt_mode,
+                    "rep": rep,
+                    "reference_minicif": reference_minicif,
+                    "generated_minicif": generated_minicif,
+                    "generated_n_tokens": len(tokenizer.tokenize_minicif(generated_minicif)),
+                    "finished": generated_minicif.strip().endswith(END_TOKEN),
+                    "reference_space_group": reference_parsed.space_group,
+                    "reference_crystal_system": reference_parsed.crystal_system,
+                    "parse_ok": False,
+                    "structure_ok": False,
+                    "match": False,
+                }
+                try:
+                    generated_parsed = parse_minicif(generated_minicif)
+                    row.update({
+                        "parse_ok": True,
+                        "generated_space_group": generated_parsed.space_group,
+                        "generated_crystal_system": generated_parsed.crystal_system,
+                        "space_group_match": generated_parsed.space_group == reference_parsed.space_group,
+                        "crystal_system_match": generated_parsed.crystal_system == reference_parsed.crystal_system,
+                        "element_set_match": set(generated_parsed.elements) == set(reference_parsed.elements),
+                        "extra_elements": len(set(generated_parsed.elements) - set(reference_parsed.elements)),
+                        "missing_elements": len(set(reference_parsed.elements) - set(generated_parsed.elements)),
+                    })
+                    generated_structure = minicif_to_structure(generated_minicif)
+                    generated_iq = structure_to_continuous_xrd(generated_structure, xrd_kwargs, args.wavelength)
+                    rmsd = matcher.get_rms_dist(reference_structure, generated_structure)
+                    rmsd_value = None if rmsd is None else float(rmsd[0])
+                    match = rmsd_value is not None
+                    if args.rmsd_threshold > 0 and rmsd_value is not None:
+                        match = rmsd_value <= args.rmsd_threshold
+                    row.update({
+                        "structure_ok": True,
+                        "rwp": rwp(reference_iq, generated_iq),
+                        "rmsd": rmsd_value,
+                        "match": match,
+                        "composition_match": generated_structure.composition.reduced_formula == reference_structure.composition.reduced_formula,
+                    })
+                except Exception as exc:
+                    row["error"] = str(exc)
+                rows.append(row)
     return pd.DataFrame(rows)
 
 
 def summarize(df):
     summaries = []
-    for split, split_df in df.groupby("split", dropna=False):
+    group_cols = ["split"]
+    if "prompt_mode" in df.columns:
+        group_cols.append("prompt_mode")
+    for group_key, split_df in df.groupby(group_cols, dropna=False):
+        if not isinstance(group_key, tuple):
+            group_key = (group_key,)
         valid_rwp = split_df.dropna(subset=["rwp"]) if "rwp" in split_df else split_df.iloc[0:0]
         by_sample = split_df.groupby("sample_index")
         best_rwp = by_sample["rwp"].min() if "rwp" in split_df else pd.Series(dtype=float)
-        summaries.append({
-            "split": split,
+        summary = {
+            "split": group_key[0],
             "n_samples": int(split_df["sample_index"].nunique()),
             "n_candidates": int(len(split_df[split_df["rep"] >= 0])),
             "parse_rate": float(split_df["parse_ok"].fillna(False).mean()),
             "valid_minicif_rate": float(split_df["parse_ok"].fillna(False).mean()),
             "structure_rate": float(split_df["structure_ok"].fillna(False).mean()) if "structure_ok" in split_df else np.nan,
+            "finish_rate": float(split_df["finished"].fillna(False).mean()) if "finished" in split_df else np.nan,
             "candidate_match_rate": float(split_df["match"].fillna(False).mean()),
             "best_of_k_match_rate": float(by_sample["match"].max().fillna(False).mean()),
             "median_rwp": float(valid_rwp["rwp"].median()) if not valid_rwp.empty else np.nan,
             "median_best_rwp": float(best_rwp.median()) if not best_rwp.empty else np.nan,
             "mean_best_rwp": float(best_rwp.mean()) if not best_rwp.empty else np.nan,
+            "median_generated_n_tokens": float(split_df["generated_n_tokens"].dropna().median()) if "generated_n_tokens" in split_df else np.nan,
             "median_matched_rmsd": float(split_df.loc[split_df["match"] == True, "rmsd"].median()) if "rmsd" in split_df else np.nan,
             "space_group_accuracy": float(split_df["space_group_match"].fillna(False).mean()) if "space_group_match" in split_df else np.nan,
             "crystal_system_accuracy": float(split_df["crystal_system_match"].fillna(False).mean()) if "crystal_system_match" in split_df else np.nan,
             "element_set_accuracy": float(split_df["element_set_match"].fillna(False).mean()) if "element_set_match" in split_df else np.nan,
+            "mean_extra_elements": float(split_df["extra_elements"].dropna().mean()) if "extra_elements" in split_df else np.nan,
+            "mean_missing_elements": float(split_df["missing_elements"].dropna().mean()) if "missing_elements" in split_df else np.nan,
             "composition_match_rate": float(split_df["composition_match"].fillna(False).mean()) if "composition_match" in split_df else np.nan,
-        })
+        }
+        if len(group_key) > 1:
+            summary["prompt_mode"] = group_key[1]
+        summaries.append(summary)
     return pd.DataFrame(summaries)
 
 
@@ -316,11 +375,14 @@ def plot_metric_summary(summary, out_dir):
     available = [metric for metric in metrics if metric in summary.columns]
     fig, ax = plt.subplots(figsize=(10, 4.8), dpi=160)
     x = np.arange(len(summary))
+    labels = summary["split"].astype(str)
+    if "prompt_mode" in summary.columns:
+        labels = labels + "/" + summary["prompt_mode"].astype(str)
     width = 0.8 / max(1, len(available))
     for i, metric in enumerate(available):
         ax.bar(x + i * width, summary[metric], width=width, label=metric)
     ax.set_xticks(x + width * (len(available) - 1) / 2)
-    ax.set_xticklabels(summary["split"])
+    ax.set_xticklabels(labels, rotation=30, ha="right")
     ax.set_ylim(0, 1)
     ax.set_ylabel("rate")
     ax.grid(axis="y", alpha=0.3)
@@ -374,6 +436,22 @@ def main():
             "elements; pxrd-elements-cs also fixes crystal system; pxrd-elements-cs-sg also fixes space group."
         ),
     )
+    parser.add_argument(
+        "--prompt-modes",
+        nargs="+",
+        choices=[
+            "pxrd",
+            "pxrd-elements",
+            "pxrd-elements-cs",
+            "pxrd-elements-cs-sg",
+            "start",
+            "formula",
+            "formula-cs",
+            "formula-cs-sg",
+        ],
+        default=None,
+        help="Evaluate several prompt modes in one run. Defaults to --prompt-mode.",
+    )
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--use-current", action="store_true", help="Use current_model instead of best_model_state")
     parser.add_argument("--rmsd-threshold", type=float, default=0.0, help="Optional positive RMSD threshold for match rate")
@@ -385,6 +463,7 @@ def main():
     parser.add_argument("--wavelength", default="CuKa")
     parser.add_argument("--seed", type=int, default=1337)
     args = parser.parse_args()
+    args.prompt_modes = args.prompt_modes or [args.prompt_mode]
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -405,7 +484,7 @@ def main():
     frames = []
     for split in args.splits:
         path = dataset_path(dataset_dir, split)
-        frames.append(evaluate_split(split, path, model, tokenizer, matcher, xrd_kwargs, args))
+        frames.append(evaluate_split(split, path, model, tokenizer, matcher, xrd_kwargs, config, args))
     results = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     summary = summarize(results)
 
@@ -416,6 +495,7 @@ def main():
             "checkpoint": os.path.abspath(args.checkpoint),
             "dataset_dir": os.path.abspath(dataset_dir),
             "prompt_mode": args.prompt_mode,
+            "prompt_modes": args.prompt_modes,
             "xrd_kwargs": xrd_kwargs,
             "summary": summary.to_dict(orient="records"),
         }, f, indent=2)

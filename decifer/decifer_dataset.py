@@ -53,7 +53,10 @@ class DeciferDataset(Dataset):
 
     def close(self):
         if self.h5_file is not None:
-            self.h5_file.close()
+            try:
+                self.h5_file.close()
+            except TypeError:
+                pass
         self.h5_file = None
         self.data = {}
 

@@ -76,6 +76,91 @@ class DeciferModelTest(unittest.TestCase):
 
         self.assertEqual(len(optimizer.param_groups), 2)
 
+    def test_peak_condition_encoder_inserts_peak_tokens(self):
+        tokenizer = MinicifTokenizer()
+        model = Decifer(DeciferConfig(
+            tokenizer="minicif",
+            vocab_size=tokenizer.vocab_size,
+            block_size=16,
+            n_layer=1,
+            n_head=1,
+            n_embd=16,
+            condition=True,
+            condition_encoder="peak",
+            condition_n_tokens=3,
+            peak_encoder_hidden_dim=8,
+        ))
+        idx = torch.tensor([tokenizer.encode(tokenizer.tokenize_minicif("<mcif> Na "))])
+        cond = {
+            "peak_q": torch.tensor([[1.0, 2.0, 0.0]], dtype=torch.float32),
+            "peak_iq": torch.tensor([[1.0, 0.5, 0.0]], dtype=torch.float32),
+        }
+
+        logits, loss = model(idx, cond, idx.clone(), [[0]])
+
+        self.assertEqual(logits.shape, (1, idx.size(1) + 3, tokenizer.vocab_size))
+        self.assertIsNotNone(loss)
+
+    def test_hybrid_cross_attention_keeps_token_sequence_length(self):
+        tokenizer = MinicifTokenizer()
+        model = Decifer(DeciferConfig(
+            tokenizer="minicif",
+            vocab_size=tokenizer.vocab_size,
+            block_size=16,
+            n_layer=1,
+            n_head=1,
+            n_embd=16,
+            condition=True,
+            condition_encoder="hybrid",
+            condition_n_tokens=4,
+            dense_condition_n_tokens=2,
+            peak_condition_n_tokens=2,
+            peak_encoder_hidden_dim=8,
+            pxrd_encoder_channels=8,
+            condition_cross_attention=True,
+        ))
+        idx = torch.tensor([tokenizer.encode(tokenizer.tokenize_minicif("<mcif> Na "))])
+        cond = {
+            "dense": torch.randn(1, 32),
+            "peak_q": torch.tensor([[1.0, 2.0, 0.0]], dtype=torch.float32),
+            "peak_iq": torch.tensor([[1.0, 0.5, 0.0]], dtype=torch.float32),
+        }
+
+        logits, loss = model(idx, cond, idx.clone(), [[0]])
+
+        self.assertEqual(logits.shape, (1, idx.size(1), tokenizer.vocab_size))
+        self.assertIsNotNone(loss)
+
+    def test_hybrid_cross_attention_handles_block_without_start_token(self):
+        tokenizer = MinicifTokenizer()
+        model = Decifer(DeciferConfig(
+            tokenizer="minicif",
+            vocab_size=tokenizer.vocab_size,
+            block_size=16,
+            n_layer=1,
+            n_head=1,
+            n_embd=16,
+            condition=True,
+            condition_encoder="hybrid",
+            condition_n_tokens=4,
+            dense_condition_n_tokens=2,
+            peak_condition_n_tokens=2,
+            peak_encoder_hidden_dim=8,
+            pxrd_encoder_channels=8,
+            condition_cross_attention=True,
+        ))
+        idx = torch.tensor([tokenizer.encode(tokenizer.tokenize_minicif("Na Cl cs_7 "))])
+        cond = {
+            "dense": torch.randn(1, 32),
+            "peak_q": torch.tensor([[1.0, 2.0, 0.0]], dtype=torch.float32),
+            "peak_iq": torch.tensor([[1.0, 0.5, 0.0]], dtype=torch.float32),
+        }
+
+        logits, loss = model(idx, cond, idx.clone(), [[]])
+
+        self.assertFalse(torch.isnan(logits).any())
+        self.assertFalse(torch.isnan(loss))
+
     def test_condition_attention_mask_blocks_attention_between_packed_records(self):
         tokenizer = MinicifTokenizer()
         model = Decifer(DeciferConfig(
