@@ -156,6 +156,21 @@ PYTHONPATH=. python bin/analyze_pxrd_encoder.py \
 
 This writes publication-style diagnostics, CSVs, and PDFs to `minicif_pxrd_encoder_pretrain_hybrid/encoder_analysis_val`.
 
+Additional encoder-pretraining ablations:
+
+```bash
+sbatch minislurm/pretrain_pxrd_encoder.sh \
+  --config configs/minicif_pxrd_encoder_pretrain_hybrid_pooled.yaml
+
+sbatch minislurm/pretrain_pxrd_encoder.sh \
+  --config configs/minicif_pxrd_encoder_pretrain_hybrid_pxrd_metric.yaml
+
+sbatch minislurm/pretrain_pxrd_encoder.sh \
+  --config configs/minicif_pxrd_encoder_pretrain_hybrid_aux_metric.yaml
+```
+
+Analyze each output directory and compare the `embedding_spaces.pooled` metrics in `analysis_summary.json`.
+
 Single-node multi-GPU training uses PyTorch DDP automatically when Slurm exposes more than one GPU:
 
 ```bash

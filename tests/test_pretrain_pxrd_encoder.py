@@ -2,7 +2,7 @@ import unittest
 
 import torch
 
-from bin.pretrain_pxrd_encoder import SyntheticPxrdDataset, collate_fn, nt_xent_loss
+from bin.pretrain_pxrd_encoder import SyntheticPxrdDataset, collate_fn, nt_xent_loss, pxrd_similarity_loss
 
 
 class PretrainPxrdEncoderTest(unittest.TestCase):
@@ -24,6 +24,17 @@ class PretrainPxrdEncoderTest(unittest.TestCase):
         self.assertEqual(batch["xrd.iq"].shape, batch["xrd.q"].shape)
         self.assertTrue(torch.all(batch["xrd.q"] >= 0.0))
         self.assertTrue(torch.all(batch["xrd.q"] <= 10.0))
+
+    def test_pxrd_similarity_loss_prefers_pxrd_neighbor_geometry(self):
+        z1 = torch.nn.functional.normalize(torch.eye(4), dim=-1)
+        z2_good = z1.clone()
+        z2_bad = torch.roll(z1, shifts=1, dims=0)
+        dense_iq = torch.eye(4)
+
+        good_loss = pxrd_similarity_loss(z1, z2_good, dense_iq, logit_temperature=0.1, target_temperature=0.1)
+        bad_loss = pxrd_similarity_loss(z1, z2_bad, dense_iq, logit_temperature=0.1, target_temperature=0.1)
+
+        self.assertLess(good_loss.item(), bad_loss.item())
 
 
 if __name__ == "__main__":

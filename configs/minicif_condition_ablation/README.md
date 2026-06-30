@@ -443,3 +443,64 @@ representative_samples_by_crystal_system.csv
 ```
 
 Use the summary JSON for numbers in tables: final contrastive metrics, k-nearest-neighbor label agreement, silhouette scores, low-dimensional trustworthiness, PXRD-similarity correlation, and augmentation-invariance margins. Use the hard-negative CSV to inspect structures that the encoder considers similar even though their labels differ.
+
+The analysis now reports both embedding spaces:
+
+```text
+embedding_spaces.projected
+embedding_spaces.pooled
+```
+
+`projected` is the contrastive projection-head output. `pooled` is the normalized mean of the actual condition encoder tokens, and is the more relevant diagnostic for transfer into minicif training.
+
+### PXRD Encoder Improvement Ablations
+
+The first run showed strong augmentation invariance but weak global PXRD geometry. Run these encoder-pretraining ablations next:
+
+```bash
+sbatch minislurm/pretrain_pxrd_encoder.sh \
+  --config configs/minicif_pxrd_encoder_pretrain_hybrid_pooled.yaml
+
+sbatch minislurm/pretrain_pxrd_encoder.sh \
+  --config configs/minicif_pxrd_encoder_pretrain_hybrid_pxrd_metric.yaml
+
+sbatch minislurm/pretrain_pxrd_encoder.sh \
+  --config configs/minicif_pxrd_encoder_pretrain_hybrid_aux_metric.yaml
+```
+
+What they test:
+
+```text
+hybrid_pooled:
+  Removes projection-head dependence by applying contrastive loss directly to pooled encoder tokens.
+
+hybrid_pxrd_metric:
+  Keeps projected contrastive learning but adds a soft PXRD-similarity target, so patterns with similar continuous PXRD are encouraged to be nearby.
+
+hybrid_aux_metric:
+  Uses pooled encoder contrastive loss, PXRD soft-metric loss, and small auxiliary crystal-system/spacegroup classification losses.
+```
+
+After each run, analyze the checkpoint:
+
+```bash
+PYTHONPATH=. python bin/analyze_pxrd_encoder.py \
+  --checkpoint minicif_pxrd_encoder_pretrain_hybrid_aux_metric/pxrd_encoder_pretrain.pt \
+  --dataset-dir data/noma \
+  --split val \
+  --max-samples 2000 \
+  --batch-size 64 \
+  --tsne
+```
+
+Compare these fields across runs:
+
+```text
+embedding_spaces.pooled.pair_correlation.embedding_vs_pxrd_cosine_spearman
+embedding_spaces.pooled.pair_correlation.embedding_cosine_vs_rwp_spearman
+embedding_spaces.pooled.label_metrics.crystal_system.knn_label_agreement.top1
+embedding_spaces.pooled.label_metrics.spacegroup.knn_label_agreement.top1
+augmentation_invariance_by_space.pooled.margin_mean
+```
+
+The target is not just lower contrastive loss. Prefer the run that improves pooled-space PXRD/Rwp correlation and label kNN agreement while keeping a positive augmentation-invariance margin.

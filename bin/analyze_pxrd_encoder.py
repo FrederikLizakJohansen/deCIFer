@@ -354,7 +354,7 @@ def plot_embedding(coords, labels, label_name, title, out_dir, stem):
     return paths
 
 
-def plot_explained_variance(explained, out_dir):
+def plot_explained_variance(explained, out_dir, stem="pca_explained_variance"):
     plt = configure_matplotlib()
     fig, ax = plt.subplots(figsize=(5.2, 3.5))
     x = np.arange(1, len(explained) + 1)
@@ -365,7 +365,7 @@ def plot_explained_variance(explained, out_dir):
     ax.set_ylim(0.0, min(1.0, max(0.1, float(np.cumsum(explained)[-1]) * 1.08)))
     ax.grid(axis="y", alpha=0.22)
     fig.tight_layout()
-    paths = save_figure(fig, out_dir, "pca_explained_variance")
+    paths = save_figure(fig, out_dir, stem)
     plt.close(fig)
     return paths
 
@@ -425,7 +425,7 @@ def trustworthiness_or_none(embeddings, coords):
     return float(trustworthiness(embeddings, coords, n_neighbors=n_neighbors, metric="cosine"))
 
 
-def plot_similarity_heatmap(similarity, labels, label_name, out_dir):
+def plot_similarity_heatmap(similarity, labels, label_name, out_dir, stem="embedding_similarity_heatmap"):
     plt = configure_matplotlib()
     n = min(200, similarity.shape[0])
     if labels is not None:
@@ -442,7 +442,7 @@ def plot_similarity_heatmap(similarity, labels, label_name, out_dir):
         ax.text(0.02, 0.98, f"sorted by {label_name}", transform=ax.transAxes, ha="left", va="top", color="white")
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="cosine")
     fig.tight_layout()
-    paths = save_figure(fig, out_dir, "embedding_similarity_heatmap")
+    paths = save_figure(fig, out_dir, stem)
     plt.close(fig)
     return paths
 
@@ -481,7 +481,7 @@ def pair_correlation_stats(embeddings, dense_iq, pair_samples, seed):
     return stats, pairs
 
 
-def plot_pair_correlation(pairs, stats, out_dir):
+def plot_pair_correlation(pairs, stats, out_dir, stem="pxrd_similarity_vs_embedding_similarity"):
     if pairs is None:
         return None
     plt = configure_matplotlib()
@@ -497,15 +497,15 @@ def plot_pair_correlation(pairs, stats, out_dir):
     axes[1].set_title(f"Spearman rho={stats['embedding_cosine_vs_rwp_spearman']:.3f}")
     axes[1].grid(alpha=0.2)
     fig.tight_layout()
-    paths = save_figure(fig, out_dir, "pxrd_similarity_vs_embedding_similarity")
+    paths = save_figure(fig, out_dir, stem)
     plt.close(fig)
     return paths
 
 
 @torch.no_grad()
-def augmentation_invariance(model, config, rows, batch_size, device):
-    first = embed_rows(model, config, rows, batch_size, device, use_training_augmentations=True)["projected"]
-    second = embed_rows(model, config, rows, batch_size, device, use_training_augmentations=True)["projected"]
+def augmentation_invariance(model, config, rows, batch_size, device, embedding="projected"):
+    first = embed_rows(model, config, rows, batch_size, device, use_training_augmentations=True)[embedding]
+    second = embed_rows(model, config, rows, batch_size, device, use_training_augmentations=True)[embedding]
     first = normalized(first)
     second = normalized(second)
     same = np.sum(first * second, axis=1)
@@ -527,7 +527,7 @@ def augmentation_invariance(model, config, rows, batch_size, device):
     }
 
 
-def plot_augmentation_invariance(invariance, out_dir):
+def plot_augmentation_invariance(invariance, out_dir, stem="augmentation_invariance"):
     plt = configure_matplotlib()
     fig, ax = plt.subplots(figsize=(5.4, 3.6))
     bins = np.linspace(-1, 1, 60)
@@ -538,7 +538,7 @@ def plot_augmentation_invariance(invariance, out_dir):
     ax.set_title("Augmentation invariance")
     ax.legend(frameon=False)
     fig.tight_layout()
-    paths = save_figure(fig, out_dir, "augmentation_invariance")
+    paths = save_figure(fig, out_dir, stem)
     plt.close(fig)
     return paths
 
@@ -627,6 +627,98 @@ def default_out_dir(checkpoint_path, split):
     return os.path.join(checkpoint_dir, f"encoder_analysis_{split}")
 
 
+def prefixed_stem(prefix, stem):
+    return stem if not prefix else f"{prefix}_{stem}"
+
+
+def analyze_embedding_space(space_name, embeddings, dense_iq, rows, args, out_dir, primary_label_name):
+    prefix = "" if space_name == "projected" else space_name
+    reductions, explained = compute_reductions(embeddings, args.tsne, args.seed)
+    similarity = pairwise_similarity_matrix(embeddings)
+    primary_labels = label_array(rows, primary_label_name)
+
+    figure_paths = {
+        "pca_explained_variance": plot_explained_variance(
+            explained,
+            out_dir,
+            prefixed_stem(prefix, "pca_explained_variance"),
+        ),
+        "similarity_heatmap": plot_similarity_heatmap(
+            similarity,
+            primary_labels,
+            primary_label_name,
+            out_dir,
+            prefixed_stem(prefix, "embedding_similarity_heatmap"),
+        ),
+    }
+
+    label_metrics: Dict[str, Dict] = {}
+    for label_name in ["crystal_system", "spacegroup"]:
+        labels = label_array(rows, label_name)
+        if labels is None:
+            continue
+        label_metrics[label_name] = {
+            "n_classes": int(len(np.unique(labels))),
+            "knn_label_agreement": knn_label_agreement(similarity, labels),
+            "silhouette_cosine": silhouette_score_or_none(embeddings, labels, args.seed),
+        }
+        hard = hard_negatives(similarity, rows, labels, label_name, args.hard_negative_top_n)
+        if hard:
+            save_csv(
+                os.path.join(out_dir, prefixed_stem(prefix, f"hard_negatives_by_{label_name}.csv")),
+                hard,
+                list(hard[0].keys()),
+            )
+        reps = representative_samples(similarity, rows, labels, label_name)
+        if reps:
+            save_csv(
+                os.path.join(out_dir, prefixed_stem(prefix, f"representative_samples_by_{label_name}.csv")),
+                reps,
+                list(reps[0].keys()),
+            )
+        for reduction_name, coords in reductions.items():
+            figure_paths[f"{reduction_name}_{label_name}"] = plot_embedding(
+                coords,
+                labels,
+                label_name,
+                f"{reduction_name.upper()} {space_name} PXRD encoder space colored by {label_name}",
+                out_dir,
+                prefixed_stem(prefix, f"{reduction_name}_by_{label_name}"),
+            )
+
+    if not label_metrics:
+        for reduction_name, coords in reductions.items():
+            figure_paths[reduction_name] = plot_embedding(
+                coords,
+                None,
+                "",
+                f"{reduction_name.upper()} {space_name} PXRD encoder space",
+                out_dir,
+                prefixed_stem(prefix, reduction_name),
+            )
+
+    reduction_metrics = {
+        name: {"trustworthiness": trustworthiness_or_none(embeddings, coords)}
+        for name, coords in reductions.items()
+    }
+    pair_stats, pairs = pair_correlation_stats(embeddings, dense_iq, args.pair_samples, args.seed)
+    figure_paths["pair_correlation"] = plot_pair_correlation(
+        pairs,
+        pair_stats,
+        out_dir,
+        prefixed_stem(prefix, "pxrd_similarity_vs_embedding_similarity"),
+    )
+    return {
+        "embedding_dim": int(embeddings.shape[1]),
+        "pca_explained_variance_ratio": [float(value) for value in explained],
+        "pca_explained_variance_ratio_cumulative": [float(value) for value in np.cumsum(explained)],
+        "label_metrics": label_metrics,
+        "reduction_metrics": reduction_metrics,
+        "pair_correlation": pair_stats,
+        "figure_paths": figure_paths,
+    }
+
+
 def main():
     args = parse_args()
     random.seed(args.seed)
@@ -668,87 +760,55 @@ def main():
         metrics_csv = os.path.join(os.path.dirname(os.path.abspath(args.checkpoint)), "contrastive_metrics.csv")
     metric_rows = load_metric_rows(metrics_csv)
 
-    reductions, explained = compute_reductions(embeddings, args.tsne, args.seed)
-    similarity = pairwise_similarity_matrix(embeddings)
     primary_label_name = "crystal_system" if label_array(rows, "crystal_system") is not None else "spacegroup"
     primary_labels = label_array(rows, primary_label_name)
 
-    figure_paths = {}
-    figure_paths["training_metrics"] = plot_training_metrics(metric_rows, out_dir)
-    figure_paths["pca_explained_variance"] = plot_explained_variance(explained, out_dir)
-    figure_paths["similarity_heatmap"] = plot_similarity_heatmap(similarity, primary_labels, primary_label_name, out_dir)
-    figure_paths["sample_pxrd_traces"] = plot_pxrd_panel(rows, dense_iq, config, primary_labels, primary_label_name, out_dir, args.seed)
-
-    label_metrics: Dict[str, Dict] = {}
-    for label_name in ["crystal_system", "spacegroup"]:
-        labels = label_array(rows, label_name)
-        if labels is None:
-            continue
-        label_metrics[label_name] = {
-            "n_classes": int(len(np.unique(labels))),
-            "knn_label_agreement": knn_label_agreement(similarity, labels),
-            "silhouette_cosine": silhouette_score_or_none(embeddings, labels, args.seed),
-        }
-        hard = hard_negatives(similarity, rows, labels, label_name, args.hard_negative_top_n)
-        if hard:
-            save_csv(
-                os.path.join(out_dir, f"hard_negatives_by_{label_name}.csv"),
-                hard,
-                list(hard[0].keys()),
-            )
-        reps = representative_samples(similarity, rows, labels, label_name)
-        if reps:
-            save_csv(
-                os.path.join(out_dir, f"representative_samples_by_{label_name}.csv"),
-                reps,
-                list(reps[0].keys()),
-            )
-        for reduction_name, coords in reductions.items():
-            figure_paths[f"{reduction_name}_{label_name}"] = plot_embedding(
-                coords,
-                labels,
-                label_name,
-                f"{reduction_name.upper()} PXRD encoder space colored by {label_name}",
-                out_dir,
-                f"{reduction_name}_by_{label_name}",
-            )
-
-    if not label_metrics:
-        for reduction_name, coords in reductions.items():
-            figure_paths[reduction_name] = plot_embedding(
-                coords,
-                None,
-                "",
-                f"{reduction_name.upper()} PXRD encoder space",
-                out_dir,
-                reduction_name,
-            )
-
-    reduction_metrics = {
-        name: {"trustworthiness": trustworthiness_or_none(embeddings, coords)}
-        for name, coords in reductions.items()
+    figure_paths = {
+        "training_metrics": plot_training_metrics(metric_rows, out_dir),
+        "sample_pxrd_traces": plot_pxrd_panel(rows, dense_iq, config, primary_labels, primary_label_name, out_dir, args.seed),
     }
-    pair_stats, pairs = pair_correlation_stats(embeddings, dense_iq, args.pair_samples, args.seed)
-    figure_paths["pair_correlation"] = plot_pair_correlation(pairs, pair_stats, out_dir)
-    invariance = augmentation_invariance(model, config, rows, args.batch_size, device)
-    figure_paths["augmentation_invariance"] = plot_augmentation_invariance(invariance, out_dir)
+    embedding_spaces = {
+        "projected": analyze_embedding_space("projected", embeddings, dense_iq, rows, args, out_dir, primary_label_name),
+        "pooled": analyze_embedding_space("pooled", pooled, dense_iq, rows, args, out_dir, primary_label_name),
+    }
+    figure_paths.update({
+        f"{space_name}_{key}": value
+        for space_name, space_summary in embedding_spaces.items()
+        for key, value in space_summary["figure_paths"].items()
+    })
+    invariance_by_space = {
+        "projected": augmentation_invariance(model, config, rows, args.batch_size, device, "projected"),
+        "pooled": augmentation_invariance(model, config, rows, args.batch_size, device, "pooled"),
+    }
+    figure_paths["augmentation_invariance"] = plot_augmentation_invariance(invariance_by_space["projected"], out_dir)
+    figure_paths["pooled_augmentation_invariance"] = plot_augmentation_invariance(
+        invariance_by_space["pooled"],
+        out_dir,
+        "pooled_augmentation_invariance",
+    )
 
     final_training_metrics = metric_rows[-1] if metric_rows else {}
+    projected_summary = embedding_spaces["projected"]
     summary = {
         "checkpoint": os.path.abspath(args.checkpoint),
         "dataset_path": os.path.abspath(h5_path),
         "out_dir": os.path.abspath(out_dir),
         "n_total_split_samples": int(n_total),
         "n_analyzed_samples": int(len(rows)),
-        "embedding_dim": int(embeddings.shape[1]),
+        "embedding_dim": projected_summary["embedding_dim"],
         "condition_encoder": str(config.condition_encoder),
         "final_training_metrics": final_training_metrics,
-        "pca_explained_variance_ratio": [float(value) for value in explained],
-        "pca_explained_variance_ratio_cumulative": [float(value) for value in np.cumsum(explained)],
-        "label_metrics": label_metrics,
-        "reduction_metrics": reduction_metrics,
-        "pair_correlation": pair_stats,
-        "augmentation_invariance": invariance["summary"],
+        "pca_explained_variance_ratio": projected_summary["pca_explained_variance_ratio"],
+        "pca_explained_variance_ratio_cumulative": projected_summary["pca_explained_variance_ratio_cumulative"],
+        "label_metrics": projected_summary["label_metrics"],
+        "reduction_metrics": projected_summary["reduction_metrics"],
+        "pair_correlation": projected_summary["pair_correlation"],
+        "embedding_spaces": embedding_spaces,
+        "augmentation_invariance": invariance_by_space["projected"]["summary"],
+        "augmentation_invariance_by_space": {
+            space_name: space_invariance["summary"]
+            for space_name, space_invariance in invariance_by_space.items()
+        },
         "figure_paths": figure_paths,
         "config": OmegaConf.to_container(config, resolve=True),
     }
@@ -759,9 +819,18 @@ def main():
         "out_dir": os.path.abspath(out_dir),
         "n_analyzed_samples": len(rows),
         "final_loss": final_training_metrics.get("loss"),
-        "label_metrics": label_metrics,
-        "pair_correlation": pair_stats,
-        "augmentation_invariance": invariance["summary"],
+        "projected": {
+            "label_metrics": embedding_spaces["projected"]["label_metrics"],
+            "pair_correlation": embedding_spaces["projected"]["pair_correlation"],
+        },
+        "pooled": {
+            "label_metrics": embedding_spaces["pooled"]["label_metrics"],
+            "pair_correlation": embedding_spaces["pooled"]["pair_correlation"],
+        },
+        "augmentation_invariance": {
+            space_name: space_invariance["summary"]
+            for space_name, space_invariance in invariance_by_space.items()
+        },
     }, indent=2), flush=True)
 
 

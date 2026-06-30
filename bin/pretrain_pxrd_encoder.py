@@ -10,7 +10,7 @@ import random
 import time
 import yaml
 from dataclasses import asdict, dataclass, field
-from typing import List
+from typing import List, Optional
 
 os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -28,6 +28,23 @@ from torch.utils.data import DataLoader, Dataset, RandomSampler
 
 from decifer.decifer_model import DeciferConfig, build_condition_encoder
 from decifer.pxrd import discrete_to_continuous_xrd, nyquist_qstep
+
+
+METRIC_FIELDS = [
+    "iteration",
+    "loss",
+    "contrastive_loss",
+    "pxrd_similarity_loss",
+    "crystal_system_loss",
+    "spacegroup_loss",
+    "positive_similarity",
+    "negative_similarity",
+    "similarity_margin",
+    "retrieval_top1",
+    "crystal_system_accuracy",
+    "spacegroup_accuracy",
+    "time_seconds",
+]
 
 
 @dataclass
@@ -54,6 +71,12 @@ class PxrdEncoderPretrainConfig:
     beta2: float = 0.99
     temperature: float = 0.1
     projection_dim: int = 128
+    contrastive_embedding: str = "projected"
+    pxrd_similarity_loss_weight: float = 0.0
+    pxrd_similarity_temperature: float = 0.1
+    pxrd_similarity_target_temperature: float = 0.1
+    crystal_system_loss_weight: float = 0.0
+    spacegroup_loss_weight: float = 0.0
     seed: int = 1337
     device: str = "cuda"
     dtype: str = "bfloat16"
@@ -224,26 +247,33 @@ class ContrastivePxrdModel(nn.Module):
             nn.GELU(),
             nn.Linear(config.n_embd, config.projection_dim, bias=config.bias),
         )
+        self.crystal_system_head = nn.Linear(config.n_embd, 7, bias=config.bias)
+        self.spacegroup_head = nn.Linear(config.n_embd, 230, bias=config.bias)
 
-    def forward(self, condition):
+    def encode(self, condition):
         tokens = self.encoder(condition)
-        pooled = tokens.mean(dim=1)
-        return nn.functional.normalize(self.projector(pooled), dim=-1)
+        pooled = nn.functional.normalize(tokens.mean(dim=1), dim=-1)
+        projected = nn.functional.normalize(self.projector(pooled), dim=-1)
+        return {"tokens": tokens, "pooled": pooled, "projected": projected}
+
+    def forward(self, condition, embedding: Optional[str] = None):
+        encoded = self.encode(condition)
+        embedding = embedding or self.config.contrastive_embedding
+        if embedding not in {"projected", "pooled"}:
+            raise ValueError(f"unknown contrastive_embedding: {embedding}")
+        return encoded[embedding]
 
 
 class InMemoryPxrdDataset(Dataset):
-    def __init__(self, h5_path):
+    def __init__(self, h5_path, data_keys):
         from decifer.decifer_dataset import DeciferDataset
 
-        source = DeciferDataset(h5_path, ["xrd.q", "xrd.iq"], lazy_open=False)
+        source = DeciferDataset(h5_path, data_keys, lazy_open=False)
         try:
             self.rows = []
             for index in range(len(source)):
                 row = source[index]
-                self.rows.append({
-                    "xrd.q": row["xrd.q"].clone(),
-                    "xrd.iq": row["xrd.iq"].clone(),
-                })
+                self.rows.append({key: clone_dataset_value(value) for key, value in row.items()})
         finally:
             source.close()
 
@@ -275,6 +305,12 @@ class SyntheticPxrdDataset(Dataset):
         return self.rows[index]
 
 
+def clone_dataset_value(value):
+    if torch.is_tensor(value):
+        return value.clone()
+    return value
+
+
 def nt_xent_loss(z1, z2, temperature):
     batch_size = z1.size(0)
     z = torch.cat((z1, z2), dim=0)
@@ -283,6 +319,65 @@ def nt_xent_loss(z1, z2, temperature):
     labels = torch.arange(batch_size, device=z.device)
     labels = torch.cat((labels + batch_size, labels), dim=0)
     return nn.functional.cross_entropy(logits, labels)
+
+
+def soft_cross_entropy(logits, targets):
+    return -(targets * nn.functional.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
+
+
+def pxrd_similarity_loss(z1, z2, dense_iq, logit_temperature, target_temperature):
+    dense = nn.functional.normalize(dense_iq, dim=-1)
+    target_logits = dense @ dense.T / target_temperature
+    targets = nn.functional.softmax(target_logits, dim=-1).detach()
+    logits_12 = z1 @ z2.T / logit_temperature
+    logits_21 = z2 @ z1.T / logit_temperature
+    return 0.5 * (soft_cross_entropy(logits_12, targets) + soft_cross_entropy(logits_21, targets.T))
+
+
+def label_loss(logits_1, logits_2, labels):
+    return 0.5 * (
+        nn.functional.cross_entropy(logits_1, labels)
+        + nn.functional.cross_entropy(logits_2, labels)
+    )
+
+
+def clean_xrd_kwargs(config):
+    fwhm = 0.5 * (config.fwhm_range_min + config.fwhm_range_max)
+    eta = 0.5 * (config.eta_range_min + config.eta_range_max)
+    return {
+        "qmin": config.qmin,
+        "qmax": config.qmax,
+        "qstep": effective_qstep(config),
+        "nyquist_points_per_fwhm": None,
+        "fwhm_range": (fwhm, fwhm),
+        "eta_range": (eta, eta),
+        "noise_range": None,
+        "intensity_scale_range": None,
+        "mask_prob": None,
+        "q_shift_range": None,
+        "q_scale_range": None,
+        "peak_intensity_jitter_range": None,
+        "peak_dropout_prob": None,
+        "background_range": None,
+        "impurity_peak_count_range": None,
+        "particle_size_range": None,
+        "peak_asymmetry_range": None,
+        "final_normalize": config.final_normalize_xrd,
+        "max_peaks": config.max_xrd_peaks if config.max_xrd_peaks > 0 else None,
+    }
+
+
+def needs_label_fields(config):
+    return config.crystal_system_loss_weight > 0 or config.spacegroup_loss_weight > 0
+
+
+def dataset_fields(config):
+    fields = ["xrd.q", "xrd.iq"]
+    if config.crystal_system_loss_weight > 0:
+        fields.append("crystal_system")
+    if config.spacegroup_loss_weight > 0:
+        fields.append("spacegroup")
+    return fields
 
 
 @torch.no_grad()
@@ -302,10 +397,14 @@ def contrastive_batch_metrics(z1, z2):
 
 
 def collate_fn(batch):
-    return {
+    collated = {
         "xrd.q": pad_sequence([item["xrd.q"] for item in batch], batch_first=True, padding_value=0.0),
         "xrd.iq": pad_sequence([item["xrd.iq"] for item in batch], batch_first=True, padding_value=0.0),
     }
+    for key in ("crystal_system", "spacegroup"):
+        if key in batch[0]:
+            collated[key] = torch.stack([item[key].long().view(()) for item in batch])
+    return collated
 
 
 def cap_peak_list(batch_q, batch_iq, max_peaks):
@@ -368,24 +467,13 @@ def move_to_device(value, device):
 
 def write_metrics_header(path):
     with open(path, "w", newline="") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                "iteration",
-                "loss",
-                "positive_similarity",
-                "negative_similarity",
-                "similarity_margin",
-                "retrieval_top1",
-                "time_seconds",
-            ],
-        )
+        writer = csv.DictWriter(f, fieldnames=METRIC_FIELDS)
         writer.writeheader()
 
 
 def append_metric(path, latest_path, row):
     with open(path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+        writer = csv.DictWriter(f, fieldnames=METRIC_FIELDS)
         writer.writerow(row)
     with open(latest_path, "w") as f:
         json.dump(row, f, indent=2)
@@ -459,6 +547,8 @@ def save_checkpoint(config, model, optimizer, iteration):
     checkpoint = {
         "encoder_state": model.encoder.state_dict(),
         "projector_state": model.projector.state_dict(),
+        "crystal_system_head_state": model.crystal_system_head.state_dict(),
+        "spacegroup_head_state": model.spacegroup_head.state_dict(),
         "optimizer_state": optimizer.state_dict(),
         "iteration": iteration,
         "model_args": OmegaConf.to_container(config, resolve=True),
@@ -469,6 +559,10 @@ def save_checkpoint(config, model, optimizer, iteration):
 
 def main():
     config = parse_config()
+    if config.contrastive_embedding not in {"projected", "pooled"}:
+        raise ValueError("contrastive_embedding must be 'projected' or 'pooled'")
+    if config.synthetic_debug_data and needs_label_fields(config):
+        raise ValueError("synthetic_debug_data does not provide crystal_system or spacegroup labels")
     seed_everything(config.seed)
     device = torch.device(config.device)
     print(f"Using device: {device}", flush=True)
@@ -485,11 +579,11 @@ def main():
         dataset = SyntheticPxrdDataset(config.synthetic_debug_size, config.qmin, config.qmax, config.seed)
     elif config.preload_dataset_to_memory:
         print(f"Preloading PXRD HDF5 data into memory: {dataset_path}", flush=True)
-        dataset = InMemoryPxrdDataset(dataset_path)
+        dataset = InMemoryPxrdDataset(dataset_path, dataset_fields(config))
     else:
         from decifer.decifer_dataset import DeciferDataset
 
-        dataset = DeciferDataset(dataset_path, ["xrd.q", "xrd.iq"], lazy_open=config.num_workers_dataloader > 0)
+        dataset = DeciferDataset(dataset_path, dataset_fields(config), lazy_open=config.num_workers_dataloader > 0)
     if len(dataset) < config.batch_size:
         raise ValueError(f"dataset has {len(dataset)} samples, but batch_size is {config.batch_size} and drop_last is enabled")
     loader = DataLoader(
@@ -505,6 +599,7 @@ def main():
         print(f"Using CUDA device: {torch.cuda.get_device_name(device)}", flush=True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, betas=(config.beta1, config.beta2), weight_decay=config.weight_decay)
     kwargs = xrd_kwargs(config)
+    clean_kwargs = clean_xrd_kwargs(config)
     metrics_path = os.path.join(config.out_dir, "contrastive_metrics.csv")
     latest_metrics_path = os.path.join(config.out_dir, "latest_metrics.json")
     live_plot_path = os.path.join(config.out_dir, "contrastive_live.png")
@@ -524,6 +619,12 @@ def main():
             batch = next(iterator)
         batch_q = batch["xrd.q"].to(device)
         batch_iq = batch["xrd.iq"].to(device)
+        crystal_system_labels = batch.get("crystal_system")
+        spacegroup_labels = batch.get("spacegroup")
+        if crystal_system_labels is not None:
+            crystal_system_labels = crystal_system_labels.to(device) - 1
+        if spacegroup_labels is not None:
+            spacegroup_labels = spacegroup_labels.to(device) - 1
         condition_1 = make_condition(batch_q, batch_iq, config, kwargs)
         condition_2 = make_condition(batch_q, batch_iq, config, kwargs)
         condition_1 = move_to_device(condition_1, device)
@@ -532,26 +633,69 @@ def main():
         optimizer.zero_grad(set_to_none=True)
         context = torch.amp.autocast(device_type="cuda", dtype=dtype) if device.type == "cuda" else torch.enable_grad()
         with context:
-            z1 = model(condition_1)
-            z2 = model(condition_2)
-            loss = nt_xent_loss(z1, z2, config.temperature)
+            encoded_1 = model.encode(condition_1)
+            encoded_2 = model.encode(condition_2)
+            z1 = encoded_1[config.contrastive_embedding]
+            z2 = encoded_2[config.contrastive_embedding]
+            contrastive_loss = nt_xent_loss(z1, z2, config.temperature)
+            loss = contrastive_loss
+            pxrd_loss = torch.zeros((), dtype=loss.dtype, device=device)
+            crystal_system_loss = torch.zeros((), dtype=loss.dtype, device=device)
+            spacegroup_loss = torch.zeros((), dtype=loss.dtype, device=device)
+            if config.pxrd_similarity_loss_weight > 0:
+                dense_target = discrete_to_continuous_xrd(batch_q, batch_iq, **clean_kwargs)["iq"]
+                pxrd_loss = pxrd_similarity_loss(
+                    z1,
+                    z2,
+                    dense_target,
+                    config.pxrd_similarity_temperature,
+                    config.pxrd_similarity_target_temperature,
+                )
+                loss = loss + config.pxrd_similarity_loss_weight * pxrd_loss
+            if config.crystal_system_loss_weight > 0:
+                if crystal_system_labels is None:
+                    raise ValueError("crystal_system_loss_weight requires crystal_system in the dataset")
+                crystal_logits_1 = model.crystal_system_head(encoded_1["pooled"])
+                crystal_logits_2 = model.crystal_system_head(encoded_2["pooled"])
+                crystal_system_loss = label_loss(crystal_logits_1, crystal_logits_2, crystal_system_labels)
+                loss = loss + config.crystal_system_loss_weight * crystal_system_loss
+            if config.spacegroup_loss_weight > 0:
+                if spacegroup_labels is None:
+                    raise ValueError("spacegroup_loss_weight requires spacegroup in the dataset")
+                spacegroup_logits_1 = model.spacegroup_head(encoded_1["pooled"])
+                spacegroup_logits_2 = model.spacegroup_head(encoded_2["pooled"])
+                spacegroup_loss = label_loss(spacegroup_logits_1, spacegroup_logits_2, spacegroup_labels)
+                loss = loss + config.spacegroup_loss_weight * spacegroup_loss
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
 
         if iteration % config.log_interval == 0 or iteration == 1:
             metrics = contrastive_batch_metrics(z1.detach(), z2.detach())
+            crystal_system_accuracy = None
+            spacegroup_accuracy = None
+            if config.crystal_system_loss_weight > 0:
+                crystal_system_accuracy = float((crystal_logits_1.detach().argmax(dim=-1) == crystal_system_labels).float().mean().item())
+            if config.spacegroup_loss_weight > 0:
+                spacegroup_accuracy = float((spacegroup_logits_1.detach().argmax(dim=-1) == spacegroup_labels).float().mean().item())
             row = {
                 "iteration": int(iteration),
                 "loss": float(loss.item()),
+                "contrastive_loss": float(contrastive_loss.item()),
+                "pxrd_similarity_loss": float(pxrd_loss.item()),
+                "crystal_system_loss": float(crystal_system_loss.item()),
+                "spacegroup_loss": float(spacegroup_loss.item()),
                 "positive_similarity": metrics["positive_similarity"],
                 "negative_similarity": metrics["negative_similarity"],
                 "similarity_margin": metrics["positive_similarity"] - metrics["negative_similarity"],
                 "retrieval_top1": metrics["retrieval_top1"],
+                "crystal_system_accuracy": crystal_system_accuracy,
+                "spacegroup_accuracy": spacegroup_accuracy,
                 "time_seconds": time.time(),
             }
             print(
                 f"iter {iteration}: loss {row['loss']:.4f}, "
+                f"contrastive {row['contrastive_loss']:.4f}, "
                 f"pos {row['positive_similarity']:.3f}, neg {row['negative_similarity']:.3f}, "
                 f"top1 {row['retrieval_top1']:.3f}",
                 flush=True,
