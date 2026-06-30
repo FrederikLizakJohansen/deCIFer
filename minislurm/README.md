@@ -126,6 +126,15 @@ minicif_pxrd_encoder_pretrain_hybrid/latest_metrics.json
 minicif_pxrd_encoder_pretrain_hybrid/contrastive_metrics.csv
 ```
 
+For local CUDA laptop debugging, use the conservative smoke config first:
+
+```bash
+python bin/pretrain_pxrd_encoder.py \
+  --config configs/minicif_pxrd_encoder_pretrain_hybrid_laptop_smoke.yaml
+```
+
+If the default pretraining config segfaults locally, set `num_workers_dataloader: 0` first. HDF5-backed datasets can crash with PyTorch worker multiprocessing on some systems.
+
 Single-node multi-GPU training uses PyTorch DDP automatically when Slurm exposes more than one GPU:
 
 ```bash

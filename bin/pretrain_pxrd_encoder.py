@@ -2,6 +2,7 @@
 
 import argparse
 import csv
+import faulthandler
 import json
 import math
 import os
@@ -30,6 +31,8 @@ class PxrdEncoderPretrainConfig:
     split: str = "train"
     batch_size: int = 128
     num_workers_dataloader: int = 4
+    dataloader_multiprocessing_context: str = "spawn"
+    pin_memory: bool = False
     max_iters: int = 10_000
     eval_interval: int = 500
     log_interval: int = 20
@@ -96,6 +99,7 @@ class PxrdEncoderPretrainConfig:
 
 
 def parse_config():
+    faulthandler.enable()
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     args = parser.parse_args()
@@ -106,11 +110,35 @@ def parse_config():
     return config
 
 
+def resolve_dtype(config, device):
+    if config.dtype == "bfloat16" and device.type == "cuda" and not torch.cuda.is_bf16_supported():
+        print("CUDA device does not report bfloat16 support; falling back to float16.", flush=True)
+        return torch.float16
+    return {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16}[config.dtype]
+
+
+def dataloader_kwargs(config, device):
+    kwargs = {
+        "num_workers": config.num_workers_dataloader,
+        "collate_fn": collate_fn,
+        "pin_memory": bool(config.pin_memory and device.type == "cuda"),
+        "drop_last": True,
+    }
+    if config.num_workers_dataloader > 0:
+        context = str(config.dataloader_multiprocessing_context or "").strip()
+        if context:
+            kwargs["multiprocessing_context"] = context
+    return kwargs
+
+
 def seed_everything(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    if torch.cuda.is_available():
+
+
+def seed_cuda(seed, device):
+    if device.type == "cuda":
         torch.cuda.manual_seed_all(seed)
 
 
@@ -382,19 +410,27 @@ def main():
     config = parse_config()
     seed_everything(config.seed)
     device = torch.device(config.device)
+    print(f"Using device: {device}", flush=True)
+    print(
+        f"DataLoader workers={config.num_workers_dataloader}, "
+        f"context={config.dataloader_multiprocessing_context!r}, pin_memory={config.pin_memory}",
+        flush=True,
+    )
+    if config.num_workers_dataloader > 0 and config.dataloader_multiprocessing_context not in {"spawn", "forkserver"}:
+        print("WARNING: HDF5 DataLoader workers are safest with multiprocessing context 'spawn' or 'forkserver'.", flush=True)
     dataset_path = os.path.join(config.dataset, "serialized", f"{config.split}.h5")
     dataset = DeciferDataset(dataset_path, ["xrd.q", "xrd.iq"], lazy_open=config.num_workers_dataloader > 0)
     loader = DataLoader(
         dataset,
         batch_size=config.batch_size,
         sampler=RandomSampler(dataset),
-        num_workers=config.num_workers_dataloader,
-        collate_fn=collate_fn,
-        pin_memory=device.type == "cuda",
-        drop_last=True,
+        **dataloader_kwargs(config, device),
     )
     iterator = iter(loader)
+    seed_cuda(config.seed, device)
     model = ContrastivePxrdModel(config).to(device)
+    if device.type == "cuda":
+        print(f"Using CUDA device: {torch.cuda.get_device_name(device)}", flush=True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, betas=(config.beta1, config.beta2), weight_decay=config.weight_decay)
     kwargs = xrd_kwargs(config)
     metrics_path = os.path.join(config.out_dir, "contrastive_metrics.csv")
@@ -404,8 +440,8 @@ def main():
     with open(os.path.join(config.out_dir, "pretrain_config.yaml"), "w") as f:
         yaml.safe_dump(OmegaConf.to_container(config, resolve=True), f, sort_keys=False)
 
-    dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16}[config.dtype]
-    scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda" and config.dtype == "float16")
+    dtype = resolve_dtype(config, device)
+    scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda" and dtype == torch.float16)
 
     model.train()
     for iteration in range(1, config.max_iters + 1):

@@ -351,6 +351,33 @@ python bin/pretrain_pxrd_encoder.py \
   --config configs/minicif_pxrd_encoder_pretrain_hybrid.yaml
 ```
 
+For a CUDA laptop smoke test, start with the safer config:
+
+```bash
+python bin/pretrain_pxrd_encoder.py \
+  --config configs/minicif_pxrd_encoder_pretrain_hybrid_laptop_smoke.yaml
+```
+
+This uses:
+
+```yaml
+num_workers_dataloader: 0
+pin_memory: False
+dtype: 'float32'
+live_plot: False
+```
+
+If that works, turn options back on one at a time:
+
+```yaml
+live_plot: True
+dtype: 'float16'
+num_workers_dataloader: 2
+dataloader_multiprocessing_context: 'spawn'
+```
+
+If pretraining segfaults, the first thing to try is `num_workers_dataloader: 0`. HDF5 plus PyTorch worker multiprocessing can crash at the C-library level on some Linux/CUDA laptop setups.
+
 Watch these files while it trains:
 
 ```text
