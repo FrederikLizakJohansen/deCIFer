@@ -42,6 +42,7 @@ class DeciferConfig:
     condition_qmax: float = 10.0
     condition_cross_attention: bool = False
     condition_cross_attention_every_n_layers: int = 1
+    condition_dropout_prob: float = 0.0
     pxrd_encoder_channels: int = 64
     pxrd_encoder_kernel_size: int = 7
     condition_embedder_hidden_layers: List[int] = field(default_factory=lambda: [512])
@@ -425,6 +426,13 @@ class Decifer(nn.Module):
         else:
             cond_embedding = nn.Identity() # nn's version of None
 
+        # Learned null condition for classifier-free guidance. Only created when
+        # condition dropout is enabled so that older checkpoints keep loading strictly.
+        if config.condition and config.condition_dropout_prob > 0:
+            self.null_cond_emb = nn.Parameter(torch.randn(config.condition_n_tokens, config.n_embd) * 0.02)
+        else:
+            self.null_cond_emb = None
+
         self.transformer = nn.ModuleDict(dict(
             cond_embedding=cond_embedding,
             wte=nn.Embedding(config.vocab_size, config.n_embd),
@@ -507,6 +515,16 @@ class Decifer(nn.Module):
                 f"conditioning encoder returned {cond_emb.size(1)} tokens, "
                 f"expected {self.config.condition_n_tokens}"
             )
+        if (
+            self.training
+            and custom_cond_emb is None
+            and self.null_cond_emb is not None
+            and self.config.condition_dropout_prob > 0
+        ):
+            drop = torch.rand(cond_emb.size(0), device=cond_emb.device) < self.config.condition_dropout_prob
+            if drop.any():
+                null_emb = self.null_cond_emb.to(dtype=cond_emb.dtype).unsqueeze(0)
+                cond_emb = torch.where(drop.view(-1, 1, 1), null_emb, cond_emb)
         return cond_emb
 
     def _build_condition_memory(
@@ -778,7 +796,7 @@ class Decifer(nn.Module):
                 # random note: because named_modules and named_parameters are recursive
                 # we will see the same tensors p many many times. but doing it this way
                 # allows us to know which parent module any tensor p belongs to...
-                if pn.endswith("bias") or pn in {"token_pos", "token_queries"}:
+                if pn.endswith("bias") or pn in {"token_pos", "token_queries", "null_cond_emb"}:
                     # all biases will not be decayed
                     no_decay.add(fpn)
                 elif pn.endswith("weight") and isinstance(m, whitelist_weight_modules):
@@ -825,6 +843,29 @@ class Decifer(nn.Module):
 
         return mask_minicif_logits(logits, idx, self.tokenizer)
 
+    def _next_token_logits(
+        self,
+        idx_cond: torch.Tensor,
+        cond_vec,
+        start_indices_batch,
+        custom_cond_emb,
+        cfg_scale: Optional[float],
+    ) -> torch.Tensor:
+        logits, _ = self(idx_cond, cond_vec=cond_vec, start_indices_batch=start_indices_batch, custom_cond_emb=custom_cond_emb)
+        logits = logits[:, -1, :]
+        if cfg_scale is None or cfg_scale == 1.0 or not self.config.condition:
+            return logits
+        if self.null_cond_emb is None:
+            raise ValueError("cfg_scale requires a model trained with condition_dropout_prob > 0")
+        if start_indices_batch is not None:
+            n_starts = max(sum(len(starts) for starts in start_indices_batch), 1)
+        else:
+            n_starts = idx_cond.size(0)
+        null_emb = self.null_cond_emb.unsqueeze(0).expand(n_starts, -1, -1)
+        uncond_logits, _ = self(idx_cond, cond_vec=None, start_indices_batch=start_indices_batch, custom_cond_emb=null_emb)
+        uncond_logits = uncond_logits[:, -1, :]
+        return uncond_logits + cfg_scale * (logits - uncond_logits)
+
     def _generation_end_mask(self, idx_next: torch.Tensor, prev_id: torch.Tensor) -> torch.Tensor:
         end_condition = idx_next == self.padding_id
         if self.end_id is not None:
@@ -851,6 +892,7 @@ class Decifer(nn.Module):
         disable_pbar=False,
         custom_cond_emb=None,
         constrain_minicif=None,
+        cfg_scale=None,
     ):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
@@ -863,9 +905,9 @@ class Decifer(nn.Module):
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond, cond_vec=cond_vec, start_indices_batch = start_indices_batch, custom_cond_emb=custom_cond_emb)
-            # pluck the logits at the final step and scale by desired temperature
-            logits = logits[:, -1, :] / temperature
+            logits = self._next_token_logits(idx_cond, cond_vec, start_indices_batch, custom_cond_emb, cfg_scale)
+            # scale by desired temperature
+            logits = logits / temperature
             logits = self._mask_generation_logits(logits, idx, constrain_minicif)
             # optionally crop the logits to only the top k options
             if top_k is not None:
@@ -899,6 +941,7 @@ class Decifer(nn.Module):
         disable_pbar=False,
         custom_cond_emb=None,
         constrain_minicif=None,
+        cfg_scale=None,
     ):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (batch_size, seq_len)) and complete
@@ -916,9 +959,9 @@ class Decifer(nn.Module):
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond, cond_vec=cond_vec, start_indices_batch=start_indices_batch, custom_cond_emb=custom_cond_emb)
-            # pluck the logits at the final step and scale by desired temperature
-            logits = logits[:, -1, :] / temperature
+            logits = self._next_token_logits(idx_cond, cond_vec, start_indices_batch, custom_cond_emb, cfg_scale)
+            # scale by desired temperature
+            logits = logits / temperature
             logits = self._mask_generation_logits(logits, idx, constrain_minicif)
             # optionally crop the logits to only the top k options
             if top_k is not None:

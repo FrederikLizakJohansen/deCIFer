@@ -236,6 +236,74 @@ class DeciferModelTest(unittest.TestCase):
         blocked_attention = attention[second_record_last_position, first_record_positions]
         self.assertTrue(torch.all(blocked_attention == 0))
 
+    def test_condition_dropout_creates_null_condition_and_replaces_some_rows(self):
+        tokenizer = MinicifTokenizer()
+        model = Decifer(DeciferConfig(
+            tokenizer="minicif",
+            vocab_size=tokenizer.vocab_size,
+            block_size=16,
+            n_layer=1,
+            n_head=1,
+            n_embd=16,
+            condition=True,
+            condition_size=32,
+            condition_encoder="conv",
+            condition_n_tokens=4,
+            pxrd_encoder_channels=8,
+            condition_dropout_prob=1.0,
+        ))
+        self.assertIsNotNone(model.null_cond_emb)
+        model.train()
+        cond = torch.randn(1, 32)
+        cond_emb = model._condition_embeddings(cond, None, torch.float32)
+        # With dropout probability 1.0 every condition embedding becomes the null token.
+        expected = model.null_cond_emb.to(torch.float32).unsqueeze(0)
+        self.assertTrue(torch.allclose(cond_emb, expected))
+
+    def test_cfg_scale_requires_null_condition(self):
+        tokenizer = MinicifTokenizer()
+        model = Decifer(DeciferConfig(
+            tokenizer="minicif",
+            vocab_size=tokenizer.vocab_size,
+            block_size=16,
+            n_layer=1,
+            n_head=1,
+            n_embd=16,
+            condition=True,
+            condition_size=32,
+            condition_encoder="conv",
+            condition_n_tokens=2,
+            pxrd_encoder_channels=8,
+        ))
+        model.eval()
+        prompt = torch.tensor([tokenizer.encode(tokenizer.tokenize_minicif("<mcif> Na "))])
+        cond = torch.randn(1, 32)
+        with self.assertRaises(ValueError):
+            model.generate(prompt, max_new_tokens=1, cond_vec=cond, start_indices_batch=[[0]], disable_pbar=True, cfg_scale=2.0)
+
+    def test_cfg_scale_runs_when_null_condition_exists(self):
+        tokenizer = MinicifTokenizer()
+        model = Decifer(DeciferConfig(
+            tokenizer="minicif",
+            vocab_size=tokenizer.vocab_size,
+            block_size=16,
+            n_layer=1,
+            n_head=1,
+            n_embd=16,
+            condition=True,
+            condition_size=32,
+            condition_encoder="conv",
+            condition_n_tokens=2,
+            pxrd_encoder_channels=8,
+            condition_dropout_prob=0.1,
+        ))
+        model.eval()
+        prompt = torch.tensor([tokenizer.encode(tokenizer.tokenize_minicif("<mcif> Na "))])
+        cond = torch.randn(1, 32)
+        out = model.generate(prompt, max_new_tokens=2, cond_vec=cond, start_indices_batch=[[0]], disable_pbar=True, cfg_scale=3.0)
+        self.assertEqual(out.size(0), 1)
+        self.assertGreaterEqual(out.size(1), prompt.size(1))
+
     def test_batched_minicif_generation_mask_blocks_invalid_space_group(self):
         tokenizer = MinicifTokenizer()
         model = Decifer(DeciferConfig(

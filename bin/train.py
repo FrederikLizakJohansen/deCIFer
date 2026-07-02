@@ -133,6 +133,7 @@ class TrainConfig:
     peak_encoder_hidden_dim: int = 128
     condition_cross_attention: bool = False
     condition_cross_attention_every_n_layers: int = 1
+    condition_dropout_prob: float = 0.0
     pxrd_encoder_channels: int = 64
     pxrd_encoder_kernel_size: int = 7
     condition_embedder_hidden_layers: List[int] = field(default_factory=lambda: [512])
@@ -700,6 +701,7 @@ if __name__ == "__main__":
         condition_qmax=C.qmax,
         condition_cross_attention=C.condition_cross_attention,
         condition_cross_attention_every_n_layers=C.condition_cross_attention_every_n_layers,
+        condition_dropout_prob=C.condition_dropout_prob,
         pxrd_encoder_channels=C.pxrd_encoder_channels,
         pxrd_encoder_kernel_size=C.pxrd_encoder_kernel_size,
         condition_embedder_hidden_layers = C.condition_embedder_hidden_layers,

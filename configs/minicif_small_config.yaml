@@ -46,6 +46,9 @@ condition_encoder: 'conv'
 condition_n_tokens: 16
 pxrd_encoder_channels: 64
 pxrd_encoder_kernel_size: 7
+# Enable classifier-free guidance: drop the PXRD condition to a learned null token
+# this fraction of steps so --cfg-scale can strengthen conditioning at inference.
+condition_dropout_prob: 0.1
 
 qmin: 0.0
 qmax: 10.0

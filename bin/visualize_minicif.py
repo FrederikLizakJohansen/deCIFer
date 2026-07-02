@@ -24,6 +24,7 @@ from decifer.decifer_dataset import DeciferDataset
 from decifer.decifer_model import Decifer, DeciferConfig
 from decifer.minicif import END_TOKEN, START_TOKEN, MinicifTokenizer, minicif_to_structure, parse_minicif
 from decifer.pxrd import clamp_qmax_for_wavelength, discrete_to_continuous_xrd, nyquist_qstep, q_range_to_two_theta_range
+from bin.test_minicif_realtime import refine_best_candidate
 from bin.train import TrainConfig
 
 PROMPT_MODE_ALIASES = {
@@ -214,6 +215,7 @@ def generate_candidates(model, prompt, cond_vec, args, tokenizer):
             top_k=args.top_k,
             disable_pbar=True,
             constrain_minicif=True,
+            cfg_scale=args.cfg_scale,
         ).cpu().numpy()
         for ids in batch:
             ids = ids[ids != tokenizer.padding_id]
@@ -249,6 +251,8 @@ def evaluate_split(split, h5_path, model, tokenizer, matcher, xrd_kwargs, config
         for prompt_mode in args.prompt_modes:
             prompt = prompt_from_minicif(reference_minicif, prompt_mode, tokenizer)
             candidates = generate_candidates(model, prompt, cond, args, tokenizer)
+            mode_rows = []
+            refine_inputs = []
             for rep, generated_minicif in enumerate(candidates):
                 row = {
                     "split": split,
@@ -292,9 +296,28 @@ def evaluate_split(split, h5_path, model, tokenizer, matcher, xrd_kwargs, config
                         "match": match,
                         "composition_match": generated_structure.composition.reduced_formula == reference_structure.composition.reduced_formula,
                     })
+                    if args.refine_best:
+                        refine_inputs.append({
+                            "rep": rep,
+                            "rwp": row["rwp"],
+                            "generated_crystal_system": generated_parsed.crystal_system,
+                            "generated_structure": generated_structure,
+                        })
                 except Exception as exc:
                     row["error"] = str(exc)
-                rows.append(row)
+                mode_rows.append(row)
+
+            if args.refine_best and refine_inputs:
+                refinement = refine_best_candidate(
+                    refine_inputs, reference_iq, xrd_kwargs, args.wavelength,
+                    max_nfev=args.refine_max_nfev, top_k=args.refine_topk,
+                )
+                if refinement is not None:
+                    for row in mode_rows:
+                        if row["rep"] == refinement["source_rep"]:
+                            row["refined_rwp"] = refinement["rwp_after"]
+                            break
+            rows.extend(mode_rows)
     return pd.DataFrame(rows)
 
 
@@ -309,6 +332,13 @@ def summarize(df):
         valid_rwp = split_df.dropna(subset=["rwp"]) if "rwp" in split_df else split_df.iloc[0:0]
         by_sample = split_df.groupby("sample_index")
         best_rwp = by_sample["rwp"].min() if "rwp" in split_df else pd.Series(dtype=float)
+        # After refinement the best achievable Rwp per sample is the min over both the raw
+        # candidate Rwp and the refined Rwp of the surfaced candidate.
+        if "refined_rwp" in split_df:
+            combined = split_df[["rwp", "refined_rwp"]].min(axis=1, skipna=True)
+            best_refined_rwp = combined.groupby(split_df["sample_index"]).min()
+        else:
+            best_refined_rwp = pd.Series(dtype=float)
         summary = {
             "split": group_key[0],
             "n_samples": int(split_df["sample_index"].nunique()),
@@ -322,6 +352,8 @@ def summarize(df):
             "median_rwp": float(valid_rwp["rwp"].median()) if not valid_rwp.empty else np.nan,
             "median_best_rwp": float(best_rwp.median()) if not best_rwp.empty else np.nan,
             "mean_best_rwp": float(best_rwp.mean()) if not best_rwp.empty else np.nan,
+            "median_best_refined_rwp": float(best_refined_rwp.median()) if not best_refined_rwp.empty else np.nan,
+            "mean_best_refined_rwp": float(best_refined_rwp.mean()) if not best_refined_rwp.empty else np.nan,
             "median_generated_n_tokens": float(split_df["generated_n_tokens"].dropna().median()) if "generated_n_tokens" in split_df else np.nan,
             "median_matched_rmsd": float(split_df.loc[split_df["match"] == True, "rmsd"].median()) if "rmsd" in split_df else np.nan,
             "space_group_accuracy": float(split_df["space_group_match"].fillna(False).mean()) if "space_group_match" in split_df else np.nan,
@@ -455,6 +487,10 @@ def main():
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--use-current", action="store_true", help="Use current_model instead of best_model_state")
     parser.add_argument("--rmsd-threshold", type=float, default=0.0, help="Optional positive RMSD threshold for match rate")
+    parser.add_argument("--cfg-scale", type=float, default=None, help="Classifier-free guidance scale (>1 strengthens PXRD conditioning; requires condition_dropout_prob>0 at train time)")
+    parser.add_argument("--refine-best", action="store_true", help="Refine candidate lattices against the PXRD (coarse scale scan + local refine) and report refined Rwp")
+    parser.add_argument("--refine-topk", type=int, default=4, help="Number of top-Rwp candidates to refine per sample for --refine-best")
+    parser.add_argument("--refine-max-nfev", type=int, default=30, help="Maximum simulator evaluations per candidate for --refine-best")
     parser.add_argument("--qmin", type=float, default=None)
     parser.add_argument("--qmax", type=float, default=None)
     parser.add_argument("--qstep", type=float, default=None)

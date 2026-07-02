@@ -163,6 +163,47 @@ class TestMinicifRealtimeScript(unittest.TestCase):
         self.assertIsNotNone(refined)
         self.assertIn("rwp_after", refined)
 
+    def test_refine_best_candidate_rescues_misscaled_true_structure(self):
+        structure_to_continuous_xrd = test_minicif_realtime.structure_to_continuous_xrd
+        rwp = test_minicif_realtime.rwp
+        xrd_kwargs = {
+            "qmin": 0.0,
+            "qmax": 6.0,
+            "qstep": 0.02,
+            "fwhm_range": (0.06, 0.06),
+            "eta_range": (0.5, 0.5),
+            "noise_range": None,
+            "intensity_scale_range": None,
+            "mask_prob": None,
+            "final_normalize": True,
+        }
+        # Reference is a tetragonal 2-atom motif; the peak intensities (not just spacing)
+        # carry structural information, so refinement of a wrong motif cannot fully fit it.
+        true_lattice = Lattice.tetragonal(4.0, 6.0)
+        true_structure = Structure(true_lattice, ["Fe", "O"], [[0, 0, 0], [0.0, 0.0, 0.32]])
+        reference_iq = structure_to_continuous_xrd(true_structure, xrd_kwargs, "CuKa")
+
+        # Candidate 0 is the correct motif but with a cell scaled ~12% too large, so its raw
+        # Rwp is poor. Candidate 1 has a wrong atomic arrangement whose raw Rwp happens to be
+        # lower. Only the true motif can be refined (via lattice) to near-zero Rwp.
+        misscaled_true = Structure(Lattice.tetragonal(4.5, 6.75), ["Fe", "O"], [[0, 0, 0], [0.0, 0.0, 0.32]])
+        wrong_structure = Structure(Lattice.tetragonal(4.0, 6.0), ["Fe", "O"], [[0, 0, 0], [0.5, 0.5, 0.1]])
+        misscaled_iq = structure_to_continuous_xrd(misscaled_true, xrd_kwargs, "CuKa")
+        wrong_iq = structure_to_continuous_xrd(wrong_structure, xrd_kwargs, "CuKa")
+        rows = [
+            {"rep": 0, "rwp": rwp(reference_iq, misscaled_iq), "generated_crystal_system": 4,
+             "generated_structure": misscaled_true},
+            {"rep": 1, "rwp": rwp(reference_iq, wrong_iq), "generated_crystal_system": 4,
+             "generated_structure": wrong_structure},
+        ]
+        self.assertGreater(rows[0]["rwp"], rows[1]["rwp"])  # true structure ranks worse on raw Rwp
+
+        refined = refine_best_candidate(rows, reference_iq, xrd_kwargs, "CuKa", max_nfev=40, top_k=2)
+
+        self.assertIsNotNone(refined)
+        self.assertEqual(refined["source_rep"], 0)
+        self.assertLess(refined["rwp_after"], rows[1]["rwp"])
+
 
 if __name__ == "__main__":
     unittest.main()

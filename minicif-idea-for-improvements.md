@@ -16,6 +16,7 @@ Purpose: collect concrete ideas for improving the current deCIFer codebase, mode
 - 2026-06-28: Added structured training metrics logs (`metrics.jsonl` and `metrics.csv`) and created `minicif-features-vs-decifer.md` to summarize core minicif changes relative to deCIFer.
 - 2026-06-29: Added follow-up ideas around COD data, more realistic PXRD simulation, multi-phase generation, on-the-fly synthetic minicifs, and stronger lattice/space-group constraints.
 - 2026-06-30: Added peak-list and hybrid PXRD conditioning, true cross-attention conditioning, small conditioning-ablation configs, sequential ablation SLURM workflow, and extended minicif evaluation with multiple prompt modes, finish rate, generated-token length, and extra/missing element metrics.
+- 2026-07-02: Added classifier-free guidance (learned null-condition token, `condition_dropout_prob` training knob, `--cfg-scale` at inference) and structure-space lattice refinement as a two-phase reranker (coarse uniform-scale scan on all valid candidates, rerank by post-scan Rwp, local anisotropic `least_squares` refine on the top-K, keep best refined Rwp). On the existing large checkpoint the refinement turns a correct-topology-but-mis-scaled candidate (raw Rwp 1.20, ranked 5th) into a solved structure (refined Rwp 0.07, refined cell essentially exact), which the old rerank-then-refine-best path missed. Wired both into `bin/test_minicif_realtime.py` and the `bin/visualize_minicif.py` batch report (`median/mean_best_refined_rwp`).
 
 ## Review assumptions
 
@@ -41,6 +42,7 @@ These are the current highest-value directions after checking recent PXRD/crysta
 
 5. Structure-space refinement after minicif proposal.
    Keep minicif as a fast proposal generator, then refine/rerank in structure space using lattice/PXRD agreement. This captures some benefits of structure-native diffusion/refinement methods without replacing the current model.
+   Implemented 2026-07-02 as a two-phase reranker (coarse uniform-scale scan over all valid candidates, rerank by post-scan Rwp, local anisotropic lattice refinement on the top-K). This is the single highest-impact change verified on the existing checkpoint: correct-topology candidates that the generator mis-scales are recovered to near-zero Rwp, whereas the previous rerank-then-refine-best path left them unranked. Next: also refine fractional coordinates, not only the lattice.
 
 Implementation order:
 - Start with contrastive PXRD pretraining and Rwp reranking because both can reuse the current model and evaluation stack.
@@ -574,6 +576,12 @@ Verification:
 
 - P1 - Condition-strength and guidance experiments.
   If minicif separates CIF LM and PXRD conditioning, try classifier-free guidance-style dropout of conditioning during training, then guide generation by scaling conditional logits.
+
+  Current implementation (2026-07-02):
+  - `condition_dropout_prob` replaces the PXRD condition with a learned per-token null embedding during training, so the model learns an unconditional prior alongside the conditional one.
+  - `generate*` accept `cfg_scale`; when >1 the next-token logits become `uncond + cfg_scale * (cond - uncond)`, computed with the null condition for the unconditional pass.
+  - `--cfg-scale` is exposed in `bin/test_minicif_realtime.py` and `bin/visualize_minicif.py`; requires a checkpoint trained with `condition_dropout_prob > 0`.
+  - Still needed: sweep `cfg_scale` on a trained CFG checkpoint and report match rate / best-of-K Rwp versus guidance strength.
 
 - P2 - Candidate diversity controls.
   Add systematic temperature/top-p/top-k sweeps and diversity penalties so best-of-K sampling explores genuinely different structures rather than formatting variants.

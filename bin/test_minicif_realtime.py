@@ -186,6 +186,7 @@ def generate_candidates(model, prompt, cond_vec, args, tokenizer):
             top_k=args.top_k,
             disable_pbar=not args.show_pbar,
             constrain_minicif=True,
+            cfg_scale=args.cfg_scale,
         ).cpu().numpy()
         for ids in batch:
             ids = ids[ids != tokenizer.padding_id]
@@ -268,19 +269,30 @@ def best_row_by_rwp(rows):
     return min((row for row in rows if row["rwp"] is not None), key=lambda row: row["rwp"], default=None)
 
 
-def refine_best_candidate(rows, reference_iq, xrd_kwargs, wavelength, max_nfev):
-    best = best_row_by_rwp(rows)
-    if best is None:
-        return None
-    try:
-        from scipy.optimize import least_squares
-    except Exception as exc:
-        raise RuntimeError("--refine-best requires scipy") from exc
+def _coarse_scale_structure(structure, reference_iq, xrd_kwargs, wavelength, scan):
+    """Find the uniform lattice scale that best matches the reference pattern.
 
-    structure = best["generated_structure"]
-    crystal_system = best.get("generated_crystal_system")
-    if crystal_system is None:
-        return None
+    Rwp as a function of overall cell scale is highly multimodal because peaks slide
+    past one another, so a gradient refinement from the generated cell alone gets
+    trapped. A coarse scan gives the local refiner a good starting basin.
+    """
+    best_scale, best_rwp = 1.0, float("inf")
+    a, b, c = structure.lattice.abc
+    angles = structure.lattice.angles
+    for scale in scan:
+        lattice = Lattice.from_parameters(a * scale, b * scale, c * scale, *angles)
+        trial = Structure(lattice, [site.species for site in structure], structure.frac_coords)
+        trial_rwp = rwp(reference_iq, structure_to_continuous_xrd(trial, xrd_kwargs, wavelength))
+        if trial_rwp < best_rwp:
+            best_scale, best_rwp = float(scale), trial_rwp
+    scaled_lattice = Lattice.from_parameters(a * best_scale, b * best_scale, c * best_scale, *angles)
+    scaled = Structure(scaled_lattice, [site.species for site in structure], structure.frac_coords)
+    return scaled, best_scale, best_rwp
+
+
+def _local_refine_structure(structure, crystal_system, reference_iq, xrd_kwargs, wavelength, max_nfev):
+    from scipy.optimize import least_squares
+
     x0, bounds = _lattice_refinement_parameters(structure.lattice, crystal_system)
 
     def residual(params):
@@ -288,28 +300,64 @@ def refine_best_candidate(rows, reference_iq, xrd_kwargs, wavelength, max_nfev):
         trial_iq = structure_to_continuous_xrd(trial_structure, xrd_kwargs, wavelength)
         return trial_iq - reference_iq
 
-    result = least_squares(
-        residual,
-        x0,
-        bounds=bounds,
-        max_nfev=max_nfev,
-        xtol=1e-4,
-        ftol=1e-4,
-        gtol=1e-4,
-    )
+    result = least_squares(residual, x0, bounds=bounds, max_nfev=max_nfev, xtol=1e-4, ftol=1e-4, gtol=1e-4)
     refined_structure = _structure_with_refined_lattice(structure, result.x, crystal_system)
-    refined_iq = structure_to_continuous_xrd(refined_structure, xrd_kwargs, wavelength)
-    return {
-        "source_rep": best["rep"],
-        "success": bool(result.success),
-        "message": result.message,
-        "nfev": int(result.nfev),
-        "rwp_before": best["rwp"],
-        "rwp_after": rwp(reference_iq, refined_iq),
-        "generated_iq": refined_iq,
-        "generated_structure": refined_structure,
-        "params": [float(value) for value in result.x],
-    }
+    return refined_structure, result
+
+
+def refine_best_candidate(rows, reference_iq, xrd_kwargs, wavelength, max_nfev, top_k=4, scale_scan_points=33):
+    """Rescue the best structure by coarse scale scan, then local lattice refinement.
+
+    The generator often proposes the correct topology with a mis-scaled cell that ranks
+    poorly on raw Rwp, and Rwp-vs-scale is highly multimodal so a local refiner alone
+    gets trapped. We therefore (1) run a cheap uniform-scale scan on every valid
+    candidate, (2) rerank by post-scan Rwp, and (3) run the expensive local anisotropic
+    refinement only on the top-`top_k`, keeping the best refined result.
+    """
+    try:
+        from scipy.optimize import least_squares  # noqa: F401  (import validated before scanning)
+    except Exception as exc:
+        raise RuntimeError("lattice refinement requires scipy") from exc
+
+    candidates = [
+        row for row in rows
+        if row.get("generated_structure") is not None
+        and row.get("rwp") is not None
+        and row.get("generated_crystal_system") is not None
+    ]
+    if not candidates:
+        return None
+
+    scan = np.linspace(0.7, 1.4, scale_scan_points)
+    scanned = []
+    for row in candidates:
+        scaled_structure, best_scale, scaled_rwp = _coarse_scale_structure(
+            row["generated_structure"], reference_iq, xrd_kwargs, wavelength, scan
+        )
+        scanned.append((row, scaled_structure, best_scale, scaled_rwp))
+
+    scanned.sort(key=lambda item: item[3])
+    refinements = []
+    for row, scaled_structure, best_scale, _ in scanned[: max(1, int(top_k))]:
+        refined_structure, result = _local_refine_structure(
+            scaled_structure, row["generated_crystal_system"], reference_iq, xrd_kwargs, wavelength, max_nfev
+        )
+        refined_iq = structure_to_continuous_xrd(refined_structure, xrd_kwargs, wavelength)
+        refinements.append({
+            "source_rep": row["rep"],
+            "success": bool(result.success),
+            "message": result.message,
+            "nfev": int(result.nfev),
+            "coarse_scale": best_scale,
+            "rwp_before": row["rwp"],
+            "rwp_after": rwp(reference_iq, refined_iq),
+            "generated_iq": refined_iq,
+            "generated_structure": refined_structure,
+            "params": [float(value) for value in result.x],
+        })
+    if not refinements:
+        return None
+    return min(refinements, key=lambda refinement: refinement["rwp_after"])
 
 
 def _lattice_refinement_parameters(lattice, crystal_system):
@@ -375,7 +423,7 @@ def print_refinement_result(refinement):
         return
     print("\nBest-candidate lattice refinement")
     print(f"source_rep={refinement['source_rep']}")
-    print(f"success={refinement['success']} nfev={refinement['nfev']}")
+    print(f"success={refinement['success']} nfev={refinement['nfev']} coarse_scale={refinement['coarse_scale']:.4f}")
     print(f"Rwp_before={refinement['rwp_before']:.6f} Rwp_after={refinement['rwp_after']:.6f}")
     print(f"params={refinement['params']}")
 
@@ -541,8 +589,10 @@ def main():
     parser.add_argument("--no-print-minicifs", action="store_true", help="Do not print generated minicif strings")
     parser.add_argument("--figure-out", default="", help="Optional path to save a PXRD/structure comparison figure")
     parser.add_argument("--figure-supercell", type=int, default=2, help="Supercell repeat count for structure panels")
-    parser.add_argument("--refine-best", action="store_true", help="Run a lightweight lattice refinement on the best generated candidate")
-    parser.add_argument("--refine-max-nfev", type=int, default=30, help="Maximum simulator evaluations for --refine-best")
+    parser.add_argument("--refine-best", action="store_true", help="Refine candidate lattices against the PXRD (coarse scale scan + local refine) and rerank")
+    parser.add_argument("--refine-max-nfev", type=int, default=30, help="Maximum simulator evaluations per candidate for --refine-best")
+    parser.add_argument("--refine-topk", type=int, default=4, help="Number of top-Rwp candidates to refine and rerank for --refine-best")
+    parser.add_argument("--cfg-scale", type=float, default=None, help="Classifier-free guidance scale (>1 strengthens PXRD conditioning; requires a model trained with condition_dropout_prob>0)")
     parser.add_argument("--show-pbar", action="store_true")
     args = parser.parse_args()
 
@@ -583,7 +633,7 @@ def main():
     print_results(rows, not args.no_print_minicifs)
     figure_rows = rows
     if args.refine_best:
-        refinement = refine_best_candidate(rows, reference_iq, xrd_kwargs, args.wavelength, args.refine_max_nfev)
+        refinement = refine_best_candidate(rows, reference_iq, xrd_kwargs, args.wavelength, args.refine_max_nfev, top_k=args.refine_topk)
         print_refinement_result(refinement)
         if refinement is not None and refinement["rwp_after"] <= refinement["rwp_before"]:
             figure_rows = rows + [{
