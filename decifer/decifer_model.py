@@ -34,6 +34,7 @@ class DeciferConfig:
     boundary_masking: bool = True
     condition_size: int = 1000
     condition_encoder: str = "mlp"
+    hybrid_dense_encoder: str = "conv"
     condition_n_tokens: int = 1
     dense_condition_n_tokens: int = 16
     peak_condition_n_tokens: int = 16
@@ -131,13 +132,22 @@ class CausalSelfAttention(nn.Module):
                     q, k, v, attn_mask=attention_bias, dropout_p=dropout_p
                 )
             elif past_kv is not None and T != Tk:
-                # Incremental decoding: new queries may freely attend to every cached key
-                # (all causally in the past already) plus a causal block among themselves.
-                causal = torch.ones(T, Tk, dtype=torch.bool, device=x.device)
-                causal[:, -T:] = torch.tril(torch.ones(T, T, dtype=torch.bool, device=x.device))
-                y = torch.nn.functional.scaled_dot_product_attention(
-                    q, k, v, attn_mask=causal, dropout_p=dropout_p,
-                )
+                if T == 1:
+                    # Single-token decode step: the one new query is causally allowed to
+                    # attend to every cached key plus itself, so the mask is all-ones.
+                    # Skip building it and let SDPA attend over all provided keys.
+                    y = torch.nn.functional.scaled_dot_product_attention(
+                        q, k, v, attn_mask=None, dropout_p=dropout_p,
+                    )
+                else:
+                    # Multi-token incremental step: new queries may freely attend to every
+                    # cached key (all causally in the past already) plus a causal block
+                    # among themselves.
+                    causal = torch.ones(T, Tk, dtype=torch.bool, device=x.device)
+                    causal[:, -T:] = torch.tril(torch.ones(T, T, dtype=torch.bool, device=x.device))
+                    y = torch.nn.functional.scaled_dot_product_attention(
+                        q, k, v, attn_mask=causal, dropout_p=dropout_p,
+                    )
             else:
                 y = torch.nn.functional.scaled_dot_product_attention(
                     q, k, v, attn_mask=None, dropout_p=dropout_p, is_causal=True,
@@ -215,11 +225,14 @@ def gelu(x: torch.Tensor) -> torch.Tensor:
     Implements the Gaussian Error Linear Unit (GELU) activation function, as used in the Google BERT and
     OpenAI GPT models. See: "Gaussian Error Linear Units (GELUs)", https://arxiv.org/abs/1606.08415
 
+    Uses PyTorch's fused tanh approximation, which computes the same formula as the
+    original hand-written expression but as a single kernel (faster, fewer pointwise ops).
+
     :param x: the tensor to which the GELU activation function will be applied
     :returns: the result tensor after applying the GELU activation function,
               possessing the same shape as the input tensor
     """
-    return 0.5 * x * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))))
+    return F.gelu(x, approximate="tanh")
 
 
 class MLP(nn.Module):
@@ -321,6 +334,57 @@ class PxrdConvEncoder(nn.Module):
         return self.proj(x) + self.token_pos
 
 
+class PxrdPatchEncoder(nn.Module):
+    """Position-preserving dense-PXRD encoder.
+
+    The convolutional encoder ends in ``AdaptiveAvgPool1d``, which averages roughly
+    ``condition_size / condition_n_tokens`` points into each token and therefore erases
+    where a peak sits inside that window. Peak positions are exactly the d-spacings that
+    fix the unit cell, so that pooling throws away the geometric signal.
+
+    This encoder instead keeps a token per fixed q-window: a length-preserving local
+    conv extracts per-point features (no pooling), then a strided "patch" projection maps
+    each non-overlapping q-window to one token. Because the strided projection has a
+    distinct weight per position inside the window, the location of a peak within its
+    window is preserved rather than averaged away.
+    """
+
+    def __init__(self, config: DeciferConfig):
+        super().__init__()
+        self.n_tokens = config.condition_n_tokens
+        self.input_size = config.condition_size
+        # Each token owns one non-overlapping q-window. The final (possibly short) window
+        # is zero-padded so the trace divides evenly into n_tokens patches.
+        self.patch_size = math.ceil(self.input_size / self.n_tokens)
+        self.padded_size = self.patch_size * self.n_tokens
+
+        padding = config.pxrd_encoder_kernel_size // 2
+        channels = config.pxrd_encoder_channels
+        self.local = nn.Sequential(
+            nn.Conv1d(1, channels, config.pxrd_encoder_kernel_size, padding=padding, bias=config.bias),
+            nn.GELU(),
+            nn.Conv1d(channels, channels, config.pxrd_encoder_kernel_size, padding=padding, bias=config.bias),
+            nn.GELU(),
+        )
+        # Strided patch projection: one output token per q-window, weights distinguish
+        # positions inside the window (unlike averaging).
+        self.to_token = nn.Conv1d(
+            channels, config.n_embd, kernel_size=self.patch_size, stride=self.patch_size, bias=config.bias
+        )
+        self.token_pos = nn.Parameter(torch.zeros(self.n_tokens, config.n_embd))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.size(1) < self.padded_size:
+            x = F.pad(x, (0, self.padded_size - x.size(1)))
+        elif x.size(1) > self.padded_size:
+            x = x[:, : self.padded_size]
+        x = x.unsqueeze(1)          # (B, 1, padded_size)
+        x = self.local(x)           # (B, channels, padded_size)
+        x = self.to_token(x)        # (B, n_embd, n_tokens)
+        x = x.transpose(1, 2)       # (B, n_tokens, n_embd)
+        return x + self.token_pos
+
+
 class PeakListEncoder(nn.Module):
 
     def __init__(self, config: DeciferConfig, n_tokens: Optional[int] = None):
@@ -381,7 +445,13 @@ class HybridPxrdEncoder(nn.Module):
 
     def __init__(self, config: DeciferConfig):
         super().__init__()
-        self.dense_encoder = PxrdConvEncoder(_replace_condition_tokens(config, config.dense_condition_n_tokens))
+        dense_config = _replace_condition_tokens(config, config.dense_condition_n_tokens)
+        if config.hybrid_dense_encoder == "patch":
+            self.dense_encoder = PxrdPatchEncoder(dense_config)
+        elif config.hybrid_dense_encoder == "conv":
+            self.dense_encoder = PxrdConvEncoder(dense_config)
+        else:
+            raise ValueError(f"unknown hybrid_dense_encoder: {config.hybrid_dense_encoder}")
         self.peak_encoder = PeakListEncoder(config, n_tokens=config.peak_condition_n_tokens)
 
     def forward(self, cond: Dict[str, torch.Tensor]) -> torch.Tensor:
@@ -412,6 +482,8 @@ def build_condition_encoder(config: DeciferConfig) -> nn.Module:
         )
     if config.condition_encoder == "conv":
         return PxrdConvEncoder(config)
+    if config.condition_encoder == "patch":
+        return PxrdPatchEncoder(config)
     if config.condition_encoder == "peak":
         return PeakListEncoder(config)
     if config.condition_encoder == "hybrid":

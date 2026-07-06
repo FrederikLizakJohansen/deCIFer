@@ -127,6 +127,7 @@ class TrainConfig:
     # PXRD embedder
     condition: bool = False
     condition_encoder: str = "mlp"
+    hybrid_dense_encoder: str = "conv"
     condition_n_tokens: int = 1
     dense_condition_n_tokens: int = 16
     peak_condition_n_tokens: int = 16
@@ -693,6 +694,7 @@ if __name__ == "__main__":
         tokenizer=C.tokenizer,
         minicif_constrained_decoding=C.minicif_constrained_decoding,
         condition_encoder=C.condition_encoder,
+        hybrid_dense_encoder=C.hybrid_dense_encoder,
         condition_n_tokens=C.condition_n_tokens,
         dense_condition_n_tokens=C.dense_condition_n_tokens,
         peak_condition_n_tokens=C.peak_condition_n_tokens,

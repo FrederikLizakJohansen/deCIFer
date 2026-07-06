@@ -4,7 +4,7 @@ from types import MethodType
 
 import torch
 
-from decifer.decifer_model import Decifer, DeciferConfig, PeakListEncoder
+from decifer.decifer_model import Decifer, DeciferConfig, PeakListEncoder, PxrdConvEncoder, PxrdPatchEncoder
 from decifer.minicif import MinicifTokenizer
 
 
@@ -100,6 +100,79 @@ class DeciferModelTest(unittest.TestCase):
 
         self.assertEqual(missing, [])
         self.assertEqual(unexpected, [])
+
+    def test_patch_condition_encoder_inserts_multiple_condition_tokens(self):
+        tokenizer = MinicifTokenizer()
+        model = Decifer(DeciferConfig(
+            tokenizer="minicif",
+            vocab_size=tokenizer.vocab_size,
+            block_size=16,
+            n_layer=1,
+            n_head=1,
+            n_embd=16,
+            condition=True,
+            condition_size=32,
+            condition_encoder="patch",
+            condition_n_tokens=4,
+            pxrd_encoder_channels=8,
+        ))
+        idx = torch.tensor([tokenizer.encode(tokenizer.tokenize_minicif("<mcif> Na "))])
+        cond = torch.randn(1, 32)
+
+        logits, loss = model(idx, cond, idx.clone(), [[0]])
+
+        self.assertEqual(logits.shape, (1, idx.size(1) + 4, tokenizer.vocab_size))
+        self.assertIsNotNone(loss)
+
+    def test_patch_condition_encoder_parameters_are_grouped_for_optimizer(self):
+        tokenizer = MinicifTokenizer()
+        model = Decifer(DeciferConfig(
+            tokenizer="minicif",
+            vocab_size=tokenizer.vocab_size,
+            block_size=16,
+            n_layer=1,
+            n_head=1,
+            n_embd=16,
+            condition=True,
+            condition_size=32,
+            condition_encoder="patch",
+            condition_n_tokens=4,
+            pxrd_encoder_channels=8,
+        ))
+
+        optimizer = model.configure_optimizers(0.1, 1e-3, (0.9, 0.95))
+
+        self.assertEqual(len(optimizer.param_groups), 2)
+
+    def test_patch_encoder_resolves_peak_position_within_a_window(self):
+        # The conv encoder's adaptive average pooling cannot tell where a peak sits
+        # inside a pooling window; the patch encoder must. Two peaks in the same window
+        # should produce clearly different condition tokens.
+        torch.manual_seed(0)
+        config = DeciferConfig(
+            condition=True,
+            condition_size=160,
+            condition_n_tokens=8,
+            n_embd=16,
+            pxrd_encoder_channels=16,
+            pxrd_encoder_kernel_size=7,
+            bias=False,
+        )
+        patch = PxrdPatchEncoder(config).eval()
+        conv = PxrdConvEncoder(config).eval()
+
+        def delta(pos):
+            x = torch.zeros(1, config.condition_size)
+            x[0, pos] = 1.0
+            return x
+
+        # positions 2 and 15 fall in the same width-20 window (token 0)
+        with torch.no_grad():
+            patch_diff = (patch(delta(2)) - patch(delta(15))).abs().max().item()
+            conv_diff = (conv(delta(2)) - conv(delta(15))).abs().max().item()
+
+        self.assertGreater(patch_diff, 1e-2)
+        self.assertGreater(patch_diff, 10 * conv_diff)
 
     def test_peak_condition_encoder_inserts_peak_tokens(self):
         tokenizer = MinicifTokenizer()
@@ -321,6 +394,8 @@ class DeciferModelTest(unittest.TestCase):
             logits = torch.full((idx.size(0), idx.size(1), tokenizer.vocab_size), -100.0)
             logits[:, -1, tokenizer.token_to_id["sg_194"]] = 100.0
             logits[:, -1, tokenizer.token_to_id["sg_195"]] = 0.0
+            if kwargs.get("use_cache"):
+                return logits, None, []
             return logits, None
 
         model.forward = MethodType(forward_with_bad_space_group, model)
@@ -348,6 +423,8 @@ class DeciferModelTest(unittest.TestCase):
             logits = torch.full((idx.size(0), idx.size(1), tokenizer.vocab_size), -100.0)
             logits[:, -1, tokenizer.token_to_id["Fe"]] = 100.0
             logits[:, -1, tokenizer.token_to_id["Na"]] = 0.0
+            if kwargs.get("use_cache"):
+                return logits, None, []
             return logits, None
 
         model.forward = MethodType(forward_with_bad_atom, model)
@@ -375,6 +452,8 @@ class DeciferModelTest(unittest.TestCase):
             logits = torch.full((idx.size(0), idx.size(1), tokenizer.vocab_size), -100.0)
             logits[:, -1, tokenizer.token_to_id["6"]] = 100.0
             logits[:, -1, tokenizer.token_to_id["5"]] = 0.0
+            if kwargs.get("use_cache"):
+                return logits, None, []
             return logits, None
 
         model.forward = MethodType(forward_with_bad_b, model)
