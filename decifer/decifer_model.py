@@ -90,7 +90,14 @@ class CausalSelfAttention(nn.Module):
         # Masked attention
         self.masked_bias = torch.tensor(-1e4)
 
-    def forward(self, x: torch.Tensor, attention_bias: Optional[torch.Tensor] = None, return_attn: bool = False) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        attention_bias: Optional[torch.Tensor] = None,
+        return_attn: bool = False,
+        past_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        use_cache: bool = False,
+    ):
         """
         Applies causal self-attention to the given tensor,
         with a mask to prevent attention to future positions.
@@ -106,21 +113,38 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
 
+        if past_kv is not None:
+            past_k, past_v = past_kv
+            k = torch.cat((past_k, k), dim=2)
+            v = torch.cat((past_v, v), dim=2)
+        new_kv = (k, v) if use_cache else None
+        Tk = k.size(2)
+
         #causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash and not return_attn:
             dropout_p = self.dropout if self.training else 0.0
             if attention_bias is not None:
                 # Expand attention_bias to match the number of heads
                 attention_bias = attention_bias.unsqueeze(1) # Shape (B, 1, T, T)
-                attention_bias = attention_bias.expand(B, self.n_head, T, T)  # Expand to (B, n_head, T, T)
+                attention_bias = attention_bias.expand(B, self.n_head, T, Tk)  # Expand to (B, n_head, T, Tk)
                 y = torch.nn.functional.scaled_dot_product_attention(
                     q, k, v, attn_mask=attention_bias, dropout_p=dropout_p
+                )
+            elif past_kv is not None and T != Tk:
+                # Incremental decoding: new queries may freely attend to every cached key
+                # (all causally in the past already) plus a causal block among themselves.
+                causal = torch.ones(T, Tk, dtype=torch.bool, device=x.device)
+                causal[:, -T:] = torch.tril(torch.ones(T, T, dtype=torch.bool, device=x.device))
+                y = torch.nn.functional.scaled_dot_product_attention(
+                    q, k, v, attn_mask=causal, dropout_p=dropout_p,
                 )
             else:
                 y = torch.nn.functional.scaled_dot_product_attention(
                     q, k, v, attn_mask=None, dropout_p=dropout_p, is_causal=True,
                 )
         else:
+            if past_kv is not None:
+                raise NotImplementedError("KV cache requires Flash Attention (torch >= 2.0)")
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
             if attention_bias is not None:
@@ -137,7 +161,9 @@ class CausalSelfAttention(nn.Module):
             y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = y.transpose(1, 2).contiguous().view(B, T, C)  # re-assemble all head outputs side by side
         y = self.resid_dropout(self.c_proj(y))
-        if not return_attn:
+        if use_cache:
+            return y, new_kv
+        elif not return_attn:
             return y
         else:
             return y, att
@@ -240,7 +266,9 @@ class Block(nn.Module):
         cross_attention_bias: Optional[torch.Tensor] = None,
         return_attn: bool = False,
         print_parameters: bool = False,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor]]:
+        past_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        use_cache: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]]:
         """
         Forward pass for the Transformer Block module. A Block module includes causal self-attention,
         layer normalization, and MLP, and residual connections.
@@ -248,6 +276,13 @@ class Block(nn.Module):
         :param x: input to the transformer block
         :returns: output of the transformer block, with the same shape as in the input
         """
+        if use_cache:
+            if self.use_cross_attention and cross_memory is not None:
+                raise NotImplementedError("KV cache is not supported with cross-attention conditioning")
+            attn_out, new_kv = self.attn(self.ln_1(x), attention_bias, past_kv=past_kv, use_cache=True)
+            x = x + attn_out
+            x = x + self.mlp(self.ln_2(x))
+            return x, new_kv
         if not return_attn:
             x = x + self.attn(self.ln_1(x), attention_bias)
             if self.use_cross_attention and cross_memory is not None:
@@ -565,11 +600,32 @@ class Decifer(nn.Module):
         start_indices_batch: List[List[int]] = [[0]],
         custom_cond_emb: Optional[torch.Tensor] = None,
         return_attn: Optional[bool] = None,
+        past_kv: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
+        past_length: int = 0,
+        use_cache: bool = False,
     ):
 
         device = idx.device
         b, t = idx.size()
         ptdtype = self.transformer.wte.weight.dtype
+
+        if past_kv is not None:
+            # Incremental decoding step: `idx` holds only the newly generated tokens.
+            # Conditioning was already folded into the cached keys/values during the
+            # prefill pass, and no new group boundary is introduced after that point
+            # (see generate_batched_reps), so a plain causal continuation is correct.
+            assert targets is None, "kv cache decoding does not support computing a loss"
+            positions = torch.arange(past_length, past_length + t, device=device).unsqueeze(0).expand(b, t)
+            tok_emb = self.transformer.wte(idx)
+            pos_emb = self.transformer.wpe(positions)
+            x = self.transformer.drop(tok_emb + pos_emb)
+            new_past_kv = []
+            for i, block in enumerate(self.transformer.h):
+                x, layer_kv = block(x, past_kv=past_kv[i], use_cache=True)
+                new_past_kv.append(layer_kv)
+            x = self.transformer.ln_f(x)
+            logits = self.lm_head(x[:, [-1], :])
+            return logits, None, new_past_kv
 
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
         capture_attention = self.config.plot_attention if return_attn is None else return_attn
@@ -736,6 +792,7 @@ class Decifer(nn.Module):
 
         # Forward pass through transformer blocks
         self.attn_scores = [] if capture_attention else None
+        new_past_kv = [] if use_cache else None
         for i, block in enumerate(self.transformer.h):
             if capture_attention:
                 x, att = block(
@@ -746,6 +803,15 @@ class Decifer(nn.Module):
                     return_attn=True,
                 )
                 self.attn_scores.append(att.detach().cpu().mean(dim=1))
+            elif use_cache:
+                x, layer_kv = block(
+                    x,
+                    attention_bias=attention_bias,
+                    cross_memory=cross_memory,
+                    cross_attention_bias=cross_attention_bias,
+                    use_cache=True,
+                )
+                new_past_kv.append(layer_kv)
             else:
                 x = block(
                     x,
@@ -765,6 +831,8 @@ class Decifer(nn.Module):
             logits = self.lm_head(x[:, [-1], :])  # only the last token
             loss = None
 
+        if use_cache:
+            return logits, loss, new_past_kv
         return logits, loss
 
     def crop_block_size(self, block_size: int):
@@ -866,6 +934,49 @@ class Decifer(nn.Module):
         uncond_logits = uncond_logits[:, -1, :]
         return uncond_logits + cfg_scale * (logits - uncond_logits)
 
+    def _can_use_kv_cache(self, cfg_scale: Optional[float]) -> bool:
+        # cfg_scale requires a second (unconditioned) forward pass per step; supporting
+        # two independent caches isn't implemented, so that combination falls back to
+        # full recomputation. Cross-attention conditioning is likewise unsupported (see
+        # Block.forward), but none of the minicif/deCIFer configs enable it today.
+        if cfg_scale is not None and cfg_scale != 1.0 and self.config.condition:
+            return False
+        return not (self.config.condition and self.config.condition_cross_attention)
+
+    def _prefill(
+        self,
+        idx: torch.Tensor,
+        cond_vec,
+        start_indices_batch,
+        custom_cond_emb,
+    ) -> Tuple[torch.Tensor, List[Tuple[torch.Tensor, torch.Tensor]], int]:
+        idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+        logits, _, past_kv = self(
+            idx_cond,
+            cond_vec=cond_vec,
+            start_indices_batch=start_indices_batch,
+            custom_cond_emb=custom_cond_emb,
+            use_cache=True,
+        )
+        # NOTE: positional embeddings for content tokens are indexed by position in the
+        # original (pre-conditioning-insertion) token stream, not by position in the
+        # conditioning-expanded internal sequence cached in past_kv (see forward()'s
+        # condition-insertion branch, which reuses the original wpe lookup for content
+        # tokens and leaves inserted condition-token positions at wpe index 0/unused).
+        # So the offset for the next token's wpe lookup is the original token count, not
+        # past_kv's cached sequence length.
+        past_length = idx_cond.size(1)
+        return logits[:, -1, :], past_kv, past_length
+
+    def _decode_step(
+        self,
+        idx_next: torch.Tensor,
+        past_kv: List[Tuple[torch.Tensor, torch.Tensor]],
+        past_length: int,
+    ) -> Tuple[torch.Tensor, List[Tuple[torch.Tensor, torch.Tensor]]]:
+        logits, _, new_past_kv = self(idx_next, past_kv=past_kv, past_length=past_length, use_cache=True)
+        return logits[:, -1, :], new_past_kv
+
     def _generation_end_mask(self, idx_next: torch.Tensor, prev_id: torch.Tensor) -> torch.Tensor:
         end_condition = idx_next == self.padding_id
         if self.end_id is not None:
@@ -900,21 +1011,24 @@ class Decifer(nn.Module):
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         """
         prev_id = torch.full((idx.size(0),), fill_value=-1, dtype=torch.long, device=idx.device)
-        generation_pbar = tqdm(total=max_new_tokens, desc='Generating sequence', leave=False, disable=disable_pbar)
-        for _ in range(max_new_tokens):
-            # if the sequence context is growing too long we must crop it at block_size
+        use_cache = self._can_use_kv_cache(cfg_scale)
+        if use_cache:
+            logits, past_kv, past_length = self._prefill(idx, cond_vec, start_indices_batch, custom_cond_emb)
+        else:
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
-            # forward the model to get the logits for the index in the sequence
             logits = self._next_token_logits(idx_cond, cond_vec, start_indices_batch, custom_cond_emb, cfg_scale)
+
+        generation_pbar = tqdm(total=max_new_tokens, desc='Generating sequence', leave=False, disable=disable_pbar)
+        for step in range(max_new_tokens):
             # scale by desired temperature
-            logits = logits / temperature
-            logits = self._mask_generation_logits(logits, idx, constrain_minicif)
+            step_logits = logits / temperature
+            step_logits = self._mask_generation_logits(step_logits, idx, constrain_minicif)
             # optionally crop the logits to only the top k options
             if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float("Inf")
+                v, _ = torch.topk(step_logits, min(top_k, step_logits.size(-1)))
+                step_logits[step_logits < v[:, [-1]]] = -float("Inf")
             # apply softmax to convert logits to (normalized) probabilities
-            probs = F.softmax(logits, dim=-1)
+            probs = F.softmax(step_logits, dim=-1)
             # sample from the distribution
             idx_next = torch.multinomial(probs, num_samples=1)
             # append sampled index to the running sequence and continue
@@ -925,8 +1039,18 @@ class Decifer(nn.Module):
                 break
             prev_id = idx_next.squeeze(-1)
             generation_pbar.update(1)
+            if step == max_new_tokens - 1:
+                break
+            # compute logits for the next step
+            if use_cache and past_length < self.config.block_size:
+                logits, past_kv = self._decode_step(idx_next, past_kv, past_length)
+                past_length += 1
+            else:
+                use_cache = False
+                idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+                logits = self._next_token_logits(idx_cond, cond_vec, start_indices_batch, custom_cond_emb, cfg_scale)
         generation_pbar.close()
-        
+
         return idx
 
     @torch.no_grad()
@@ -954,21 +1078,24 @@ class Decifer(nn.Module):
         prev_id = torch.full((batch_size,), fill_value=-1, dtype=torch.long, device=device)
         seq_lens = torch.full((batch_size,), fill_value=-1, dtype=torch.long, device=device)
 
-        generation_pbar = tqdm(total=max_new_tokens, desc='Generating sequence', leave=False, disable=disable_pbar)
-        for _ in range(max_new_tokens):
-            # if the sequence context is growing too long we must crop it at block_size
+        use_cache = self._can_use_kv_cache(cfg_scale)
+        if use_cache:
+            logits, past_kv, past_length = self._prefill(idx, cond_vec, start_indices_batch, custom_cond_emb)
+        else:
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
-            # forward the model to get the logits for the index in the sequence
             logits = self._next_token_logits(idx_cond, cond_vec, start_indices_batch, custom_cond_emb, cfg_scale)
+
+        generation_pbar = tqdm(total=max_new_tokens, desc='Generating sequence', leave=False, disable=disable_pbar)
+        for step in range(max_new_tokens):
             # scale by desired temperature
-            logits = logits / temperature
-            logits = self._mask_generation_logits(logits, idx, constrain_minicif)
+            step_logits = logits / temperature
+            step_logits = self._mask_generation_logits(step_logits, idx, constrain_minicif)
             # optionally crop the logits to only the top k options
             if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float("Inf")
+                v, _ = torch.topk(step_logits, min(top_k, step_logits.size(-1)))
+                step_logits[step_logits < v[:, [-1]]] = -float("Inf")
             # apply softmax to convert logits to (normalized) probabilities
-            probs = F.softmax(logits, dim=-1)
+            probs = F.softmax(step_logits, dim=-1)
             # sample from the distribution
             idx_next = torch.full((batch_size, 1), fill_value=self.padding_id, dtype=torch.long, device=device)
             active_mask = ~finished
@@ -989,6 +1116,16 @@ class Decifer(nn.Module):
             generation_pbar.update(1)
             if finished.all():
                 break
+            if step == max_new_tokens - 1:
+                break
+            # compute logits for the next step
+            if use_cache and past_length < self.config.block_size:
+                logits, past_kv = self._decode_step(idx_next, past_kv, past_length)
+                past_length += 1
+            else:
+                use_cache = False
+                idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+                logits = self._next_token_logits(idx_cond, cond_vec, start_indices_batch, custom_cond_emb, cfg_scale)
         generation_pbar.close()
         # For sequences that didn't finish, set seq_lens to idx.size(1)
         seq_lens[seq_lens == -1] = idx.size(1)
