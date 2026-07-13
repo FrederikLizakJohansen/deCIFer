@@ -5,6 +5,10 @@ import pickle
 import tempfile
 import unittest
 
+import h5py
+from pymatgen.core import Lattice, Structure
+from pymatgen.io.cif import CifWriter
+
 MODULE_PATH = os.path.join(os.path.dirname(__file__), "..", "bin", "prepare_minicif_dataset.py")
 spec = importlib.util.spec_from_file_location("prepare_minicif_dataset", MODULE_PATH)
 prepare_minicif_dataset = importlib.util.module_from_spec(spec)
@@ -19,10 +23,53 @@ shard_checkpoint_path = prepare_minicif_dataset.shard_checkpoint_path
 shard_inputs = prepare_minicif_dataset.shard_inputs
 split_rows = prepare_minicif_dataset.split_rows
 write_metadata = prepare_minicif_dataset.write_metadata
+write_split = prepare_minicif_dataset.write_split
+process_cif = prepare_minicif_dataset.process_cif
+validate_checkpoint_representation = prepare_minicif_dataset.validate_checkpoint_representation
 PrepConfig = prepare_minicif_dataset.PrepConfig
 
 
 class PrepareMinicifDatasetTest(unittest.TestCase):
+    def test_v2_processing_writes_formula_representation_and_token_length(self):
+        structure = Structure.from_spacegroup(
+            "Fm-3m", Lattice.cubic(5.64), ["Na", "Cl"], [[0, 0, 0], [0.5, 0.5, 0.5]]
+        )
+        config = PrepConfig(raw_dir="raw", out_dir="out", representation="minicif_v2")
+
+        row = process_cif((("nacl", str(CifWriter(structure))), vars(config)))
+
+        self.assertEqual(row["representation"], "minicif_v2")
+        self.assertEqual(row["formula"], "Na 1 Cl 1")
+        self.assertEqual(row["cif_token_length"], len(row["cif_tokenized"]))
+        self.assertTrue(row["minicif_string"].startswith("<mcif2>"))
+
+    def test_v2_split_contains_batching_metadata_fields(self):
+        row = {
+            "cif_name": "a",
+            "minicif_string": "<mcif2> Na formula Na 1",
+            "formula": "Na 1",
+            "representation": "minicif_v2",
+            "cif_tokenized": [1, 2, 3],
+            "cif_token_length": 3,
+            "spacegroup": 1,
+            "crystal_system": 1,
+            "xrd_disc.q": [1.0],
+            "xrd_disc.iq": [1.0],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "train.h5")
+            write_split(path, [row])
+            with h5py.File(path, "r") as h5:
+                self.assertEqual(int(h5["cif_token_length"][0]), 3)
+                self.assertEqual(h5["formula"].asstr()[0], "Na 1")
+                self.assertEqual(h5["representation"].asstr()[0], "minicif_v2")
+
+    def test_checkpoint_representation_mismatch_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "another representation"):
+            validate_checkpoint_representation(
+                {"a": {"representation": "minicif"}}, "minicif_v2"
+            )
+
     def test_load_inputs_from_gzip_tuple_bundle(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bundle_path = os.path.join(tmpdir, "raw.pkl.gz")

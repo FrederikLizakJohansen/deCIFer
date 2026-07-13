@@ -97,6 +97,7 @@ class PxrdEncoderPretrainConfig:
     dense_condition_n_tokens: int = 16
     peak_condition_n_tokens: int = 16
     peak_encoder_hidden_dim: int = 128
+    peak_fourier_bands: int = 8
     n_embd: int = 256
     n_head: int = 4
     dropout: float = 0.0
@@ -260,6 +261,7 @@ def model_config(config):
         dense_condition_n_tokens=config.dense_condition_n_tokens,
         peak_condition_n_tokens=config.peak_condition_n_tokens,
         peak_encoder_hidden_dim=config.peak_encoder_hidden_dim,
+        peak_fourier_bands=config.peak_fourier_bands,
         condition_qmin=config.qmin,
         condition_qmax=config.qmax,
         n_embd=config.n_embd,
@@ -505,9 +507,9 @@ def augment_peak_list(batch_q, batch_iq, config):
 
 
 def make_condition(batch_q, batch_iq, config, kwargs):
-    if config.condition_encoder in {"peak", "hybrid"}:
+    if config.condition_encoder in {"peak", "peak_fourier", "hybrid"}:
         peak_q, peak_iq = augment_peak_list(batch_q, batch_iq, config)
-    if config.condition_encoder == "peak":
+    if config.condition_encoder in {"peak", "peak_fourier"}:
         return {"peak_q": peak_q, "peak_iq": peak_iq}
     dense = discrete_to_continuous_xrd(batch_q, batch_iq, **kwargs)["iq"]
     if config.condition_encoder == "hybrid":

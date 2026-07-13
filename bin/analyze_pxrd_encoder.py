@@ -141,9 +141,9 @@ def collate_rows(rows):
 
 
 def make_clean_condition(batch_q, batch_iq, config, kwargs):
-    if config.condition_encoder in {"peak", "hybrid"}:
+    if config.condition_encoder in {"peak", "peak_fourier", "hybrid"}:
         peak_q, peak_iq = cap_peak_list(batch_q, batch_iq, config.max_peak_list_peaks)
-    if config.condition_encoder == "peak":
+    if config.condition_encoder in {"peak", "peak_fourier"}:
         return {"peak_q": peak_q, "peak_iq": peak_iq}
     dense = discrete_to_continuous_xrd(batch_q, batch_iq, **kwargs)["iq"]
     if config.condition_encoder == "hybrid":

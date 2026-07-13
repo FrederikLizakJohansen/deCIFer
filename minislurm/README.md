@@ -2,6 +2,69 @@
 
 Run from the repository root after activating the Python environment.
 
+## Minicif v2 quick start
+
+The v2 workflow uses a separate dataset and checkpoint namespace, so it does not
+overwrite legacy minicif artifacts.
+
+```bash
+sbatch minislurm/prepare_minicif_v2_dataset.sh
+sbatch minislurm/train_minicif_v2.sh
+sbatch minislurm/evaluate_minicif_v2.sh
+```
+
+Defaults are `data/noma` for the raw gzip source,
+`data/noma_minicif_v2` for prepared data, and
+`configs/minicif_v2_medium_config.yaml` for training. Override them through
+environment variables:
+
+```bash
+RAW_DIR=data/noma OUT_DIR=data/noma_minicif_v2 \
+  sbatch minislurm/prepare_minicif_v2_dataset.sh
+
+CONFIG=configs/minicif_v2_small_config.yaml \
+  sbatch minislurm/train_minicif_v2.sh
+
+CHECKPOINT=minicif_v2_model_small/ckpt.pt \
+DATASET_DIR=data/noma_minicif_v2 \
+OUT_DIR=minicif_v2_model_small/minicif_report \
+  sbatch minislurm/evaluate_minicif_v2.sh
+```
+
+Before the first full job, run the short CUDA integration config:
+
+```bash
+sbatch minislurm/train_minicif_v2.sh \
+  --config configs/minicif_v2_gpu_smoke_config.yaml
+```
+
+This performs only a few optimizer steps and is not intended to produce a useful
+checkpoint.
+
+`train_minicif_v2.sh` runs `bin/audit_minicif_v2.py` before allocating model
+memory. Set `AUDIT_MAX_ITEMS=0` to deeply validate every record, or
+`SKIP_PREFLIGHT=1` only after an unchanged dataset has already passed.
+
+Run the preflight directly on a login/CPU node:
+
+```bash
+python bin/audit_minicif_v2.py \
+  --config configs/minicif_v2_medium_config.yaml \
+  --max-items 100 \
+  --output minicif_v2_preflight.json
+```
+
+Optional Fourier peak-encoder pretraining uses:
+
+```bash
+sbatch minislurm/pretrain_pxrd_encoder.sh \
+  --config configs/minicif_v2_pxrd_encoder_pretrain.yaml
+```
+
+Set `pretrained_condition_encoder_path` in a v2 training config to the resulting
+`minicif_v2_pxrd_encoder_pretrain/pxrd_encoder_pretrain.pt` only when the encoder
+width and Fourier-token settings match.
+
 ## 1. Prepare data
 
 From raw `.cif` files:

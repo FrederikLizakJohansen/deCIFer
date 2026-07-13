@@ -17,6 +17,13 @@ Purpose: collect concrete ideas for improving the current deCIFer codebase, mode
 - 2026-06-29: Added follow-up ideas around COD data, more realistic PXRD simulation, multi-phase generation, on-the-fly synthetic minicifs, and stronger lattice/space-group constraints.
 - 2026-06-30: Added peak-list and hybrid PXRD conditioning, true cross-attention conditioning, small conditioning-ablation configs, sequential ablation SLURM workflow, and extended minicif evaluation with multiple prompt modes, finish rate, generated-token length, and extra/missing element metrics.
 - 2026-07-02: Added classifier-free guidance (learned null-condition token, `condition_dropout_prob` training knob, `--cfg-scale` at inference) and structure-space lattice refinement as a two-phase reranker (coarse uniform-scale scan on all valid candidates, rerank by post-scan Rwp, local anisotropic `least_squares` refine on the top-K, keep best refined Rwp). On the existing large checkpoint the refinement turns a correct-topology-but-mis-scaled candidate (raw Rwp 1.20, ranked 5th) into a solved structure (refined Rwp 0.07, refined cell essentially exact), which the old rerank-then-refine-best path missed. Wired both into `bin/test_minicif_realtime.py` and the `bin/visualize_minicif.py` batch report (`median/mean_best_refined_rwp`).
+- 2026-07-13: Added the versioned `minicif_v2` representation with reduced
+  stoichiometry, Wyckoff-orbit sites, conventional lattice constraints, typed
+  token heads, and deterministic symmetry expansion/validation. Added record-aligned
+  length-bucketed token-budget training, a Fourier peak encoder, sparse peak
+  augmentation, fused AdamW, self/cross-attention KV caching, formula-aware
+  evaluation, seven-crystal-system round-trip tests, dataset/config preflight,
+  and v2 preparation/training/evaluation launchers.
 
 ## Review assumptions
 
@@ -353,6 +360,9 @@ Verification:
   Experiment: schedule augmentation ranges over training iterations and compare to full-strength augmentation from step 0.
 
 - P1 - Use token-budgeted batching instead of fixed sequence-count batching.
+  Status: implemented 2026-07-13 for `batching_strategy: record`, with length
+  bucketing, right padding, one complete structure per row, and a padded model-token
+  budget. The legacy packed path remains available for old checkpoints/configs.
   Current packing makes each optimizer step depend on how many full blocks happen to fit after concatenation. A token-budgeted batcher would make training more predictable and improve hardware utilization.
   Experiment: build batches by target token count, track effective tokens/step, and compare loss curves normalized by tokens seen.
 
@@ -469,6 +479,19 @@ Verification:
 
 ### Tokenization and CIF representation
 
+Current recommended representation: `minicif_v2`.
+
+```text
+<mcif2> elements formula element count ... cs_* sg_* cell a b c alpha beta gamma
+<atom> element wp_* x y z occupancy ... </mcif2>
+```
+
+The reduced formula is part of every training target. It is optional as inference
+input: a constituents-only prefix ends at the `formula` marker before any entries,
+after which the model infers the counts. Formula prompts include the known counts. Atom records represent
+symmetry-independent Wyckoff orbits, and the renderer expands and validates them.
+The original `minicif` grammar remains supported for existing data and checkpoints.
+
 - P0 - Canonicalize CIF output more aggressively.
   Normalize field order, numeric precision, symmetry representation, atom ordering, and whitespace so the model spends less capacity on arbitrary formatting.
 
@@ -503,9 +526,13 @@ Verification:
   - The mask is wired into `Decifer.generate*` for minicif checkpoints without changing training loss.
 
 - P1 - Numeric tokenization for crystallographic values.
+  Status: partially implemented 2026-07-13. V2 uses separate numeric-token logits
+  through typed heads and hard lattice masks, but numbers are still discrete text
+  tokens rather than continuous or field-specific quantized values.
   Character-like numeric generation is inefficient and brittle. Consider digit-position tokens, quantized numeric bins, or structured numeric heads for cell parameters and coordinates.
 
 - P0 - Constrain lattice parameters by crystal system and space group.
+  Status: implemented for v2 conventional crystal-system settings 2026-07-13.
   This should be high priority. The crystal system and `sg_*` token already imply strong constraints on `a`, `b`, `c`, `alpha`, `beta`, and `gamma`; letting the model freely emit impossible combinations wastes probability mass and creates invalid structures that a deterministic mask could prevent.
 
   First-pass constraints:

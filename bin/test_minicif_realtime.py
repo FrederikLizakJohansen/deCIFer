@@ -21,15 +21,17 @@ from pymatgen.analysis.structure_matcher import StructureMatcher
 from pymatgen.core import Element, Lattice, Structure
 
 from decifer.decifer_model import Decifer, DeciferConfig
-from decifer.minicif import START_TOKEN, MinicifTokenizer, minicif_to_structure, parse_minicif
+from decifer.minicif import MinicifTokenizer, minicif_to_structure, parse_minicif
+from decifer.minicif_v2 import MinicifV2Tokenizer, minicif_v2_to_structure, parse_minicif_v2
 from decifer.pxrd import clamp_qmax_for_wavelength, discrete_to_continuous_xrd, nyquist_qstep, q_range_to_two_theta_range
 from bin.train import TrainConfig
 
 PROMPT_MODE_ALIASES = {
     "pxrd": "start",
-    "pxrd-elements": "formula",
-    "pxrd-elements-cs": "formula-cs",
-    "pxrd-elements-cs-sg": "formula-cs-sg",
+    "pxrd-elements": "constituents",
+    "pxrd-stoichiometry": "formula",
+    "pxrd-stoichiometry-cs": "formula-cs",
+    "pxrd-stoichiometry-cs-sg": "formula-cs-sg",
 }
 
 
@@ -134,7 +136,12 @@ def prompt_from_minicif(minicif_string, mode, tokenizer):
     mode = PROMPT_MODE_ALIASES.get(mode, mode)
     fields = minicif_string.strip().split()
     if mode == "start":
-        prompt = START_TOKEN
+        prompt = fields[0]
+    elif mode == "constituents":
+        stop = fields.index("formula") + 1 if "formula" in fields else next(
+            i for i, field in enumerate(fields) if field.startswith("cs_")
+        )
+        prompt = " ".join(fields[:stop])
     elif mode == "formula":
         stop = next(i for i, field in enumerate(fields) if field.startswith("cs_"))
         prompt = " ".join(fields[:stop])
@@ -154,6 +161,26 @@ def continuous_from_sparse(q, iq, xrd_kwargs):
     iq_tensor = torch.tensor(iq, dtype=torch.float32)
     xrd = discrete_to_continuous_xrd(q_tensor.unsqueeze(0), iq_tensor.unsqueeze(0), **xrd_kwargs)
     return xrd["q"].cpu().numpy(), xrd["iq"][0].cpu().numpy(), xrd["iq"]
+
+
+def condition_from_sparse(q, iq, dense_iq, config):
+    encoder = config.get("condition_encoder", "mlp")
+    if encoder not in {"peak", "peak_fourier", "hybrid"}:
+        return dense_iq
+    q_tensor = torch.tensor(q, dtype=torch.float32)
+    iq_tensor = torch.tensor(iq, dtype=torch.float32)
+    max_peaks = int(config.get("max_peak_list_peaks", 0) or 0)
+    if max_peaks > 0 and q_tensor.numel() > max_peaks:
+        indices = torch.topk(iq_tensor, k=max_peaks).indices
+        q_tensor = q_tensor[indices]
+        iq_tensor = iq_tensor[indices]
+    peak_condition = {
+        "peak_q": q_tensor.unsqueeze(0),
+        "peak_iq": iq_tensor.unsqueeze(0),
+    }
+    if encoder == "hybrid":
+        peak_condition["dense"] = dense_iq
+    return peak_condition
 
 
 def structure_to_continuous_xrd(structure, xrd_kwargs, wavelength):
@@ -176,7 +203,13 @@ def generate_candidates(model, prompt, cond_vec, args, tokenizer):
         batch_prompt = prompt.to(model.device).unsqueeze(0).repeat(batch_size, 1)
         batch_cond = None
         if model.config.condition:
-            batch_cond = cond_vec.to(model.device).repeat(batch_size, 1)
+            if isinstance(cond_vec, dict):
+                batch_cond = {
+                    key: value.to(model.device).repeat(batch_size, *([1] * (value.dim() - 1)))
+                    for key, value in cond_vec.items()
+                }
+            else:
+                batch_cond = cond_vec.to(model.device).repeat(batch_size, 1)
         batch = model.generate_batched_reps(
             batch_prompt,
             args.max_new_tokens,
@@ -195,7 +228,10 @@ def generate_candidates(model, prompt, cond_vec, args, tokenizer):
     return generated
 
 
-def evaluate_candidates(candidates, reference_parsed, reference_structure, reference_iq, matcher, xrd_kwargs, wavelength):
+def evaluate_candidates(
+    candidates, reference_parsed, reference_structure, reference_iq, matcher,
+    xrd_kwargs, wavelength, parse_fn=parse_minicif, structure_fn=minicif_to_structure,
+):
     rows = []
     for rep, generated_minicif in enumerate(candidates):
         row = {
@@ -212,7 +248,7 @@ def evaluate_candidates(candidates, reference_parsed, reference_structure, refer
             "generated_minicif": generated_minicif,
         }
         try:
-            generated_parsed = parse_minicif(generated_minicif)
+            generated_parsed = parse_fn(generated_minicif)
             row.update({
                 "parse_ok": True,
                 "generated_space_group": generated_parsed.space_group,
@@ -220,7 +256,7 @@ def evaluate_candidates(candidates, reference_parsed, reference_structure, refer
                 "space_group_match": generated_parsed.space_group == reference_parsed.space_group,
                 "crystal_system_match": generated_parsed.crystal_system == reference_parsed.crystal_system,
             })
-            generated_structure = minicif_to_structure(generated_minicif)
+            generated_structure = structure_fn(generated_minicif)
             generated_iq = structure_to_continuous_xrd(generated_structure, xrd_kwargs, wavelength)
             rmsd = matcher.get_rms_dist(reference_structure, generated_structure)
             rmsd_value = None if rmsd is None else float(rmsd[0])
@@ -574,7 +610,11 @@ def main():
     parser.add_argument("--top-k", type=int, default=None)
     parser.add_argument(
         "--prompt-mode",
-        choices=["pxrd", "pxrd-elements", "pxrd-elements-cs", "pxrd-elements-cs-sg", "start", "formula", "formula-cs", "formula-cs-sg"],
+        choices=[
+            "pxrd", "pxrd-elements", "pxrd-stoichiometry", "pxrd-stoichiometry-cs",
+            "pxrd-stoichiometry-cs-sg", "start", "constituents", "formula",
+            "formula-cs", "formula-cs-sg",
+        ],
         default="pxrd",
     )
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -602,12 +642,21 @@ def main():
     checkpoint, model = load_checkpoint(args.checkpoint, device, use_best=not args.use_current)
     config = checkpoint_config(checkpoint)
     xrd_kwargs = clean_xrd_kwargs(config, args)
-    tokenizer = MinicifTokenizer()
+    tokenizer_name = checkpoint.get("model_args", {}).get("tokenizer", config.get("tokenizer", "minicif"))
+    if tokenizer_name == "minicif_v2":
+        tokenizer = MinicifV2Tokenizer()
+        parse_fn = parse_minicif_v2
+        structure_fn = minicif_v2_to_structure
+    else:
+        tokenizer = MinicifTokenizer()
+        parse_fn = parse_minicif
+        structure_fn = minicif_to_structure
 
     index, name, reference_minicif, q_disc, iq_disc = read_sample(args.h5, args.index, args.seed)
-    reference_parsed = parse_minicif(reference_minicif)
-    reference_structure = minicif_to_structure(reference_minicif)
+    reference_parsed = parse_fn(reference_minicif)
+    reference_structure = structure_fn(reference_minicif)
     q_grid, reference_iq, cond_iq = continuous_from_sparse(q_disc, iq_disc, xrd_kwargs)
+    condition = condition_from_sparse(q_disc, iq_disc, cond_iq, config)
     prompt = prompt_from_minicif(reference_minicif, args.prompt_mode, tokenizer)
 
     print(f"checkpoint: {os.path.abspath(args.checkpoint)}")
@@ -620,7 +669,7 @@ def main():
     print("\nReference canonical minicif")
     print(reference_minicif)
 
-    candidates = generate_candidates(model, prompt, cond_iq, args, tokenizer)
+    candidates = generate_candidates(model, prompt, condition, args, tokenizer)
     rows = evaluate_candidates(
         candidates,
         reference_parsed,
@@ -629,6 +678,8 @@ def main():
         StructureMatcher(),
         xrd_kwargs,
         args.wavelength,
+        parse_fn=parse_fn,
+        structure_fn=structure_fn,
     )
     print_results(rows, not args.no_print_minicifs)
     figure_rows = rows

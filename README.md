@@ -136,6 +136,74 @@ data/noma-1k/
 ├── metadata.json – Stores some metadata
 ```
 
+### Minicif v2 workflow
+
+`minicif_v2` is the symmetry-aware experimental representation. It stores an
+integral reduced formula and one representative site per Wyckoff orbit:
+
+```text
+<mcif2> Na Cl formula Na 1 Cl 1 cs_7 sg_225 cell ... <atom> Na wp_a x y z occ ... </mcif2>
+```
+
+The converter refines each structure to a conventional symmetry setting before
+writing the target. Structure reconstruction expands the declared Wyckoff sites
+with the emitted space group and validates the resulting composition and
+Wyckoff letters. The default preparation path excludes partial occupancies.
+
+Prepare v2 data from the NOMA gzip bundle:
+
+```bash
+python bin/prepare_minicif_dataset.py \
+  --raw-dir data/noma \
+  --out-dir data/noma_minicif_v2 \
+  --raw-from-gzip \
+  --representation minicif_v2
+```
+
+Audit the prepared splits before allocating a GPU. This checks sequence-length
+compatibility against the selected config, representation metadata, token/string
+round trips, formula and symmetry metadata, sampled Wyckoff expansion, and PXRD
+array integrity. It exits nonzero on any failure.
+
+```bash
+python bin/audit_minicif_v2.py \
+  --config configs/minicif_v2_small_config.yaml \
+  --max-items 100 \
+  --output minicif_v2_preflight.json
+```
+
+Train the small pipeline check or the recommended medium baseline:
+
+```bash
+python bin/train.py --config configs/minicif_v2_gpu_smoke_config.yaml
+python bin/train.py --config configs/minicif_v2_small_config.yaml
+python bin/train.py --config configs/minicif_v2_medium_config.yaml
+```
+
+The GPU smoke config runs only a few optimizer steps and is not a scientific
+baseline. Use it first to verify CUDA, fused AdamW, HDF5 loading, and the complete
+v2 model path. Use the small config for early loss/validity checks and the medium
+config for the first research comparison.
+
+At inference, the formula is optional input. `pxrd-elements` supplies only the
+known constituent set and lets the model infer stoichiometry; `pxrd-stoichiometry`
+also supplies the reduced formula. The generated v2 target always contains a
+formula so composition can be validated deterministically.
+
+```bash
+python bin/visualize_minicif.py \
+  --checkpoint minicif_v2_model_medium/ckpt.pt \
+  --dataset-dir data/noma_minicif_v2 \
+  --prompt-modes pxrd pxrd-elements pxrd-stoichiometry \
+                 pxrd-stoichiometry-cs pxrd-stoichiometry-cs-sg
+```
+
+The v2 configs use record-aligned, length-bucketed token-budget batches, sparse
+Fourier peak conditioning, cross-attention, typed vocabulary heads, constrained
+lattice generation, fused AdamW on CUDA, and cached self/cross-attention during
+generation. Existing `minicif` and legacy deCIFer datasets/checkpoints remain
+separate and compatible with their original paths.
+
 ## Training
 ### Training From Scratch
 

@@ -39,6 +39,7 @@ class DeciferConfig:
     dense_condition_n_tokens: int = 16
     peak_condition_n_tokens: int = 16
     peak_encoder_hidden_dim: int = 128
+    peak_fourier_bands: int = 8
     condition_qmin: float = 0.0
     condition_qmax: float = 10.0
     condition_cross_attention: bool = False
@@ -50,6 +51,8 @@ class DeciferConfig:
     plot_attention: bool = False
     tokenizer: str = "legacy"
     minicif_constrained_decoding: bool = False
+    record_aligned_attention: bool = False
+    typed_token_heads: bool = False
 
 class LayerNorm(nn.Module):
 
@@ -196,14 +199,22 @@ class CrossAttention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        memory: torch.Tensor,
+        memory: Optional[torch.Tensor] = None,
         attention_bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+        past_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        use_cache: bool = False,
+    ):
         B, T, C = x.size()
-        M = memory.size(1)
         q = self.q_proj(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        k = self.k_proj(memory).view(B, M, self.n_head, C // self.n_head).transpose(1, 2)
-        v = self.v_proj(memory).view(B, M, self.n_head, C // self.n_head).transpose(1, 2)
+        if past_kv is not None:
+            k, v = past_kv
+            M = k.size(2)
+        else:
+            if memory is None:
+                raise ValueError("cross-attention requires memory or cached keys and values")
+            M = memory.size(1)
+            k = self.k_proj(memory).view(B, M, self.n_head, C // self.n_head).transpose(1, 2)
+            v = self.v_proj(memory).view(B, M, self.n_head, C // self.n_head).transpose(1, 2)
         if self.flash:
             dropout_p = self.dropout.p if self.training else 0.0
             if attention_bias is not None:
@@ -217,7 +228,10 @@ class CrossAttention(nn.Module):
             att = self.dropout(att)
             y = att @ v
         y = y.transpose(1, 2).contiguous().view(B, T, C)
-        return self.dropout(self.out_proj(y))
+        y = self.dropout(self.out_proj(y))
+        if use_cache:
+            return y, (k, v)
+        return y
 
 
 def gelu(x: torch.Tensor) -> torch.Tensor:
@@ -279,9 +293,9 @@ class Block(nn.Module):
         cross_attention_bias: Optional[torch.Tensor] = None,
         return_attn: bool = False,
         print_parameters: bool = False,
-        past_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        past_kv: Optional[Tuple[torch.Tensor, ...]] = None,
         use_cache: bool = False,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]]:
+    ):
         """
         Forward pass for the Transformer Block module. A Block module includes causal self-attention,
         layer normalization, and MLP, and residual connections.
@@ -290,10 +304,24 @@ class Block(nn.Module):
         :returns: output of the transformer block, with the same shape as in the input
         """
         if use_cache:
-            if self.use_cross_attention and cross_memory is not None:
-                raise NotImplementedError("KV cache is not supported with cross-attention conditioning")
-            attn_out, new_kv = self.attn(self.ln_1(x), attention_bias, past_kv=past_kv, use_cache=True)
+            self_past_kv = past_kv[:2] if past_kv is not None else None
+            attn_out, new_self_kv = self.attn(
+                self.ln_1(x), attention_bias, past_kv=self_past_kv, use_cache=True
+            )
             x = x + attn_out
+            if self.use_cross_attention:
+                cross_past_kv = past_kv[2:] if past_kv is not None and len(past_kv) == 4 else None
+                cross_out, new_cross_kv = self.cross_attn(
+                    self.ln_cross(x),
+                    memory=cross_memory,
+                    attention_bias=cross_attention_bias,
+                    past_kv=cross_past_kv,
+                    use_cache=True,
+                )
+                x = x + cross_out
+                new_kv = new_self_kv + new_cross_kv
+            else:
+                new_kv = new_self_kv
             x = x + self.mlp(self.ln_2(x))
             return x, new_kv
         if not return_attn:
@@ -441,6 +469,95 @@ class PeakListEncoder(nn.Module):
         return self.out_proj(y)
 
 
+class FourierPeakEncoder(nn.Module):
+    """Compress sparse PXRD peaks into latent tokens without rendering a dense trace."""
+
+    def __init__(self, config: DeciferConfig, n_tokens: Optional[int] = None):
+        super().__init__()
+        self.n_tokens = n_tokens or config.condition_n_tokens
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+        self.qmin = float(config.condition_qmin)
+        self.qrange = max(float(config.condition_qmax) - self.qmin, 1e-6)
+        self.fourier_bands = config.peak_fourier_bands
+        feature_size = 2 + 2 * self.fourier_bands
+        self.peak_mlp = nn.Sequential(
+            nn.Linear(feature_size, config.peak_encoder_hidden_dim, bias=config.bias),
+            nn.GELU(),
+            nn.Linear(config.peak_encoder_hidden_dim, config.n_embd, bias=config.bias),
+        )
+        self.token_queries = nn.Parameter(torch.zeros(self.n_tokens, config.n_embd))
+        self.q_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.k_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.v_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.out_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+
+    def forward(
+        self,
+        peak_q: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        peak_iq: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if isinstance(peak_q, dict):
+            peak_iq = peak_q["peak_iq"]
+            peak_q = peak_q["peak_q"]
+        if peak_iq is None:
+            raise ValueError("peak_iq is required for Fourier peak conditioning")
+
+        valid = peak_q != 0
+        intensity = peak_iq / peak_iq.amax(dim=1, keepdim=True).clamp_min(1e-16)
+        q_norm = ((peak_q - self.qmin) / self.qrange).clamp(0.0, 1.0)
+        frequencies = (2.0 ** torch.arange(
+            self.fourier_bands, dtype=q_norm.dtype, device=q_norm.device
+        )) * math.pi
+        phase = q_norm.unsqueeze(-1) * frequencies
+        features = torch.cat((
+            q_norm.unsqueeze(-1),
+            torch.log1p(9.0 * intensity.clamp_min(0.0)).unsqueeze(-1) / math.log(10.0),
+            torch.sin(phase),
+            torch.cos(phase),
+        ), dim=-1)
+        peak_emb = self.peak_mlp(features).masked_fill(~valid.unsqueeze(-1), 0.0)
+
+        batch_size, n_peaks, width = peak_emb.shape
+        queries = self.token_queries.unsqueeze(0).expand(batch_size, -1, -1)
+        q = self.q_proj(queries).view(
+            batch_size, self.n_tokens, self.n_head, width // self.n_head
+        ).transpose(1, 2)
+        k = self.k_proj(peak_emb).view(
+            batch_size, n_peaks, self.n_head, width // self.n_head
+        ).transpose(1, 2)
+        v = self.v_proj(peak_emb).view(
+            batch_size, n_peaks, self.n_head, width // self.n_head
+        ).transpose(1, 2)
+        attention_mask = valid.view(batch_size, 1, 1, n_peaks)
+        if (~valid.any(dim=1)).any():
+            attention_mask = attention_mask.clone()
+            attention_mask[~valid.any(dim=1), :, :, 0] = True
+        y = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_mask)
+        y = y.transpose(1, 2).contiguous().view(batch_size, self.n_tokens, width)
+        return self.out_proj(y)
+
+
+class TypedTokenHead(nn.Module):
+    """Use separate projections for the static token types in minicif_v2."""
+
+    def __init__(self, config: DeciferConfig, token_type_ids: Dict[str, List[int]]):
+        super().__init__()
+        self.vocab_size = config.vocab_size
+        self.projections = nn.ModuleDict({
+            name: nn.Linear(config.n_embd, len(token_ids), bias=False)
+            for name, token_ids in token_type_ids.items()
+        })
+        for name, token_ids in token_type_ids.items():
+            self.register_buffer(f"{name}_ids", torch.tensor(token_ids, dtype=torch.long), persistent=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        logits = x.new_empty(*x.shape[:-1], self.vocab_size)
+        for name, projection in self.projections.items():
+            logits.index_copy_(-1, getattr(self, f"{name}_ids"), projection(x))
+        return logits
+
+
 class HybridPxrdEncoder(nn.Module):
 
     def __init__(self, config: DeciferConfig):
@@ -486,6 +603,8 @@ def build_condition_encoder(config: DeciferConfig) -> nn.Module:
         return PxrdPatchEncoder(config)
     if config.condition_encoder == "peak":
         return PeakListEncoder(config)
+    if config.condition_encoder == "peak_fourier":
+        return FourierPeakEncoder(config)
     if config.condition_encoder == "hybrid":
         if config.condition_n_tokens != config.dense_condition_n_tokens + config.peak_condition_n_tokens:
             raise ValueError(
@@ -512,6 +631,12 @@ class Decifer(nn.Module):
             self.tokenizer = MinicifTokenizer()
             self.end_id = self.tokenizer.token_to_id[END_TOKEN]
             self.newline_id = None
+        elif config.tokenizer == "minicif_v2":
+            from decifer.minicif_v2 import END_TOKEN, MinicifV2Tokenizer
+
+            self.tokenizer = MinicifV2Tokenizer()
+            self.end_id = self.tokenizer.token_to_id[END_TOKEN]
+            self.newline_id = None
         elif config.tokenizer == "legacy":
             self.tokenizer = Tokenizer()
             self.end_id = None
@@ -526,6 +651,8 @@ class Decifer(nn.Module):
             raise ValueError("condition_n_tokens must be >= 1")
         if config.pxrd_encoder_kernel_size < 1:
             raise ValueError("pxrd_encoder_kernel_size must be >= 1")
+        if config.typed_token_heads and config.tokenizer != "minicif_v2":
+            raise ValueError("typed_token_heads requires tokenizer='minicif_v2'")
 
         # Condtional embedding: either dense PXRD, sparse peak-list, or hybrid encoders.
         if config.condition:
@@ -552,6 +679,10 @@ class Decifer(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # https://paperswithcode.com/method/weight-tying
         self.transformer.wte.weight = self.lm_head.weight
+        self.typed_head = (
+            TypedTokenHead(config, self.tokenizer.token_type_ids)
+            if config.typed_token_heads else None
+        )
 
         self.apply(self._init_weights)
         # apply special scaled init to the residual projections, per GPT-2 paper
@@ -634,6 +765,11 @@ class Decifer(nn.Module):
                 cond_emb = torch.where(drop.view(-1, 1, 1), null_emb, cond_emb)
         return cond_emb
 
+    def _project_logits(self, x: torch.Tensor) -> torch.Tensor:
+        if self.typed_head is not None:
+            return self.typed_head(x)
+        return self.lm_head(x)
+
     def _build_condition_memory(
         self,
         cond_emb: torch.Tensor,
@@ -672,7 +808,7 @@ class Decifer(nn.Module):
         start_indices_batch: List[List[int]] = [[0]],
         custom_cond_emb: Optional[torch.Tensor] = None,
         return_attn: Optional[bool] = None,
-        past_kv: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
+        past_kv: Optional[List[Tuple[torch.Tensor, ...]]] = None,
         past_length: int = 0,
         use_cache: bool = False,
     ):
@@ -693,10 +829,15 @@ class Decifer(nn.Module):
             x = self.transformer.drop(tok_emb + pos_emb)
             new_past_kv = []
             for i, block in enumerate(self.transformer.h):
-                x, layer_kv = block(x, past_kv=past_kv[i], use_cache=True)
+                x, layer_kv = block(
+                    x,
+                    cross_memory=None,
+                    past_kv=past_kv[i],
+                    use_cache=True,
+                )
                 new_past_kv.append(layer_kv)
             x = self.transformer.ln_f(x)
-            logits = self.lm_head(x[:, [-1], :])
+            logits = self._project_logits(x[:, [-1], :])
             return logits, None, new_past_kv
 
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
@@ -714,7 +855,25 @@ class Decifer(nn.Module):
         cross_memory = None
         cross_attention_bias = None
             
-        if self.config.condition and self.config.condition_cross_attention:
+        record_aligned = self.config.record_aligned_attention
+        if record_aligned:
+            valid_record_starts = len(start_indices_batch) == b and all(
+                len(starts) == 1 and int(starts[0]) == 0 for starts in start_indices_batch
+            )
+            if not valid_record_starts:
+                raise ValueError(
+                    "record_aligned_attention requires exactly one structure starting at index 0 per row"
+                )
+
+        if self.config.condition and self.config.condition_cross_attention and record_aligned:
+            cond_emb = self._condition_embeddings(cond_vec, custom_cond_emb, ptdtype)
+            if cond_emb.size(0) != b:
+                raise RuntimeError(
+                    f"conditioning alignment error: {cond_emb.size(0)} condition embeddings for {b} records"
+                )
+            cross_memory = cond_emb
+
+        elif self.config.condition and self.config.condition_cross_attention:
             start_indices_batch = [
                 [int(start) for start in start_indices if 0 <= int(start) < t]
                 for start_indices in start_indices_batch
@@ -756,6 +915,22 @@ class Decifer(nn.Module):
                 torch.zeros(1, dtype=ptdtype, device=device),
                 torch.full((1,), float("-inf"), dtype=ptdtype, device=device),
             )
+
+        elif self.config.condition and record_aligned:
+            cond_emb = self._condition_embeddings(cond_vec, custom_cond_emb, ptdtype)
+            if cond_emb.size(0) != b:
+                raise RuntimeError(
+                    f"conditioning alignment error: {cond_emb.size(0)} condition embeddings for {b} records"
+                )
+            insert_width = self.config.condition_n_tokens
+            tok_emb = torch.cat((cond_emb, tok_emb), dim=1)
+            pos_emb = torch.cat((torch.zeros_like(cond_emb), pos_emb), dim=1)
+            t = t + insert_width
+            if targets is not None:
+                ignored = torch.full(
+                    (b, insert_width), -1, dtype=targets.dtype, device=targets.device
+                )
+                targets = torch.cat((ignored, targets), dim=1)
 
         elif self.config.condition:
             start_indices_batch = [
@@ -842,7 +1017,7 @@ class Decifer(nn.Module):
                 targets = targets_new
 
         else:
-            if self.config.boundary_masking:
+            if self.config.boundary_masking and not record_aligned:
 
                 start_mask = torch.zeros((b, t), dtype=torch.long, device=device)
                 for i, start_indices in enumerate(start_indices_batch):
@@ -896,11 +1071,11 @@ class Decifer(nn.Module):
         x = self.transformer.ln_f(x)
 
         if targets is not None:
-            logits = self.lm_head(x)
+            logits = self._project_logits(x)
             loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1)
         else:
             # Inference mode
-            logits = self.lm_head(x[:, [-1], :])  # only the last token
+            logits = self._project_logits(x[:, [-1], :])  # only the last token
             loss = None
 
         if use_cache:
@@ -917,7 +1092,7 @@ class Decifer(nn.Module):
         for block in self.transformer.h:
             block.attn.bias = block.attn.bias[:,:,:block_size,:block_size]
 
-    def configure_optimizers(self, weight_decay, learning_rate, betas):
+    def configure_optimizers(self, weight_decay, learning_rate, betas, fused: bool = False):
         """
         This long function is unfortunately doing something very simple and is being very defensive:
         We are separating out all parameters of the model into two buckets: those that will experience
@@ -968,17 +1143,21 @@ class Decifer(nn.Module):
             {"params": [param_dict[pn] for pn in sorted(list(no_decay))], "weight_decay": 0.0},
         ]
 
-        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas)
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, fused=fused)
         return optimizer
 
     def _use_minicif_constraints(self, constrain_minicif: Optional[bool]) -> bool:
         if constrain_minicif is None:
             constrain_minicif = self.config.minicif_constrained_decoding
-        return bool(constrain_minicif and self.config.tokenizer == "minicif")
+        return bool(constrain_minicif and self.config.tokenizer in {"minicif", "minicif_v2"})
 
     def _mask_generation_logits(self, logits: torch.Tensor, idx: torch.Tensor, constrain_minicif: Optional[bool]) -> torch.Tensor:
         if not self._use_minicif_constraints(constrain_minicif):
             return logits
+        if self.config.tokenizer == "minicif_v2":
+            from decifer.minicif_v2 import mask_minicif_v2_logits
+
+            return mask_minicif_v2_logits(logits, idx, self.tokenizer)
         from decifer.minicif import mask_minicif_logits
 
         return mask_minicif_logits(logits, idx, self.tokenizer)
@@ -1009,11 +1188,10 @@ class Decifer(nn.Module):
     def _can_use_kv_cache(self, cfg_scale: Optional[float]) -> bool:
         # cfg_scale requires a second (unconditioned) forward pass per step; supporting
         # two independent caches isn't implemented, so that combination falls back to
-        # full recomputation. Cross-attention conditioning is likewise unsupported (see
-        # Block.forward), but none of the minicif/deCIFer configs enable it today.
+        # full recomputation.
         if cfg_scale is not None and cfg_scale != 1.0 and self.config.condition:
             return False
-        return not (self.config.condition and self.config.condition_cross_attention)
+        return True
 
     def _prefill(
         self,
@@ -1021,7 +1199,7 @@ class Decifer(nn.Module):
         cond_vec,
         start_indices_batch,
         custom_cond_emb,
-    ) -> Tuple[torch.Tensor, List[Tuple[torch.Tensor, torch.Tensor]], int]:
+    ) -> Tuple[torch.Tensor, List[Tuple[torch.Tensor, ...]], int]:
         idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
         logits, _, past_kv = self(
             idx_cond,
@@ -1043,9 +1221,9 @@ class Decifer(nn.Module):
     def _decode_step(
         self,
         idx_next: torch.Tensor,
-        past_kv: List[Tuple[torch.Tensor, torch.Tensor]],
+        past_kv: List[Tuple[torch.Tensor, ...]],
         past_length: int,
-    ) -> Tuple[torch.Tensor, List[Tuple[torch.Tensor, torch.Tensor]]]:
+    ) -> Tuple[torch.Tensor, List[Tuple[torch.Tensor, ...]]]:
         logits, _, new_past_kv = self(idx_next, past_kv=past_kv, past_length=past_length, use_cache=True)
         return logits[:, -1, :], new_past_kv
 

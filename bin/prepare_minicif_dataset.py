@@ -31,6 +31,12 @@ from decifer.minicif import (
     canonicalize_cif_block,
     space_group_number_from_cif_block,
 )
+from decifer.minicif_v2 import (
+    MinicifV2Config,
+    MinicifV2Tokenizer,
+    canonicalize_structure_v2,
+    parse_minicif_v2,
+)
 from decifer.pxrd import q_range_to_two_theta_range
 from decifer.utility import space_group_to_crystal_system
 
@@ -43,6 +49,7 @@ class PrepConfig:
     raw_dir: str
     out_dir: str
     raw_from_gzip: bool = False
+    representation: str = "minicif"
     max_samples: int = 0
     sample_strategy: str = "first"
     checkpoint_path: str = ""
@@ -86,11 +93,28 @@ def process_cif(args):
 
     cif_writer = CifWriter(struct=structure, symprec=config.symprec)
     cif_block = next(iter(cif_writer.cif_file.data.values())).data
-    minicif_string = canonicalize_cif_block(
-        cif_block,
-        MinicifConfig(decimal_places=config.num_decimal_places),
-    )
-    tokenizer = MinicifTokenizer()
+    if config.representation == "minicif_v2":
+        minicif_string = canonicalize_structure_v2(
+            structure,
+            MinicifV2Config(
+                decimal_places=config.num_decimal_places,
+                symprec=config.symprec,
+            ),
+        )
+        tokenizer = MinicifV2Tokenizer()
+        parsed = parse_minicif_v2(minicif_string)
+        formula = " ".join(f"{element} {parsed.formula[element]}" for element in parsed.elements)
+        spacegroup = parsed.space_group
+    elif config.representation == "minicif":
+        minicif_string = canonicalize_cif_block(
+            cif_block,
+            MinicifConfig(decimal_places=config.num_decimal_places),
+        )
+        tokenizer = MinicifTokenizer()
+        formula = ""
+        spacegroup = space_group_number_from_cif_block(cif_block)
+    else:
+        raise ValueError(f"unknown representation: {config.representation}")
     cif_tokens = np.asarray(tokenizer.encode(tokenizer.tokenize_minicif(minicif_string)), dtype=np.int32)
 
     xrd_calc = XRDCalculator(wavelength=config.wavelength)
@@ -102,12 +126,13 @@ def process_cif(args):
     iq_disc = np.asarray(pattern.y, dtype=np.float32)
     iq_disc = iq_disc / (np.max(iq_disc) + 1e-16)
 
-    spacegroup = space_group_number_from_cif_block(cif_block)
-
     return {
         "cif_name": name,
         "cif_tokenized": cif_tokens,
+        "cif_token_length": len(cif_tokens),
         "minicif_string": minicif_string,
+        "formula": formula,
+        "representation": config.representation,
         "xrd_disc.q": q_disc,
         "xrd_disc.iq": iq_disc,
         "spacegroup": spacegroup,
@@ -265,8 +290,8 @@ def write_metadata(config, inputs, rows, failures, splits, pending_inputs, n_pro
         "split_distributions": {
             "crystal_system": split_distribution(splits, "crystal_system") if splits else {},
         },
-        "tokenizer": "minicif",
-        "cif_representation": "minicif",
+        "tokenizer": config.representation,
+        "cif_representation": config.representation,
     }
     os.makedirs(config.out_dir, exist_ok=True)
     with open(os.path.join(config.out_dir, "metadata.json"), "w") as f:
@@ -286,6 +311,12 @@ def write_split(path, rows):
     with h5py.File(path, "w") as h5:
         h5.create_dataset("cif_name", data=[row["cif_name"] for row in rows], dtype=str_dtype)
         h5.create_dataset("minicif_string", data=[row["minicif_string"] for row in rows], dtype=str_dtype)
+        h5.create_dataset("formula", data=[row.get("formula", "") for row in rows], dtype=str_dtype)
+        h5.create_dataset("representation", data=[row.get("representation", "minicif") for row in rows], dtype=str_dtype)
+        h5.create_dataset(
+            "cif_token_length",
+            data=np.asarray([row.get("cif_token_length", len(row["cif_tokenized"])) for row in rows], dtype=np.int32),
+        )
         h5.create_dataset("spacegroup", data=np.asarray([row["spacegroup"] for row in rows], dtype=np.int32))
         h5.create_dataset("crystal_system", data=np.asarray([row["crystal_system"] for row in rows], dtype=np.int32))
 
@@ -344,11 +375,25 @@ def split_rows(rows, val_fraction, test_fraction, seed, stratify_on="crystal_sys
     return splits
 
 
+def validate_checkpoint_representation(rows_by_source, representation):
+    mismatched = [
+        source
+        for source, row in rows_by_source.items()
+        if row.get("representation", "minicif") != representation
+    ]
+    if mismatched:
+        raise ValueError(
+            f"preparation checkpoint contains {len(mismatched)} row(s) for another representation; "
+            f"first mismatch: {mismatched[0]}"
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Prepare compact minicif HDF5 datasets directly from raw CIFs.")
     parser.add_argument("--raw-dir", required=True, help="Directory containing raw .cif files or .pkl.gz bundles")
     parser.add_argument("--out-dir", required=True, help="Output dataset directory")
     parser.add_argument("--raw-from-gzip", action="store_true", help="Read raw CIF strings from .pkl.gz bundle(s)")
+    parser.add_argument("--representation", choices=["minicif", "minicif_v2"], default="minicif")
     parser.add_argument("--max-samples", type=int, default=0, help="Limit the number of raw inputs after deterministic selection")
     parser.add_argument("--sample-strategy", choices=["first", "random"], default="first", help="How to select --max-samples inputs")
     parser.add_argument("--checkpoint-path", default="", help="Path to resumable prep checkpoint; defaults to OUT_DIR/prep_checkpoint.pkl.gz")
@@ -392,6 +437,7 @@ def main():
 
     if config.merge_shards:
         rows_by_source, failures_by_source = load_shard_checkpoints(config.checkpoint_path, config.num_shards)
+        validate_checkpoint_representation(rows_by_source, config.representation)
         missing_inputs = [
             source_id(obj)
             for obj in inputs
@@ -438,6 +484,7 @@ def main():
     failures_by_source = {}
     if not config.no_resume:
         rows_by_source, failures_by_source = load_checkpoint(config.checkpoint_path)
+        validate_checkpoint_representation(rows_by_source, config.representation)
         if rows_by_source or failures_by_source:
             print(
                 f"Resuming from {config.checkpoint_path}: "

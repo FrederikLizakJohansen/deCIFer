@@ -22,17 +22,32 @@ from tqdm.auto import tqdm
 
 from decifer.decifer_dataset import DeciferDataset
 from decifer.decifer_model import Decifer, DeciferConfig
-from decifer.minicif import END_TOKEN, START_TOKEN, MinicifTokenizer, minicif_to_structure, parse_minicif
+from decifer.minicif import END_TOKEN, MinicifTokenizer, minicif_to_structure, parse_minicif
+from decifer.minicif_v2 import (
+    END_TOKEN as V2_END_TOKEN,
+    MinicifV2Tokenizer,
+    minicif_v2_to_structure,
+    parse_minicif_v2,
+)
 from decifer.pxrd import clamp_qmax_for_wavelength, discrete_to_continuous_xrd, nyquist_qstep, q_range_to_two_theta_range
 from bin.test_minicif_realtime import refine_best_candidate
 from bin.train import TrainConfig
 
 PROMPT_MODE_ALIASES = {
     "pxrd": "start",
-    "pxrd-elements": "formula",
-    "pxrd-elements-cs": "formula-cs",
-    "pxrd-elements-cs-sg": "formula-cs-sg",
+    "pxrd-elements": "constituents",
+    "pxrd-elements-cs": "constituents-cs",
+    "pxrd-elements-cs-sg": "constituents-cs-sg",
+    "pxrd-stoichiometry": "formula",
+    "pxrd-stoichiometry-cs": "formula-cs",
+    "pxrd-stoichiometry-cs-sg": "formula-cs-sg",
 }
+
+
+def representation_api(tokenizer_name):
+    if tokenizer_name == "minicif_v2":
+        return MinicifV2Tokenizer(), parse_minicif_v2, minicif_v2_to_structure, V2_END_TOKEN
+    return MinicifTokenizer(), parse_minicif, minicif_to_structure, END_TOKEN
 
 
 def rwp(reference, generated):
@@ -126,7 +141,27 @@ def prompt_from_minicif(minicif_string, mode, tokenizer):
     mode = PROMPT_MODE_ALIASES.get(mode, mode)
     fields = minicif_string.strip().split()
     if mode == "start":
-        prompt = START_TOKEN
+        prompt = fields[0]
+    elif mode == "constituents":
+        if "formula" in fields:
+            stop = fields.index("formula") + 1
+        else:
+            stop = next(i for i, field in enumerate(fields) if field.startswith("cs_"))
+        prompt = " ".join(fields[:stop])
+    elif mode == "constituents-cs":
+        if "formula" in fields:
+            raise ValueError(
+                "crystal system cannot be supplied without stoichiometry in the sequential minicif_v2 grammar"
+            )
+        stop = next(i for i, field in enumerate(fields) if field.startswith("sg_"))
+        prompt = " ".join(fields[:stop])
+    elif mode == "constituents-cs-sg":
+        if "formula" in fields:
+            raise ValueError(
+                "space group cannot be supplied without stoichiometry in the sequential minicif_v2 grammar"
+            )
+        stop = fields.index("cell")
+        prompt = " ".join(fields[:stop])
     elif mode == "formula":
         stop = next(i for i, field in enumerate(fields) if field.startswith("cs_"))
         prompt = " ".join(fields[:stop])
@@ -167,14 +202,14 @@ def condition_from_sparse(q, iq, xrd_kwargs, config):
     iq_tensor = iq if torch.is_tensor(iq) else torch.tensor(iq, dtype=torch.float32)
     encoder = config.get("condition_encoder", "mlp")
     _, reference_iq, dense_iq = continuous_from_sparse(q_tensor, iq_tensor, xrd_kwargs)
-    if encoder not in {"peak", "hybrid"}:
+    if encoder not in {"peak", "peak_fourier", "hybrid"}:
         return reference_iq, dense_iq
 
     max_peaks = int(config.get("max_peak_list_peaks", 0) or 0)
     peak_q, peak_iq = cap_peak_list(q_tensor, iq_tensor, max_peaks)
     peak_q = peak_q.unsqueeze(0)
     peak_iq = peak_iq.unsqueeze(0)
-    if encoder == "peak":
+    if encoder in {"peak", "peak_fourier"}:
         return reference_iq, {"peak_q": peak_q, "peak_iq": peak_iq}
     return reference_iq, {"dense": dense_iq, "peak_q": peak_q, "peak_iq": peak_iq}
 
@@ -224,7 +259,10 @@ def generate_candidates(model, prompt, cond_vec, args, tokenizer):
     return generated
 
 
-def evaluate_split(split, h5_path, model, tokenizer, matcher, xrd_kwargs, config, args):
+def evaluate_split(
+    split, h5_path, model, tokenizer, parse_fn, structure_fn, end_token,
+    matcher, xrd_kwargs, config, args,
+):
     dataset = DeciferDataset(h5_path, ["cif_name", "minicif_string", "cif_tokens", "xrd.q", "xrd.iq", "spacegroup", "crystal_system"])
     n_items = len(dataset) if args.max_items <= 0 else min(args.max_items, len(dataset))
     rows = []
@@ -232,8 +270,8 @@ def evaluate_split(split, h5_path, model, tokenizer, matcher, xrd_kwargs, config
         item = dataset[sample_index]
         reference_minicif = item["minicif_string"]
         try:
-            reference_parsed = parse_minicif(reference_minicif)
-            reference_structure = minicif_to_structure(reference_minicif)
+            reference_parsed = parse_fn(reference_minicif)
+            reference_structure = structure_fn(reference_minicif)
             reference_iq, cond = condition_from_sparse(item["xrd.q"], item["xrd.iq"], xrd_kwargs, config)
         except Exception as exc:
             rows.append({
@@ -263,7 +301,7 @@ def evaluate_split(split, h5_path, model, tokenizer, matcher, xrd_kwargs, config
                     "reference_minicif": reference_minicif,
                     "generated_minicif": generated_minicif,
                     "generated_n_tokens": len(tokenizer.tokenize_minicif(generated_minicif)),
-                    "finished": generated_minicif.strip().endswith(END_TOKEN),
+                    "finished": generated_minicif.strip().endswith(end_token),
                     "reference_space_group": reference_parsed.space_group,
                     "reference_crystal_system": reference_parsed.crystal_system,
                     "parse_ok": False,
@@ -271,7 +309,7 @@ def evaluate_split(split, h5_path, model, tokenizer, matcher, xrd_kwargs, config
                     "match": False,
                 }
                 try:
-                    generated_parsed = parse_minicif(generated_minicif)
+                    generated_parsed = parse_fn(generated_minicif)
                     row.update({
                         "parse_ok": True,
                         "generated_space_group": generated_parsed.space_group,
@@ -282,7 +320,9 @@ def evaluate_split(split, h5_path, model, tokenizer, matcher, xrd_kwargs, config
                         "extra_elements": len(set(generated_parsed.elements) - set(reference_parsed.elements)),
                         "missing_elements": len(set(reference_parsed.elements) - set(generated_parsed.elements)),
                     })
-                    generated_structure = minicif_to_structure(generated_minicif)
+                    if hasattr(reference_parsed, "formula"):
+                        row["formula_match"] = generated_parsed.formula == reference_parsed.formula
+                    generated_structure = structure_fn(generated_minicif)
                     generated_iq = structure_to_continuous_xrd(generated_structure, xrd_kwargs, args.wavelength)
                     rmsd = matcher.get_rms_dist(reference_structure, generated_structure)
                     rmsd_value = None if rmsd is None else float(rmsd[0])
@@ -362,6 +402,7 @@ def summarize(df):
             "mean_extra_elements": float(split_df["extra_elements"].dropna().mean()) if "extra_elements" in split_df else np.nan,
             "mean_missing_elements": float(split_df["missing_elements"].dropna().mean()) if "missing_elements" in split_df else np.nan,
             "composition_match_rate": float(split_df["composition_match"].fillna(False).mean()) if "composition_match" in split_df else np.nan,
+            "formula_accuracy": float(split_df["formula_match"].fillna(False).mean()) if "formula_match" in split_df else np.nan,
         }
         if len(group_key) > 1:
             summary["prompt_mode"] = group_key[1]
@@ -457,15 +498,19 @@ def main():
             "pxrd-elements",
             "pxrd-elements-cs",
             "pxrd-elements-cs-sg",
+            "pxrd-stoichiometry",
+            "pxrd-stoichiometry-cs",
+            "pxrd-stoichiometry-cs-sg",
             "start",
+            "constituents",
             "formula",
             "formula-cs",
             "formula-cs-sg",
         ],
         default="pxrd",
         help=(
-            "Known-field prompt mode. pxrd starts from <mcif>; pxrd-elements also fixes constituent "
-            "elements; pxrd-elements-cs also fixes crystal system; pxrd-elements-cs-sg also fixes space group."
+            "Known-field prompt mode. pxrd starts from the representation start token; pxrd-elements "
+            "also fixes constituent elements; pxrd-stoichiometry also fixes reduced formula counts."
         ),
     )
     parser.add_argument(
@@ -476,7 +521,11 @@ def main():
             "pxrd-elements",
             "pxrd-elements-cs",
             "pxrd-elements-cs-sg",
+            "pxrd-stoichiometry",
+            "pxrd-stoichiometry-cs",
+            "pxrd-stoichiometry-cs-sg",
             "start",
+            "constituents",
             "formula",
             "formula-cs",
             "formula-cs-sg",
@@ -512,7 +561,8 @@ def main():
     out_dir = args.out_dir or os.path.join(os.path.dirname(args.checkpoint), "minicif_report")
     os.makedirs(out_dir, exist_ok=True)
 
-    tokenizer = MinicifTokenizer()
+    tokenizer_name = checkpoint.get("model_args", {}).get("tokenizer", config.get("tokenizer", "minicif"))
+    tokenizer, parse_fn, structure_fn, end_token = representation_api(tokenizer_name)
     matcher = StructureMatcher()
     xrd_kwargs = clean_xrd_kwargs(config, args)
     plot_learning_curves(checkpoint, out_dir)
@@ -520,7 +570,10 @@ def main():
     frames = []
     for split in args.splits:
         path = dataset_path(dataset_dir, split)
-        frames.append(evaluate_split(split, path, model, tokenizer, matcher, xrd_kwargs, config, args))
+        frames.append(evaluate_split(
+            split, path, model, tokenizer, parse_fn, structure_fn, end_token,
+            matcher, xrd_kwargs, config, args,
+        ))
     results = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     summary = summarize(results)
 

@@ -1,0 +1,64 @@
+# Short CUDA integration check. This validates the full v2 training path but is
+# too small to produce a useful checkpoint or performance result.
+
+out_dir: 'minicif_v2_gpu_smoke'
+eval_interval: 100
+log_interval: 1
+metrics_log_interval: 1
+init_from: 'scratch'
+
+device: 'cuda'
+dtype: 'bfloat16'
+compile: False
+fused_optimizer: True
+
+always_save_checkpoint: False
+validate: False
+
+dataset: 'data/noma_minicif_v2'
+tokenizer: 'minicif_v2'
+batching_strategy: 'record'
+length_bucket_size: 256
+batch_size: 8
+batch_token_budget: 2048
+block_size: 768
+num_workers_dataloader: 0
+sampling_strategy: 'random'
+
+n_layer: 2
+n_head: 4
+n_embd: 64
+dropout: 0.1
+typed_token_heads: True
+
+learning_rate: 1e-3
+gradient_accumulation_steps: 1
+max_iters: 2
+decay_lr: False
+weight_decay: 0.1
+beta2: 0.99
+
+condition: True
+condition_encoder: 'peak_fourier'
+condition_n_tokens: 8
+peak_fourier_bands: 4
+peak_encoder_hidden_dim: 64
+max_peak_list_peaks: 256
+condition_cross_attention: True
+condition_cross_attention_every_n_layers: 1
+condition_dropout_prob: 0.1
+boundary_masking: True
+minicif_constrained_decoding: True
+
+qmin: 0.0
+qmax: 10.0
+q_shift_range_min: -0.01
+q_shift_range_max: 0.01
+q_scale_range_min: 0.998
+q_scale_range_max: 1.002
+intensity_scale_range_min: 0.9
+intensity_scale_range_max: 1.0
+peak_intensity_jitter_range_min: 0.9
+peak_intensity_jitter_range_max: 1.1
+peak_dropout_prob: 0.02
+xrd_augmentation_on_device: True

@@ -1,0 +1,38 @@
+# Optional contrastive initialization for the Fourier peak encoder used by minicif_v2.
+
+out_dir: 'minicif_v2_pxrd_encoder_pretrain'
+dataset: 'data/noma_minicif_v2'
+split: 'train'
+resume: True
+
+device: 'cuda'
+dtype: 'bfloat16'
+batch_size: 128
+num_workers_dataloader: 4
+max_iters: 20_000
+eval_interval: 500
+log_interval: 20
+learning_rate: 5e-4
+weight_decay: 0.1
+
+condition_encoder: 'peak_fourier'
+condition_n_tokens: 24
+peak_fourier_bands: 10
+max_peak_list_peaks: 512
+n_embd: 384
+n_head: 6
+dropout: 0.1
+projection_dim: 128
+temperature: 0.1
+
+qmin: 0.0
+qmax: 10.0
+q_shift_range_min: -0.02
+q_shift_range_max: 0.02
+q_scale_range_min: 0.998
+q_scale_range_max: 1.002
+intensity_scale_range_min: 0.9
+intensity_scale_range_max: 1.0
+peak_intensity_jitter_range_min: 0.9
+peak_intensity_jitter_range_max: 1.1
+peak_dropout_prob: 0.02

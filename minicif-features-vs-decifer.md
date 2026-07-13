@@ -10,6 +10,13 @@ This file lists the core minicif changes relative to the original deCIFer workfl
 - Removed full CIF headers, free-form CIF tags, symmetry-operation text, and formatting variability from the learning target.
 - Added explicit start, atom-row, cell, and end tokens for the compact representation.
 - Added configurable numeric precision for cell, coordinate, and occupancy values.
+- Added a versioned `minicif_v2` representation without changing existing
+  `minicif` checkpoints or datasets.
+- `minicif_v2` includes an integral reduced formula and replaces multiplicity-only
+  atom rows with explicit Wyckoff letters and one representative site per orbit.
+- V2 canonicalization refines structures to a conventional symmetry setting;
+  reconstruction expands sites with `Structure.from_spacegroup` and validates
+  composition, space group, and declared Wyckoff letters.
 
 ## Tokenization and canonicalization
 
@@ -53,16 +60,22 @@ This file lists the core minicif changes relative to the original deCIFer workfl
 ## Conditioning architecture
 
 - Kept the original single-vector MLP conditioning path available.
-- Added configurable condition encoders with `condition_encoder: mlp|conv|peak|hybrid`.
+- Added configurable condition encoders with
+  `condition_encoder: mlp|conv|patch|peak|peak_fourier|hybrid`.
 - Added `condition_n_tokens`, allowing PXRD conditioning to use multiple non-generated condition tokens per minicif record.
 - Added a 1D convolutional PXRD encoder over dense q-grid intensity traces.
 - The conv encoder adaptively pools q-space to latent condition tokens and projects them to transformer width.
 - Added a sparse peak-list encoder over `xrd_disc.q` and `xrd_disc.iq`.
+- Added `peak_fourier`, which encodes absolute q with fixed Fourier features and
+  pools variable-length peak lists through learned latent queries without first
+  materializing a dense PXRD trace.
 - Peak-list q positions are normalized against the configured training q range rather than the per-sample maximum q, preserving absolute q-position information.
 - Added a hybrid PXRD encoder that concatenates dense-trace tokens and peak-list tokens.
 - Condition tokens are inserted at each `<mcif>` start, preserving packed-batch condition alignment.
 - Added optional true cross-attention from generated minicif tokens into PXRD memory tokens through `condition_cross_attention`.
 - Added `condition_cross_attention_every_n_layers` to control how often transformer blocks attend to PXRD memory.
+- Cached the fixed cross-attention keys and values during autoregressive
+  generation, alongside the causal self-attention cache.
 
 ## Attention and packing
 
@@ -71,6 +84,11 @@ This file lists the core minicif changes relative to the original deCIFer workfl
 - Added a regression test that verifies a token in one packed minicif record cannot attend to tokens from a previous packed record.
 - Added cross-attention masking so each packed minicif record attends only to its own PXRD memory tokens.
 - Added handling for packed continuation blocks without an in-block `<mcif>` start token.
+- Added record-aligned batching so every row contains one complete structure and
+  its matching PXRD condition. This removes cross-record continuation blocks and
+  allows the pure causal SDPA/Flash Attention path without a dense `T x T` group mask.
+- Added length buckets and a padded-model-token budget per microbatch to reduce
+  padding waste and make throughput comparisons explicit.
 
 ## Grammar-aware generation
 
@@ -78,6 +96,20 @@ This file lists the core minicif changes relative to the original deCIFer workfl
 - Restricts `sg_*` choices to the valid range for the already emitted `cs_*` crystal system.
 - Restricts `<atom>` element choices to the constituent elements emitted in the minicif prefix.
 - Uses minicif-specific stop behavior with `</mcif>` and `<pad>`.
+- Added v2 constraints for formula counts, Wyckoff tokens, occupancy, cell-field
+  order, crystal-system/space-group compatibility, and constituent atom elements.
+- Lattice decoding deterministically fixes required angles and repeats equal cell
+  lengths for conventional crystal-system settings.
+- A constituents-only prefix remains valid: the model generates the formula when
+  stoichiometry is not supplied at inference.
+
+## Typed output heads
+
+- Added optional element, symmetry, numeric, and control-token projections for
+  `minicif_v2`. Each head scores only its static vocabulary partition and logits
+  are reassembled for the same next-token cross-entropy objective.
+- Numeric values remain tokenized rather than being regressed as continuous
+  coordinates.
 
 ## Minicif-to-structure conversion
 
@@ -112,6 +144,14 @@ This file lists the core minicif changes relative to the original deCIFer workfl
   - checkpoint containing `encoder_state` for initializing minicif training
   - optional downstream freezing through `freeze_pretrained_condition_encoder`
   - live diagnostics through `contrastive_live.png`, `latest_metrics.json`, and `contrastive_metrics.csv`
+- Added fused AdamW as an opt-in CUDA setting and separate useful-token versus
+  padded-model-token throughput metrics.
+- Added ready-to-run v2 small/medium training configs and an optional Fourier peak
+  encoder pretraining config.
+- Added a v2 dataset/config preflight that reports token-length percentiles and
+  validates sampled token, formula, symmetry, Wyckoff expansion, and PXRD records.
+- Training now fails before model initialization when v2 representation metadata,
+  block size, or token budget is incompatible with the prepared splits.
 
 ## Evaluation and ablation workflow
 
@@ -129,5 +169,8 @@ This file lists the core minicif changes relative to the original deCIFer workfl
   - `pxrd-elements`
   - `pxrd-elements-cs`
   - `pxrd-elements-cs-sg`
+- Added formula-aware v2 modes: `pxrd-stoichiometry`,
+  `pxrd-stoichiometry-cs`, and `pxrd-stoichiometry-cs-sg`.
+- Added formula accuracy to v2 evaluation summaries.
 - Added generation metrics for finish rate, generated token count, extra elements, and missing elements.
 - Added README instructions for running the ablations and evaluating checkpoints on the cluster.

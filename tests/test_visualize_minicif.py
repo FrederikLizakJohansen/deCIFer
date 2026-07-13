@@ -5,6 +5,7 @@ import unittest
 import pandas as pd
 
 from decifer.minicif import MinicifTokenizer
+from decifer.minicif_v2 import MinicifV2Tokenizer
 
 MODULE_PATH = os.path.join(os.path.dirname(__file__), "..", "bin", "visualize_minicif.py")
 spec = importlib.util.spec_from_file_location("visualize_minicif", MODULE_PATH)
@@ -47,6 +48,26 @@ class VisualizeMinicifTest(unittest.TestCase):
             tokenizer.decode(prompt_from_minicif(minicif, "pxrd-elements-cs-sg", tokenizer).tolist()),
         )
 
+    def test_v2_stoichiometry_is_optional_in_prompt(self):
+        tokenizer = MinicifV2Tokenizer()
+        minicif = (
+            "<mcif2> Na Cl formula Na 1 Cl 1 cs_7 sg_225 cell "
+            "5.6400 5.6400 5.6400 90.0000 90.0000 90.0000 "
+            "<atom> Na wp_a 0.0000 0.0000 0.0000 1.0000 </mcif2>"
+        )
+
+        expected = {
+            "pxrd": "<mcif2>",
+            "pxrd-elements": "<mcif2> Na Cl formula",
+            "pxrd-stoichiometry": "<mcif2> Na Cl formula Na 1 Cl 1",
+            "pxrd-stoichiometry-cs": "<mcif2> Na Cl formula Na 1 Cl 1 cs_7",
+            "pxrd-stoichiometry-cs-sg": "<mcif2> Na Cl formula Na 1 Cl 1 cs_7 sg_225",
+        }
+
+        for mode, prompt in expected.items():
+            ids = prompt_from_minicif(minicif, mode, tokenizer)
+            self.assertEqual(tokenizer.decode(ids.tolist()), prompt)
+
     def test_summary_includes_element_set_and_structure_rates(self):
         df = pd.DataFrame([
             {
@@ -61,6 +82,7 @@ class VisualizeMinicifTest(unittest.TestCase):
                 "crystal_system_match": True,
                 "element_set_match": True,
                 "composition_match": False,
+                "formula_match": True,
             },
             {
                 "split": "val",
@@ -73,6 +95,7 @@ class VisualizeMinicifTest(unittest.TestCase):
                 "crystal_system_match": False,
                 "element_set_match": False,
                 "composition_match": False,
+                "formula_match": False,
             },
         ])
 
@@ -81,6 +104,7 @@ class VisualizeMinicifTest(unittest.TestCase):
         self.assertEqual(summary.loc[0, "valid_minicif_rate"], 0.5)
         self.assertEqual(summary.loc[0, "structure_rate"], 0.5)
         self.assertEqual(summary.loc[0, "element_set_accuracy"], 0.5)
+        self.assertEqual(summary.loc[0, "formula_accuracy"], 0.5)
 
 
 if __name__ == "__main__":

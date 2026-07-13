@@ -4,11 +4,113 @@ from types import MethodType
 
 import torch
 
-from decifer.decifer_model import Decifer, DeciferConfig, PeakListEncoder, PxrdConvEncoder, PxrdPatchEncoder
+from decifer.decifer_model import (
+    Decifer,
+    DeciferConfig,
+    FourierPeakEncoder,
+    PeakListEncoder,
+    PxrdConvEncoder,
+    PxrdPatchEncoder,
+)
 from decifer.minicif import MinicifTokenizer
+from decifer.minicif_v2 import MinicifV2Tokenizer
 
 
 class DeciferModelTest(unittest.TestCase):
+    def test_record_aligned_conditioning_uses_causal_fast_path(self):
+        tokenizer = MinicifV2Tokenizer()
+        model = Decifer(DeciferConfig(
+            tokenizer="minicif_v2",
+            vocab_size=tokenizer.vocab_size,
+            block_size=32,
+            n_layer=1,
+            n_head=1,
+            n_embd=16,
+            condition=True,
+            condition_encoder="peak_fourier",
+            condition_n_tokens=2,
+            peak_encoder_hidden_dim=8,
+            peak_fourier_bands=2,
+            record_aligned_attention=True,
+            typed_token_heads=True,
+        ))
+        ids = tokenizer.encode(tokenizer.tokenize_minicif("<mcif2> Na "))
+        idx = torch.tensor([ids, ids])
+        cond = {
+            "peak_q": torch.tensor([[1.0, 2.0], [1.5, 2.5]]),
+            "peak_iq": torch.tensor([[1.0, 0.5], [1.0, 0.4]]),
+        }
+        seen_biases = []
+        original_forward = model.transformer.h[0].attn.forward
+
+        def capture_attention_bias(module_self, x, attention_bias=None, **kwargs):
+            seen_biases.append(attention_bias)
+            return original_forward(x, attention_bias=attention_bias, **kwargs)
+
+        model.transformer.h[0].attn.forward = MethodType(
+            capture_attention_bias, model.transformer.h[0].attn
+        )
+        logits, loss = model(idx, cond, idx.clone(), [[0], [0]])
+
+        self.assertEqual(logits.shape, (2, idx.size(1) + 2, tokenizer.vocab_size))
+        self.assertIsNotNone(loss)
+        self.assertEqual(seen_biases, [None])
+
+    def test_record_aligned_attention_rejects_packed_records(self):
+        tokenizer = MinicifV2Tokenizer()
+        model = Decifer(DeciferConfig(
+            tokenizer="minicif_v2",
+            vocab_size=tokenizer.vocab_size,
+            block_size=16,
+            n_layer=1,
+            n_head=1,
+            n_embd=16,
+            record_aligned_attention=True,
+        ))
+        idx = torch.tensor([[tokenizer.token_to_id["<mcif2>"], tokenizer.token_to_id[" "]]])
+
+        with self.assertRaisesRegex(ValueError, "exactly one structure"):
+            model(idx, targets=idx.clone(), start_indices_batch=[[0, 1]])
+
+    def test_fourier_peak_encoder_is_sensitive_to_small_q_shifts(self):
+        torch.manual_seed(0)
+        encoder = FourierPeakEncoder(DeciferConfig(
+            n_head=1,
+            n_embd=16,
+            condition_n_tokens=2,
+            peak_encoder_hidden_dim=16,
+            peak_fourier_bands=4,
+            condition_qmin=0.0,
+            condition_qmax=10.0,
+        ))
+        intensity = torch.tensor([[1.0, 0.5, 0.0]])
+
+        low = encoder(torch.tensor([[1.0, 2.0, 0.0]]), intensity)
+        shifted = encoder(torch.tensor([[1.02, 2.02, 0.0]]), intensity)
+
+        self.assertFalse(torch.allclose(low, shifted))
+
+    def test_typed_head_covers_v2_vocabulary(self):
+        tokenizer = MinicifV2Tokenizer()
+        model = Decifer(DeciferConfig(
+            tokenizer="minicif_v2",
+            vocab_size=tokenizer.vocab_size,
+            block_size=16,
+            n_layer=1,
+            n_head=1,
+            n_embd=16,
+            typed_token_heads=True,
+            record_aligned_attention=True,
+        ))
+        ids = tokenizer.encode(tokenizer.tokenize_minicif("<mcif2> Na "))
+        idx = torch.tensor([ids])
+
+        logits, loss = model(idx, targets=idx.clone(), start_indices_batch=[[0]])
+
+        self.assertEqual(logits.shape[-1], tokenizer.vocab_size)
+        self.assertTrue(torch.isfinite(logits).all())
+        self.assertTrue(torch.isfinite(loss))
+
     def test_mlp_condition_encoder_keeps_single_condition_token(self):
         tokenizer = MinicifTokenizer()
         model = Decifer(DeciferConfig(
@@ -376,6 +478,51 @@ class DeciferModelTest(unittest.TestCase):
         out = model.generate(prompt, max_new_tokens=2, cond_vec=cond, start_indices_batch=[[0]], disable_pbar=True, cfg_scale=3.0)
         self.assertEqual(out.size(0), 1)
         self.assertGreaterEqual(out.size(1), prompt.size(1))
+
+    def test_cross_attention_kv_cache_matches_full_forward(self):
+        tokenizer = MinicifTokenizer()
+        model = Decifer(DeciferConfig(
+            tokenizer="minicif",
+            vocab_size=tokenizer.vocab_size,
+            block_size=32,
+            n_layer=2,
+            n_head=2,
+            n_embd=16,
+            condition=True,
+            condition_size=32,
+            condition_encoder="conv",
+            condition_n_tokens=2,
+            pxrd_encoder_channels=8,
+            condition_cross_attention=True,
+            record_aligned_attention=True,
+        ))
+        model.eval()
+        prompt = torch.tensor([tokenizer.encode(tokenizer.tokenize_minicif("<mcif> Na "))])
+        next_token = torch.tensor([[tokenizer.token_to_id["Cl"]]])
+        cond = torch.randn(1, 32)
+
+        with torch.no_grad():
+            _, _, cache = model(
+                prompt,
+                cond_vec=cond,
+                start_indices_batch=[[0]],
+                use_cache=True,
+            )
+            cached_logits, _, next_cache = model(
+                next_token,
+                past_kv=cache,
+                past_length=prompt.size(1),
+                use_cache=True,
+            )
+            full_logits, _ = model(
+                torch.cat((prompt, next_token), dim=1),
+                cond_vec=cond,
+                start_indices_batch=[[0]],
+            )
+
+        self.assertTrue(torch.allclose(cached_logits, full_logits, atol=1e-5, rtol=1e-5))
+        self.assertEqual(len(cache[0]), 4)
+        self.assertEqual(cache[0][2].data_ptr(), next_cache[0][2].data_ptr())
 
     def test_batched_minicif_generation_mask_blocks_invalid_space_group(self):
         tokenizer = MinicifTokenizer()

@@ -20,6 +20,7 @@ import subprocess
 from typing import List
 import argparse
 
+import h5py
 import torch
 import torch.distributed as dist
 import numpy as np
@@ -41,6 +42,11 @@ from omegaconf import OmegaConf
 from decifer.decifer_model import Decifer, DeciferConfig
 from decifer.tokenizer import Tokenizer
 from decifer.minicif import END_TOKEN, START_TOKEN, MinicifTokenizer
+from decifer.minicif_v2 import (
+    END_TOKEN as V2_END_TOKEN,
+    START_TOKEN as V2_START_TOKEN,
+    MinicifV2Tokenizer,
+)
 from decifer.pxrd import discrete_to_continuous_xrd, nyquist_qstep
 from decifer.decifer_dataset import DeciferDataset
     
@@ -65,6 +71,12 @@ def configure_tokenizer(tokenizer_name):
         START_ID = TOKENIZER.token_to_id[START_TOKEN]
         NEWLINE_ID = None
         end_id = TOKENIZER.token_to_id[END_TOKEN]
+        SEPARATOR_IDS = [end_id]
+    elif tokenizer_name == "minicif_v2":
+        TOKENIZER = MinicifV2Tokenizer()
+        START_ID = TOKENIZER.token_to_id[V2_START_TOKEN]
+        NEWLINE_ID = None
+        end_id = TOKENIZER.token_to_id[V2_END_TOKEN]
         SEPARATOR_IDS = [end_id]
     else:
         raise ValueError(f"unknown tokenizer: {tokenizer_name}")
@@ -92,6 +104,70 @@ class RandomBatchSampler(BatchSampler):
                 continue
             yield batch
 
+
+class TokenBudgetBatchSampler(BatchSampler):
+    """Bucket record lengths and cap padded model tokens in each microbatch."""
+
+    def __init__(
+        self,
+        sampler,
+        lengths,
+        token_budget,
+        max_batch_size,
+        condition_tokens=0,
+        bucket_size=2048,
+        seed=None,
+    ):
+        super().__init__(sampler, max_batch_size, False)
+        if token_budget <= 0:
+            raise ValueError("record batching requires batch_token_budget > 0")
+        self.lengths = np.asarray(lengths, dtype=np.int64)
+        self.token_budget = int(token_budget)
+        self.max_batch_size = int(max_batch_size)
+        self.condition_tokens = int(condition_tokens)
+        self.bucket_size = max(int(bucket_size), self.max_batch_size)
+        self.rng = random.Random(seed)
+
+    def __iter__(self):
+        pool = []
+        for index in self.sampler:
+            pool.append(int(index))
+            if len(pool) >= self.bucket_size:
+                yield from self._pool_batches(pool)
+                pool = []
+        if pool:
+            yield from self._pool_batches(pool)
+
+    def _pool_batches(self, indices):
+        indices.sort(key=lambda index: self.lengths[index])
+        batches = []
+        current = []
+        max_tokens = 0
+        for index in indices:
+            record_tokens = int(self.lengths[index]) - 1 + self.condition_tokens
+            if record_tokens <= 0:
+                continue
+            candidate_max = max(max_tokens, record_tokens)
+            exceeds_budget = current and candidate_max * (len(current) + 1) > self.token_budget
+            exceeds_batch = current and len(current) >= self.max_batch_size
+            if exceeds_budget or exceeds_batch:
+                batches.append(current)
+                current = []
+                max_tokens = 0
+            if record_tokens > self.token_budget:
+                raise ValueError(
+                    f"record with {record_tokens} model tokens exceeds batch_token_budget={self.token_budget}"
+                )
+            current.append(index)
+            max_tokens = max(max_tokens, record_tokens)
+        if current:
+            batches.append(current)
+        self.rng.shuffle(batches)
+        yield from batches
+
+    def __len__(self):
+        return math.ceil(len(self.sampler) / self.max_batch_size)
+
 @dataclass
 class TrainConfig:
     out_dir: str = "out"  # the path to the folder where the model checkpoints will be stored
@@ -108,6 +184,8 @@ class TrainConfig:
     gradient_accumulation_steps: int = 40  # used to simulate larger batch sizes
     batch_size: int = 64  # if gradient_accumulation_steps > 1, this is the micro-batch size
     batch_token_budget: int = 0  # collect records until this many raw tokens per microbatch; 0 uses batch_size records
+    batching_strategy: str = "packed"  # packed or record
+    length_bucket_size: int = 2048
     accumulative_pbar: bool = False
     num_workers_dataloader: int = 0 # Default; single process
     sampling_strategy: str = "random"
@@ -132,9 +210,11 @@ class TrainConfig:
     dense_condition_n_tokens: int = 16
     peak_condition_n_tokens: int = 16
     peak_encoder_hidden_dim: int = 128
+    peak_fourier_bands: int = 8
     condition_cross_attention: bool = False
     condition_cross_attention_every_n_layers: int = 1
     condition_dropout_prob: float = 0.0
+    typed_token_heads: bool = False
     pxrd_encoder_channels: int = 64
     pxrd_encoder_kernel_size: int = 7
     condition_embedder_hidden_layers: List[int] = field(default_factory=lambda: [512])
@@ -184,6 +264,7 @@ class TrainConfig:
     beta1: float = 0.9
     beta2: float = 0.95
     grad_clip: float = 1.0  # clip gradients at this value, or disable if == 0.0
+    fused_optimizer: bool = False
 
     # learning rate decay settings
     decay_lr: bool = True  # whether to decay the learning rate
@@ -242,6 +323,75 @@ def parse_config():
     C.vocab_size = VOCAB_SIZE
 
     return C
+
+
+def _decode_h5_string(value):
+    return value.decode("utf-8") if isinstance(value, bytes) else str(value)
+
+
+def validate_training_dataset(C):
+    """Fail before model initialization when a record-batched dataset is incompatible."""
+    expected_representation = C.tokenizer if C.tokenizer in {"minicif", "minicif_v2"} else None
+    for split in ("train", "val", "test"):
+        path = os.path.join(C.dataset, "serialized", f"{split}.h5")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"missing training split: {path}")
+        with h5py.File(path, "r") as h5:
+            if "cif_tokenized" not in h5:
+                raise KeyError(f"{path} is missing cif_tokenized")
+            n_records = len(h5["cif_tokenized"])
+            if n_records == 0:
+                raise ValueError(f"{path} contains no records")
+
+            if expected_representation == "minicif_v2":
+                if "representation" not in h5:
+                    raise ValueError(
+                        f"{path} has no representation metadata; prepare it with "
+                        "--representation minicif_v2"
+                    )
+                check_indices = sorted({0, n_records // 2, n_records - 1})
+                representations = {
+                    _decode_h5_string(h5["representation"][index])
+                    for index in check_indices
+                }
+                if representations != {expected_representation}:
+                    raise ValueError(
+                        f"{path} representation {sorted(representations)} does not match "
+                        f"tokenizer={C.tokenizer!r}"
+                    )
+
+            if C.batching_strategy != "record":
+                continue
+            if C.batch_token_budget <= 0:
+                raise ValueError("record batching requires batch_token_budget > 0")
+            if "cif_token_length" in h5:
+                lengths = np.asarray(h5["cif_token_length"], dtype=np.int64)
+            else:
+                lengths = np.fromiter(
+                    (len(tokens) for tokens in h5["cif_tokenized"]),
+                    dtype=np.int64,
+                    count=n_records,
+                )
+            min_length = int(lengths.min())
+            max_length = int(lengths.max())
+            if min_length < 2:
+                raise ValueError(f"{path} contains a record shorter than two tokens")
+            if max_length - 1 > C.block_size:
+                raise ValueError(
+                    f"{path} maximum record length {max_length} exceeds block_size + 1 "
+                    f"({C.block_size + 1})"
+                )
+            condition_tokens = (
+                C.condition_n_tokens
+                if C.condition and not C.condition_cross_attention
+                else 0
+            )
+            max_model_tokens = max_length - 1 + condition_tokens
+            if max_model_tokens > C.batch_token_budget:
+                raise ValueError(
+                    f"{path} requires at least {max_model_tokens} model tokens for one record, "
+                    f"but batch_token_budget={C.batch_token_budget}"
+                )
 
 def seed_everything(seed):
     if seed is None:
@@ -340,6 +490,8 @@ METRIC_LOG_FIELDS = [
     "time_ms",
     "tokens",
     "tokens_per_second",
+    "model_tokens",
+    "model_tokens_per_second",
     "grad_norm",
     "max_gpu_memory_mb",
     "best_val_loss",
@@ -353,6 +505,7 @@ METRIC_LOG_FIELDS = [
     "batch_size",
     "block_size",
     "gradient_accumulation_steps",
+    "batching_strategy",
 ]
 
 def initialize_metrics_logs(C):
@@ -405,6 +558,7 @@ def base_metric_event(C, training_metrics, local_iteration_number, lr, event_typ
         "batch_token_budget": C.batch_token_budget,
         "block_size": C.block_size,
         "gradient_accumulation_steps": C.gradient_accumulation_steps,
+        "batching_strategy": C.batching_strategy,
         "max_xrd_peaks": C.max_xrd_peaks,
         "max_peak_list_peaks": C.max_peak_list_peaks,
         "max_gpu_memory_mb": max_gpu_memory_mb,
@@ -494,6 +648,7 @@ def load_pretrained_condition_encoder(C, model):
         "condition_n_tokens": C.condition_n_tokens,
         "dense_condition_n_tokens": C.dense_condition_n_tokens,
         "peak_condition_n_tokens": C.peak_condition_n_tokens,
+        "peak_fourier_bands": C.peak_fourier_bands,
         "n_embd": C.n_embd,
         "condition_qmin": C.qmin,
         "condition_qmax": C.qmax,
@@ -536,10 +691,37 @@ def make_grad_scaler(device_type, dtype):
         return torch.amp.GradScaler("cuda", enabled=enabled)
     return torch.cuda.amp.GradScaler(enabled=enabled)
 
+
+def token_lengths(dataset):
+    dataset._open_file()
+    if "cif_token_length" in dataset.h5_file:
+        lengths = np.asarray(dataset.h5_file["cif_token_length"], dtype=np.int64)
+    else:
+        token_data = dataset.data["cif_tokens"]
+        lengths = np.fromiter((len(token_data[index]) for index in range(len(dataset))), dtype=np.int64)
+    if dataset.lazy_open:
+        dataset.close()
+    return lengths
+
+
+def record_batch_sampler(C, sampler, dataset, seed):
+    condition_tokens = C.condition_n_tokens if C.condition and not C.condition_cross_attention else 0
+    return TokenBudgetBatchSampler(
+        sampler,
+        token_lengths(dataset),
+        token_budget=C.batch_token_budget,
+        max_batch_size=C.batch_size,
+        condition_tokens=condition_tokens,
+        bucket_size=C.length_bucket_size,
+        seed=seed,
+    )
+
 def setup_datasets(C, distributed=None):
     if distributed is None:
         distributed = {"ddp": False, "rank": 0, "world_size": 1}
     
+    batching_strategy = getattr(C, "batching_strategy", "packed")
+
     # Custom collate function
     def collate_fn(batch):
         # batch is a list of dictionaries
@@ -596,7 +778,12 @@ def setup_datasets(C, distributed=None):
         sampler_seed = None if C.seed is None else C.seed + distributed["rank"]
         train_sampler = SubsetRandomSampler(train_indices, generator=make_generator(sampler_seed))
     batch_seed = None if C.seed is None else C.seed + distributed["rank"]
-    train_batch_sampler = RandomBatchSampler(train_sampler, batch_size=C.batch_size, drop_last=False, seed=batch_seed)
+    if batching_strategy == "record":
+        train_batch_sampler = record_batch_sampler(C, train_sampler, train_dataset, batch_seed)
+    elif batching_strategy == "packed":
+        train_batch_sampler = RandomBatchSampler(train_sampler, batch_size=C.batch_size, drop_last=False, seed=batch_seed)
+    else:
+        raise ValueError(f"unknown batching_strategy: {batching_strategy}")
     train_dataloader = DataLoader(
         train_dataset,
         batch_sampler=train_batch_sampler,
@@ -610,29 +797,45 @@ def setup_datasets(C, distributed=None):
     
     # Sequential batching sampler, val/test
     val_sampler = SequentialSampler(val_dataset)
+    val_batch_sampler = (
+        record_batch_sampler(C, val_sampler, val_dataset, None if C.seed is None else C.seed + 2)
+        if batching_strategy == "record" else None
+    )
+    val_batch_kwargs = (
+        {"batch_sampler": val_batch_sampler}
+        if val_batch_sampler is not None
+        else {"sampler": val_sampler, "batch_size": C.batch_size}
+    )
     val_dataloader = DataLoader(
         val_dataset,
-        sampler=val_sampler,
-        batch_size=C.batch_size,
         num_workers=C.num_workers_dataloader,
         collate_fn=collate_fn,
         pin_memory=pin_memory,
         worker_init_fn=seed_worker if C.seed is not None else None,
         generator=make_generator(None if C.seed is None else C.seed + 2),
         persistent_workers=C.num_workers_dataloader > 0,
+        **val_batch_kwargs,
     )
     
     test_sampler = SequentialSampler(test_dataset)
+    test_batch_sampler = (
+        record_batch_sampler(C, test_sampler, test_dataset, None if C.seed is None else C.seed + 3)
+        if batching_strategy == "record" else None
+    )
+    test_batch_kwargs = (
+        {"batch_sampler": test_batch_sampler}
+        if test_batch_sampler is not None
+        else {"sampler": test_sampler, "batch_size": C.batch_size}
+    )
     test_dataloader = DataLoader(
         test_dataset,
-        sampler=test_sampler,
-        batch_size=C.batch_size,
         num_workers=C.num_workers_dataloader,
         collate_fn=collate_fn,
         pin_memory=pin_memory,
         worker_init_fn=seed_worker if C.seed is not None else None,
         generator=make_generator(None if C.seed is None else C.seed + 3),
         persistent_workers=C.num_workers_dataloader > 0,
+        **test_batch_kwargs,
     )
 
     # Combine loaders for easy access
@@ -648,6 +851,7 @@ if __name__ == "__main__":
 
     # Parse configuration
     C = parse_config()
+    validate_training_dataset(C)
     distributed = setup_distributed(C)
     master_process = distributed["master_process"]
     
@@ -693,12 +897,15 @@ if __name__ == "__main__":
         boundary_masking=C.boundary_masking,
         tokenizer=C.tokenizer,
         minicif_constrained_decoding=C.minicif_constrained_decoding,
+        record_aligned_attention=C.batching_strategy == "record",
+        typed_token_heads=C.typed_token_heads,
         condition_encoder=C.condition_encoder,
         hybrid_dense_encoder=C.hybrid_dense_encoder,
         condition_n_tokens=C.condition_n_tokens,
         dense_condition_n_tokens=C.dense_condition_n_tokens,
         peak_condition_n_tokens=C.peak_condition_n_tokens,
         peak_encoder_hidden_dim=C.peak_encoder_hidden_dim,
+        peak_fourier_bands=C.peak_fourier_bands,
         condition_qmin=C.qmin,
         condition_qmax=C.qmax,
         condition_cross_attention=C.condition_cross_attention,
@@ -766,7 +973,12 @@ if __name__ == "__main__":
     scaler = make_grad_scaler(device_type, C.dtype)
 
     # Initialize Optimizer
-    optimizer = model.configure_optimizers(C.weight_decay, C.learning_rate, (C.beta1, C.beta2))
+    optimizer = model.configure_optimizers(
+        C.weight_decay,
+        C.learning_rate,
+        (C.beta1, C.beta2),
+        fused=C.fused_optimizer and device_type == "cuda",
+    )
     if C.init_from == "resume":
         optimizer.load_state_dict(checkpoint["current_optimizer"])
 
@@ -809,20 +1021,52 @@ if __name__ == "__main__":
         batch_iq = torch.where(valid, batch_iq, torch.zeros_like(batch_iq))
         return batch_q, batch_iq
 
+    def uniform_like(shape, range_, like):
+        return torch.empty(*shape, dtype=like.dtype, device=like.device).uniform_(*range_)
+
+    def augment_peak_list(batch_q, batch_iq):
+        batch_q = batch_q.clone()
+        batch_iq = batch_iq.clone()
+        valid = batch_q != 0
+        q_scale_range = _range_or_none(C.q_scale_range_min, C.q_scale_range_max, 1.0)
+        if q_scale_range is not None:
+            batch_q *= uniform_like((batch_q.size(0), 1), q_scale_range, batch_q)
+        q_shift_range = _range_or_none(C.q_shift_range_min, C.q_shift_range_max, 0.0)
+        if q_shift_range is not None:
+            batch_q += uniform_like((batch_q.size(0), 1), q_shift_range, batch_q)
+        intensity_scale_range = _range_or_none(
+            C.intensity_scale_range_min, C.intensity_scale_range_max, 1.0
+        )
+        if intensity_scale_range is not None:
+            batch_iq *= uniform_like((batch_iq.size(0), 1), intensity_scale_range, batch_iq)
+        jitter_range = _range_or_none(
+            C.peak_intensity_jitter_range_min, C.peak_intensity_jitter_range_max, 1.0
+        )
+        if jitter_range is not None:
+            batch_iq *= uniform_like(batch_iq.shape, jitter_range, batch_iq)
+        if C.peak_dropout_prob > 0:
+            keep = torch.rand_like(batch_iq) > C.peak_dropout_prob
+            batch_iq *= keep
+            valid &= keep
+        batch_q = torch.where(valid, batch_q, torch.zeros_like(batch_q))
+        batch_iq = torch.where(valid, batch_iq, torch.zeros_like(batch_iq))
+        return cap_peak_list(batch_q, batch_iq)
+
     def append_condition_batch(cond_list, batch, augment):
         xrd_kwargs = augmentation_kwargs if augment else clean_xrd_kwargs
         batch_q = batch['xrd.q']
         batch_iq = batch['xrd.iq']
-        if C.condition_encoder in {"peak", "hybrid"}:
-            peak_q, peak_iq = cap_peak_list(batch_q, batch_iq)
         if C.xrd_augmentation_on_device:
             batch_q = move_tensor_to_device(batch_q)
             batch_iq = move_tensor_to_device(batch_iq)
-            if C.condition_encoder in {"peak", "hybrid"}:
-                peak_q = move_tensor_to_device(peak_q)
-                peak_iq = move_tensor_to_device(peak_iq)
 
-        if C.condition_encoder == "peak":
+        if C.condition_encoder in {"peak", "peak_fourier", "hybrid"}:
+            if augment:
+                peak_q, peak_iq = augment_peak_list(batch_q, batch_iq)
+            else:
+                peak_q, peak_iq = cap_peak_list(batch_q, batch_iq)
+
+        if C.condition_encoder in {"peak", "peak_fourier"}:
             for peak_q_item, peak_iq_item in zip(peak_q, peak_iq):
                 cond_list.append({"peak_q": peak_q_item, "peak_iq": peak_iq_item})
         elif C.condition_encoder == "hybrid":
@@ -854,10 +1098,47 @@ if __name__ == "__main__":
         if split not in data_iters:
             data_iters[split] = iter(dataloader)
         data_iter = data_iters[split]
+        cond_list = []
+
+        if C.batching_strategy == "record":
+            try:
+                batch = next(data_iter)
+            except StopIteration:
+                data_iter = iter(dataloader)
+                data_iters[split] = data_iter
+                batch = next(data_iter)
+
+            sequences = batch["cif_tokens"]
+            if sequences.size(1) < 2:
+                raise RuntimeError("record batch contains a sequence shorter than two tokens")
+            if sequences.size(1) - 1 > C.block_size:
+                raise RuntimeError(
+                    f"record length {sequences.size(1)} exceeds block_size + 1 ({C.block_size + 1})"
+                )
+            X_batch = sequences[:, :-1].contiguous()
+            Y_batch = sequences[:, 1:].contiguous()
+            Y_batch = Y_batch.masked_fill(Y_batch == PADDING_ID, -1)
+            if not torch.all(X_batch[:, 0] == START_ID):
+                raise RuntimeError("record-aligned batch contains a structure without a start token at index 0")
+            start_indices_list = [[0] for _ in range(X_batch.size(0))]
+
+            cond_batch = None
+            if C.condition:
+                append_condition_batch(cond_list, batch, augment)
+                cond_batch = stack_conditions(cond_list)
+
+            useful_tokens = int((Y_batch != -1).sum().item())
+            model_tokens = int(X_batch.numel())
+            if C.condition and not C.condition_cross_attention:
+                model_tokens += X_batch.size(0) * C.condition_n_tokens
+            X_batch = move_tensor_to_device(X_batch)
+            Y_batch = move_tensor_to_device(Y_batch)
+            if cond_batch is not None:
+                cond_batch = move_tensor_to_device(cond_batch)
+            return X_batch, Y_batch, cond_batch, start_indices_list, useful_tokens, model_tokens
 
         # Initialize lists to store packed sequences and start indices
         start_indices_list = []
-        cond_list = []
 
         # Collect sequences until we have enough records or raw tokens to fill the microbatch
         total_sequences = []
@@ -932,6 +1213,11 @@ if __name__ == "__main__":
                         f"for {num_start_tokens} start tokens"
                     )
         
+        useful_tokens = int((Y_batch != -1).sum().item())
+        model_tokens = int(X_batch.numel())
+        if C.condition and not C.condition_cross_attention:
+            model_tokens += sum(len(starts) for starts in start_indices_list) * C.condition_n_tokens
+
         # Send to device (CUDA/CPU)
         X_batch = move_tensor_to_device(X_batch)
         Y_batch = move_tensor_to_device(Y_batch)
@@ -939,7 +1225,7 @@ if __name__ == "__main__":
             cond_batch = move_tensor_to_device(cond_batch)
 
         # Return the batch data and start indices
-        return X_batch, Y_batch, cond_batch, start_indices_list
+        return X_batch, Y_batch, cond_batch, start_indices_list, useful_tokens, model_tokens
 
     # helps estimate an arbitrarily accurate loss over either split using many batches
     @torch.no_grad()
@@ -951,7 +1237,7 @@ if __name__ == "__main__":
                 data_iters.pop(split, None)
             losses = torch.zeros(eval_iters)
             for k in range(eval_iters):
-                X, Y, cond, start_indices = get_batch(split, augment=False)
+                X, Y, cond, start_indices, _, _ = get_batch(split, augment=False)
                 with ctx:
                     eval_model = raw_model if distributed["ddp"] else model
                     _, loss = eval_model(X, cond, Y, start_indices)
@@ -977,7 +1263,7 @@ if __name__ == "__main__":
         return C.min_lr + coeff * (C.learning_rate - C.min_lr)
 
     # training loop
-    X, Y, cond, start_indices = get_batch("train")
+    X, Y, cond, start_indices, batch_tokens, batch_model_tokens = get_batch("train")
     t0 = time.time()
     local_iteration_number = 0  # number of iterations in the lifetime of this process
     while True:
@@ -1048,6 +1334,7 @@ if __name__ == "__main__":
         small_step_pbar = tqdm(desc='Accumulating losses...', total=C.gradient_accumulation_steps, leave=False, disable=not C.accumulative_pbar)
         loss_accum = torch.zeros((), device=C.device)
         tokens_accum = 0
+        model_tokens_accum = 0
         for micro_step in range(C.gradient_accumulation_steps):
             sync_context = (
                 model.no_sync()
@@ -1058,10 +1345,11 @@ if __name__ == "__main__":
                 with ctx:
                     logits, loss = model(X, cond, Y, start_indices)
                     loss = loss / C.gradient_accumulation_steps
-                tokens_accum += int(X.numel())
+                tokens_accum += batch_tokens
+                model_tokens_accum += batch_model_tokens
 
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
-                X, Y, cond, start_indices = get_batch("train")
+                X, Y, cond, start_indices, batch_tokens, batch_model_tokens = get_batch("train")
                 # backward pass, with gradient scaling if training in fp16
                 scaler.scale(loss).backward()
                 loss_accum += loss.detach()
@@ -1082,14 +1370,17 @@ if __name__ == "__main__":
 
         logged_loss = loss_accum.detach()
         logged_tokens = tokens_accum
+        logged_model_tokens = model_tokens_accum
         if distributed["ddp"]:
             metrics_tensor = torch.stack([
                 logged_loss.to(dtype=torch.float64),
                 torch.tensor(float(tokens_accum), dtype=torch.float64, device=C.device),
+                torch.tensor(float(model_tokens_accum), dtype=torch.float64, device=C.device),
             ])
             dist.all_reduce(metrics_tensor, op=dist.ReduceOp.SUM)
             logged_loss = metrics_tensor[0] / distributed["world_size"]
             logged_tokens = int(metrics_tensor[1].item())
+            logged_model_tokens = int(metrics_tensor[2].item())
 
         # timing and logging
         t1 = time.time()
@@ -1105,6 +1396,8 @@ if __name__ == "__main__":
                 "time_ms": dt * 1000,
                 "tokens": logged_tokens,
                 "tokens_per_second": logged_tokens / dt if dt > 0 else None,
+                "model_tokens": logged_model_tokens,
+                "model_tokens_per_second": logged_model_tokens / dt if dt > 0 else None,
                 "grad_norm": grad_norm,
             })
             write_metric_event(C, metrics_paths, train_event)
