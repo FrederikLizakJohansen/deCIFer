@@ -78,6 +78,15 @@ def validate_sample(h5, index, tokenizer, config, report):
         representation = decode_string(h5["representation"][index])
         if representation != "minicif_v2":
             raise ValueError(f"representation is {representation!r}")
+        xrd_backend = (
+            decode_string(h5["xrd_backend"][index])
+            if "xrd_backend" in h5
+            else "pymatgen"
+        )
+        if xrd_backend != report["xrd_backend"]:
+            raise ValueError(
+                f"XRD backend {xrd_backend!r} differs from {report['xrd_backend']!r}"
+            )
 
         tokens = np.asarray(h5["cif_tokenized"][index], dtype=np.int64)
         stored_length = int(h5["cif_token_length"][index])
@@ -143,6 +152,14 @@ def audit_split(path, config, max_items=100, seed=1337):
         if n_records == 0:
             add_error(report, -1, "split contains no records")
             return report
+
+        report["xrd_backend"] = (
+            decode_string(h5["xrd_backend"][0])
+            if "xrd_backend" in h5
+            else "pymatgen"
+        )
+        if report["xrd_backend"] not in {"braggcalculator", "pymatgen"}:
+            add_error(report, -1, f"unknown XRD backend {report['xrd_backend']!r}")
 
         lengths = np.asarray(h5["cif_token_length"], dtype=np.int64)
         report["token_lengths"] = {

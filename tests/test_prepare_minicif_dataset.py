@@ -6,6 +6,7 @@ import tempfile
 import unittest
 
 import h5py
+import numpy as np
 from pymatgen.core import Lattice, Structure
 from pymatgen.io.cif import CifWriter
 
@@ -26,6 +27,8 @@ write_metadata = prepare_minicif_dataset.write_metadata
 write_split = prepare_minicif_dataset.write_split
 process_cif = prepare_minicif_dataset.process_cif
 validate_checkpoint_representation = prepare_minicif_dataset.validate_checkpoint_representation
+validate_checkpoint_xrd_backend = prepare_minicif_dataset.validate_checkpoint_xrd_backend
+calculate_xrd_pattern = prepare_minicif_dataset.calculate_xrd_pattern
 PrepConfig = prepare_minicif_dataset.PrepConfig
 
 
@@ -42,6 +45,31 @@ class PrepareMinicifDatasetTest(unittest.TestCase):
         self.assertEqual(row["formula"], "Na 1 Cl 1")
         self.assertEqual(row["cif_token_length"], len(row["cif_tokenized"]))
         self.assertTrue(row["minicif_string"].startswith("<mcif2>"))
+        self.assertIn(row["xrd_backend"], {"braggcalculator", "pymatgen"})
+
+    def test_braggcalculator_matches_pymatgen_sparse_pattern(self):
+        try:
+            __import__("braggcalculator")
+        except ImportError:
+            self.skipTest("braggcalculator is not installed")
+        structure = Structure.from_spacegroup(
+            "Pm-3m",
+            Lattice.cubic(3.905),
+            ["Sr", "Ti", "O"],
+            [[0, 0, 0], [0.5, 0.5, 0.5], [0.5, 0.5, 0]],
+        )
+        pymatgen_config = PrepConfig(
+            raw_dir="raw", out_dir="out", xrd_backend="pymatgen", qmax=8.0
+        )
+        bragg_config = PrepConfig(
+            raw_dir="raw", out_dir="out", xrd_backend="braggcalculator", qmax=8.0
+        )
+
+        pymatgen_q, pymatgen_iq, _ = calculate_xrd_pattern(structure, pymatgen_config)
+        bragg_q, bragg_iq, _ = calculate_xrd_pattern(structure, bragg_config)
+
+        np.testing.assert_allclose(bragg_q, pymatgen_q, rtol=0, atol=1e-6)
+        np.testing.assert_allclose(bragg_iq, pymatgen_iq, rtol=0, atol=1e-6)
 
     def test_v2_split_contains_batching_metadata_fields(self):
         row = {
@@ -49,6 +77,7 @@ class PrepareMinicifDatasetTest(unittest.TestCase):
             "minicif_string": "<mcif2> Na formula Na 1",
             "formula": "Na 1",
             "representation": "minicif_v2",
+            "xrd_backend": "braggcalculator",
             "cif_tokenized": [1, 2, 3],
             "cif_token_length": 3,
             "spacegroup": 1,
@@ -63,11 +92,18 @@ class PrepareMinicifDatasetTest(unittest.TestCase):
                 self.assertEqual(int(h5["cif_token_length"][0]), 3)
                 self.assertEqual(h5["formula"].asstr()[0], "Na 1")
                 self.assertEqual(h5["representation"].asstr()[0], "minicif_v2")
+                self.assertEqual(h5["xrd_backend"].asstr()[0], "braggcalculator")
 
     def test_checkpoint_representation_mismatch_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "another representation"):
             validate_checkpoint_representation(
                 {"a": {"representation": "minicif"}}, "minicif_v2"
+            )
+
+    def test_checkpoint_xrd_backend_mismatch_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "another XRD backend"):
+            validate_checkpoint_xrd_backend(
+                {"a": {"xrd_backend": "pymatgen"}}, "braggcalculator"
             )
 
     def test_load_inputs_from_gzip_tuple_bundle(self):

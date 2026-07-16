@@ -18,7 +18,7 @@ Download `decifer_v1_ckpt.pt` for the pretrained deCIFer checkpoint. See [Data P
 7. [License](#license)
 
 ## Setup
-We recommend using **Python 3.9**, as deCIFer was developed and tested with this version. Other versions may work but have not been verified.
+deCIFer supports **Python 3.12 and 3.13**. Python 3.13 is used for the current test suite.
 
 1. **Clone the repository**:
 ```bash
@@ -28,12 +28,12 @@ cd deCIFer
 
 2. **Create and activate an isolated environment.** To avoid conflicts with local installations, we strongly recommend installing into a fresh virtual environment, e.g. with Conda:
 ```bash
-conda create -n decifer python=3.9
+conda create -n decifer python=3.13
 conda activate decifer
 ```
 or with venv:
 ```bash
-python3.9 -m venv .venv
+python3.13 -m venv .venv
 source .venv/bin/activate
 ```
 
@@ -45,10 +45,7 @@ pip install -e .
 4. **Ensure that you have PyTorch installed:**
 Follow the instructions on the official PyTorch website to install the appropriate version for your system: PyTorch Installation Guide. (https://pytorch.org/get-started/locally/)
 
-5. **Install other dependencies**:
-```bash
-pip install numpy pandas matplotlib seaborn pyYAML tqdm omegaconf h5py pymatgen periodictable scikit-learn
-```
+The editable install includes BraggCalculator and the other Python dependencies.
 
 ## Data Preparation
 
@@ -157,8 +154,14 @@ python bin/prepare_minicif_dataset.py \
   --raw-dir data/noma \
   --out-dir data/noma_minicif_v2 \
   --raw-from-gzip \
-  --representation minicif_v2
+  --representation minicif_v2 \
+  --xrd-backend braggcalculator
 ```
+
+`--xrd-backend auto` is the default: it uses the installed BraggCalculator and
+falls back to pymatgen if it is unavailable. The resolved backend is stored in
+checkpoints and serialized splits, and mixed-backend resume/merge operations are
+rejected.
 
 Audit the prepared splits before allocating a GPU. This checks sequence-length
 compatibility against the selected config, representation metadata, token/string
@@ -427,7 +430,7 @@ Scripts, configs, and notebooks for the follow-up paper are in [`follow-up-paper
 
 - **`AssertionError: from_gzip flag is raised, but more than one gzip file found in directory`** — `--raw-from-gzip` expects exactly one `*.pkl.gz` archive in the directory passed via `--data-dir`. Remove or relocate any additional `.pkl.gz` files, or extract the CIFs into a `raw/` subdirectory and run without `--raw-from-gzip`. See [Expected input layout](#expected-input-layout).
 - **`Cannot locate any files in <dir>`** — without `--raw-from-gzip`, the script looks for `*.cif` files inside a `raw/` subdirectory of `--data-dir`, not in the directory itself.
-- **`ModuleNotFoundError` / import errors** — make sure the environment is activated and that both `pip install -e .` (step 3) and the additional dependencies (step 5) were installed in that same environment. deCIFer was developed and tested with Python 3.9.
+- **`ModuleNotFoundError` / import errors** — make sure the Python 3.12 or 3.13 environment is activated and that `pip install -e .` (step 3) was run in that same environment.
 - **PyTorch / CUDA errors** — install the PyTorch build matching your CUDA version from the [official selector](https://pytorch.org/get-started/locally/). The CPU-only build works for inference with the pretrained checkpoint, but training is impractical without a GPU.
 - **Out-of-memory during generation** — reduce `--batch_size` (or `batch_size` in the YAML config) and/or `--max-new-tokens`.
 

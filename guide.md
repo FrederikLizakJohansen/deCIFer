@@ -7,8 +7,18 @@ Run all commands from the repository root after activating the Python environmen
 The default input is the NOMA gzip bundle under `data/noma`. Prepared data is
 written to `data/noma_minicif_v2`.
 
+Use Python 3.12 or 3.13 and install the package and its dependencies:
+
 ```bash
-sbatch minislurm/prepare_minicif_v2_dataset.sh
+python -m pip install -e .
+```
+
+This installs BraggCalculator. The preparation command selects it automatically;
+to require the fast backend and fail rather than fall back to pymatgen:
+
+```bash
+sbatch minislurm/prepare_minicif_v2_dataset.sh \
+  --xrd-backend braggcalculator
 ```
 
 To use different locations:
@@ -16,8 +26,12 @@ To use different locations:
 ```bash
 RAW_DIR=/path/to/raw/noma \
 OUT_DIR=/path/to/noma_minicif_v2 \
-sbatch minislurm/prepare_minicif_v2_dataset.sh
+sbatch minislurm/prepare_minicif_v2_dataset.sh \
+  --xrd-backend braggcalculator
 ```
+
+The resolved backend is recorded in preparation checkpoints and HDF5 files.
+Do not resume the same preparation checkpoint with a different backend.
 
 After preparation, verify the dataset:
 

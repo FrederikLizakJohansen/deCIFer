@@ -7,10 +7,10 @@ This folder contains small, regularized configs for comparing PXRD conditioning 
 From the repository root:
 
 ```bash
-python3.9 -m venv .venv
+python3.13 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-pip install torch numpy pandas matplotlib seaborn pyYAML tqdm omegaconf h5py pymatgen periodictable scikit-learn
+pip install torch
 export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 ```
 

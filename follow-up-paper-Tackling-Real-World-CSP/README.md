@@ -10,7 +10,8 @@ All scripts must be run from the **repo root**, not from inside this folder.
 
 ## Setup
 
-We recommend Python 3.9. Other versions may work but have not been verified.
+The original experiments used Python 3.9. The current repository supports
+Python 3.12 and 3.13; use Python 3.13 for a new environment.
 
 **1. Clone the repository:**
 
@@ -22,14 +23,14 @@ cd deCIFer
 **2. Create and activate a virtual environment:**
 
 ```bash
-conda create -n decifer python=3.9
+conda create -n decifer python=3.13
 conda activate decifer
 ```
 
 or with venv:
 
 ```bash
-python3.9 -m venv .venv
+python3.13 -m venv .venv
 source .venv/bin/activate
 ```
 

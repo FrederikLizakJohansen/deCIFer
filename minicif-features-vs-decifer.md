@@ -42,6 +42,8 @@ This file lists the core minicif changes relative to the original deCIFer workfl
 ## PXRD storage and augmentation
 
 - Store sparse peak positions/intensities instead of dense precomputed augmented traces.
+- Added optional BraggCalculator sparse-pattern generation with automatic
+  pymatgen fallback and persisted backend provenance.
 - Reconstruct continuous PXRD conditions during training.
 - Added Nyquist-style q-grid control through `nyquist_points_per_fwhm`.
 - Added training-time PXRD perturbations:

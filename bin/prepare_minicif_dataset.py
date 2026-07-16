@@ -50,6 +50,7 @@ class PrepConfig:
     out_dir: str
     raw_from_gzip: bool = False
     representation: str = "minicif"
+    xrd_backend: str = "auto"
     max_samples: int = 0
     sample_strategy: str = "first"
     checkpoint_path: str = ""
@@ -72,6 +73,50 @@ class PrepConfig:
     shard_index: int = 0
     merge_shards: bool = False
     debug_max: int = 0
+
+
+def resolve_xrd_backend(backend: str) -> str:
+    if backend not in {"auto", "braggcalculator", "pymatgen"}:
+        raise ValueError(f"unknown XRD backend: {backend}")
+    if backend == "pymatgen":
+        return backend
+    try:
+        import braggcalculator  # noqa: F401
+    except ImportError as exc:
+        if backend == "braggcalculator":
+            raise RuntimeError(
+                "xrd_backend='braggcalculator' requires the braggcalculator package"
+            ) from exc
+        return "pymatgen"
+    return "braggcalculator"
+
+
+def calculate_xrd_pattern(structure, config):
+    backend = resolve_xrd_backend(config.xrd_backend)
+    wavelength = XRDCalculator(wavelength=config.wavelength).wavelength
+    effective_qmax, two_theta_range = q_range_to_two_theta_range(
+        config.qmin, config.qmax, wavelength
+    )
+    if backend == "braggcalculator":
+        from braggcalculator import BraggCalculator
+
+        calculator = BraggCalculator(
+            wavelength=config.wavelength,
+            q_range=(config.qmin, effective_qmax),
+        ).load(structure)
+        q_disc, iq_disc = calculator.line_pattern(domain="q", scaled=True)
+    else:
+        calculator = XRDCalculator(wavelength=config.wavelength)
+        pattern = calculator.get_pattern(structure, two_theta_range=two_theta_range)
+        theta = np.radians(pattern.x / 2)
+        q_disc = 4 * np.pi * np.sin(theta) / calculator.wavelength
+        iq_disc = pattern.y
+
+    q_disc = np.asarray(q_disc, dtype=np.float32)
+    iq_disc = np.asarray(iq_disc, dtype=np.float32)
+    if iq_disc.size:
+        iq_disc = iq_disc / (np.max(iq_disc) + 1e-16)
+    return q_disc, iq_disc, backend
 
 
 def process_cif(args):
@@ -117,14 +162,7 @@ def process_cif(args):
         raise ValueError(f"unknown representation: {config.representation}")
     cif_tokens = np.asarray(tokenizer.encode(tokenizer.tokenize_minicif(minicif_string)), dtype=np.int32)
 
-    xrd_calc = XRDCalculator(wavelength=config.wavelength)
-    _, two_theta_range = q_range_to_two_theta_range(config.qmin, config.qmax, xrd_calc.wavelength)
-
-    pattern = xrd_calc.get_pattern(structure, two_theta_range=two_theta_range)
-    theta = np.radians(pattern.x / 2)
-    q_disc = (4 * np.pi * np.sin(theta) / xrd_calc.wavelength).astype(np.float32)
-    iq_disc = np.asarray(pattern.y, dtype=np.float32)
-    iq_disc = iq_disc / (np.max(iq_disc) + 1e-16)
+    q_disc, iq_disc, xrd_backend = calculate_xrd_pattern(structure, config)
 
     return {
         "cif_name": name,
@@ -133,6 +171,7 @@ def process_cif(args):
         "minicif_string": minicif_string,
         "formula": formula,
         "representation": config.representation,
+        "xrd_backend": xrd_backend,
         "xrd_disc.q": q_disc,
         "xrd_disc.iq": iq_disc,
         "spacegroup": spacegroup,
@@ -313,6 +352,7 @@ def write_split(path, rows):
         h5.create_dataset("minicif_string", data=[row["minicif_string"] for row in rows], dtype=str_dtype)
         h5.create_dataset("formula", data=[row.get("formula", "") for row in rows], dtype=str_dtype)
         h5.create_dataset("representation", data=[row.get("representation", "minicif") for row in rows], dtype=str_dtype)
+        h5.create_dataset("xrd_backend", data=[row.get("xrd_backend", "pymatgen") for row in rows], dtype=str_dtype)
         h5.create_dataset(
             "cif_token_length",
             data=np.asarray([row.get("cif_token_length", len(row["cif_tokenized"])) for row in rows], dtype=np.int32),
@@ -388,12 +428,31 @@ def validate_checkpoint_representation(rows_by_source, representation):
         )
 
 
+def validate_checkpoint_xrd_backend(rows_by_source, xrd_backend):
+    mismatched = [
+        source
+        for source, row in rows_by_source.items()
+        if row.get("xrd_backend", "pymatgen") != xrd_backend
+    ]
+    if mismatched:
+        raise ValueError(
+            f"preparation checkpoint contains {len(mismatched)} row(s) from another XRD backend; "
+            f"first mismatch: {mismatched[0]}"
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Prepare compact minicif HDF5 datasets directly from raw CIFs.")
     parser.add_argument("--raw-dir", required=True, help="Directory containing raw .cif files or .pkl.gz bundles")
     parser.add_argument("--out-dir", required=True, help="Output dataset directory")
     parser.add_argument("--raw-from-gzip", action="store_true", help="Read raw CIF strings from .pkl.gz bundle(s)")
     parser.add_argument("--representation", choices=["minicif", "minicif_v2"], default="minicif")
+    parser.add_argument(
+        "--xrd-backend",
+        choices=["auto", "braggcalculator", "pymatgen"],
+        default="auto",
+        help="Sparse diffraction backend; auto prefers BraggCalculator when installed",
+    )
     parser.add_argument("--max-samples", type=int, default=0, help="Limit the number of raw inputs after deterministic selection")
     parser.add_argument("--sample-strategy", choices=["first", "random"], default="first", help="How to select --max-samples inputs")
     parser.add_argument("--checkpoint-path", default="", help="Path to resumable prep checkpoint; defaults to OUT_DIR/prep_checkpoint.pkl.gz")
@@ -425,6 +484,7 @@ def main():
         args.stratify_split_on = ""
 
     config = PrepConfig(**vars(args))
+    config.xrd_backend = resolve_xrd_backend(config.xrd_backend)
     inputs = load_inputs(config.raw_dir, config.raw_from_gzip)
     inputs = select_inputs(inputs, config.max_samples, config.sample_strategy, config.seed)
     if config.debug_max > 0:
@@ -438,6 +498,7 @@ def main():
     if config.merge_shards:
         rows_by_source, failures_by_source = load_shard_checkpoints(config.checkpoint_path, config.num_shards)
         validate_checkpoint_representation(rows_by_source, config.representation)
+        validate_checkpoint_xrd_backend(rows_by_source, config.xrd_backend)
         missing_inputs = [
             source_id(obj)
             for obj in inputs
@@ -485,6 +546,7 @@ def main():
     if not config.no_resume:
         rows_by_source, failures_by_source = load_checkpoint(config.checkpoint_path)
         validate_checkpoint_representation(rows_by_source, config.representation)
+        validate_checkpoint_xrd_backend(rows_by_source, config.xrd_backend)
         if rows_by_source or failures_by_source:
             print(
                 f"Resuming from {config.checkpoint_path}: "

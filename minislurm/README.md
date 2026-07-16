@@ -13,6 +13,19 @@ sbatch minislurm/train_minicif_v2.sh
 sbatch minislurm/evaluate_minicif_v2.sh
 ```
 
+Dataset preparation defaults to `--xrd-backend auto`, which prefers
+BraggCalculator when installed and otherwise uses pymatgen. To guarantee the
+fast backend is active:
+
+```bash
+python -m pip install -e .
+sbatch minislurm/prepare_minicif_v2_dataset.sh \
+  --xrd-backend braggcalculator
+```
+
+The repository supports Python 3.12 and 3.13, as required by BraggCalculator
+0.1.0.
+
 Defaults are `data/noma` for the raw gzip source,
 `data/noma_minicif_v2` for prepared data, and
 `configs/minicif_v2_medium_config.yaml` for training. Override them through
