@@ -17,6 +17,7 @@ spec.loader.exec_module(visualize_minicif)
 prompt_from_minicif = visualize_minicif.prompt_from_minicif
 summarize = visualize_minicif.summarize
 compatible_evaluation_indices = visualize_minicif.compatible_evaluation_indices
+plot_rwp_distribution = visualize_minicif.plot_rwp_distribution
 
 
 class VisualizeMinicifTest(unittest.TestCase):
@@ -129,6 +130,19 @@ class VisualizeMinicifTest(unittest.TestCase):
         self.assertEqual(summary.loc[0, "structure_rate"], 0.5)
         self.assertEqual(summary.loc[0, "element_set_accuracy"], 0.5)
         self.assertEqual(summary.loc[0, "formula_accuracy"], 0.5)
+
+    def test_plot_rwp_distribution_writes_report(self):
+        df = pd.DataFrame(
+            {
+                "split": ["test", "test"],
+                "rwp": [0.2, 0.4],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plot_rwp_distribution(df, tmpdir)
+            self.assertTrue(
+                os.path.isfile(os.path.join(tmpdir, "rwp_distribution.png"))
+            )
 
 
 if __name__ == "__main__":

@@ -537,7 +537,9 @@ def plot_rwp_distribution(df, out_dir):
     fig, ax = plt.subplots(figsize=(7, 4.5), dpi=160)
     splits = list(df["split"].dropna().unique())
     values = [df.loc[df["split"] == split, "rwp"].dropna().to_numpy() for split in splits]
-    ax.boxplot(values, labels=splits, showfliers=False)
+    ax.boxplot(values, showfliers=False)
+    ax.set_xticks(range(1, len(splits) + 1))
+    ax.set_xticklabels(splits)
     ax.set_ylabel("Rwp")
     ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
