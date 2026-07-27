@@ -1,100 +1,57 @@
 # Minicif v2 quick guide
 
-Run all commands from the repository root after activating the Python environment.
+Run these commands from the repository root in a Python 3.12 or 3.13
+environment.
 
-## 1. Generate the dataset
-
-The default input is the NOMA gzip bundle under `data/noma`. Prepared data is
-written to `data/noma_minicif_v2`.
-
-Use Python 3.12 or 3.13 and install the package and its dependencies:
+## 1. Generate and check data
 
 ```bash
 python -m pip install -e .
-```
-
-This installs BraggCalculator. The preparation command selects it automatically;
-to require the fast backend and fail rather than fall back to pymatgen:
-
-```bash
 sbatch minislurm/prepare_minicif_v2_dataset.sh \
   --xrd-backend braggcalculator
-```
-
-Preparation excludes targets longer than 769 tokens before calculating their
-diffraction patterns. Pass a different `--max-token-length` only for a model
-with a different intended context; `0` disables the preparation limit. Training
-still applies the selected config's stricter limit when loading the shared data.
-
-To use different locations:
-
-```bash
-RAW_DIR=/path/to/raw/noma \
-OUT_DIR=/path/to/noma_minicif_v2 \
-sbatch minislurm/prepare_minicif_v2_dataset.sh \
-  --xrd-backend braggcalculator
-```
-
-The resolved backend is recorded in preparation checkpoints and HDF5 files.
-Do not resume the same preparation checkpoint with a different backend.
-
-After preparation, verify the dataset:
-
-```bash
 python bin/audit_minicif_v2.py \
-  --config configs/minicif_v2_small_config.yaml \
+  --config configs/minicif_v2_medium_hybrid_artifacts.yaml \
   --max-items 100 \
   --output minicif_v2_preflight.json
 ```
 
-The audit reports `n_overlength_records` for each split. Record-mode training
-automatically excludes targets that do not fit the selected model's context
-window and records the counts in `run_metadata.yaml`; it does not modify the
-prepared HDF5 files. This lets the medium model use records that are too long
-for the small model. Do not increase `block_size` to accommodate extreme
-thousands-of-token outliers.
+The preparation job reads `data/noma`, writes `data/noma_minicif_v2`, and
+rejects targets longer than 769 tokens before calculating diffraction. It stores
+clean sparse Bragg peaks. Full backgrounds, broadening, noise, detector effects,
+and other artifacts are generated on the GPU during training, so an existing
+clean minicif v2 dataset does not need to be regenerated.
 
-## 2. Train the model
+## 2. Train
 
-First run the short GPU integration check:
-
-```bash
-sbatch minislurm/train_minicif_v2.sh \
-  --config configs/minicif_v2_gpu_smoke_config.yaml
-```
-
-Then train the small model:
+Run the two-step artifact-path smoke test, then the medium model:
 
 ```bash
 sbatch minislurm/train_minicif_v2.sh \
-  --config configs/minicif_v2_small_config.yaml
-```
-
-For the recommended research baseline, use:
-
-```bash
+  --config configs/minicif_v2_hybrid_artifacts_smoke.yaml
 sbatch minislurm/train_minicif_v2.sh \
-  --config configs/minicif_v2_medium_config.yaml
+  --config configs/minicif_v2_medium_hybrid_artifacts.yaml
 ```
 
-Checkpoints are written to the config's `out_dir`, for example
-`minicif_v2_model_small/ckpt.pt`.
+The medium checkpoint is written to
+`minicif_v2_model_medium_hybrid_artifacts/ckpt.pt`.
 
-## 3. Evaluate the model
-
-Evaluate the small model on validation and test splits:
+Optional standalone PXRD encoder pretraining:
 
 ```bash
-CHECKPOINT=minicif_v2_model_small/ckpt.pt \
+sbatch minislurm/pretrain_pxrd_encoder.sh \
+  --config configs/minicif_pxrd_encoder_pretrain_bragg_artifacts.yaml
+```
+
+## 3. Evaluate
+
+Use the fixed-seed artifact profile for repeatable artifact evaluation:
+
+```bash
+CHECKPOINT=minicif_v2_model_medium_hybrid_artifacts/ckpt.pt \
 DATASET_DIR=data/noma_minicif_v2 \
-OUT_DIR=minicif_v2_model_small/minicif_report \
-sbatch minislurm/evaluate_minicif_v2.sh
+OUT_DIR=minicif_v2_model_medium_hybrid_artifacts/minicif_report \
+sbatch minislurm/evaluate_minicif_v2.sh \
+  --artifact-config configs/xrd_artifacts/full_evaluation.yaml
 ```
 
-For the medium model:
-
-```bash
-sbatch minislurm/evaluate_minicif_v2.sh
-```
-
-Evaluation results are written to the selected `OUT_DIR`.
+Remove `--artifact-config` to evaluate with clean simulated conditions.

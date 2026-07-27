@@ -23,7 +23,14 @@ from pymatgen.core import Element, Lattice, Structure
 from decifer.decifer_model import Decifer, DeciferConfig
 from decifer.minicif import MinicifTokenizer, minicif_to_structure, parse_minicif
 from decifer.minicif_v2 import MinicifV2Tokenizer, minicif_v2_to_structure, parse_minicif_v2
-from decifer.pxrd import clamp_qmax_for_wavelength, discrete_to_continuous_xrd, nyquist_qstep, q_range_to_two_theta_range
+from decifer.pxrd import (
+    bragg_artifact_batch,
+    bragg_artifact_spec_from_config,
+    clamp_qmax_for_wavelength,
+    discrete_to_continuous_xrd,
+    nyquist_qstep,
+    q_range_to_two_theta_range,
+)
 from bin.train import TrainConfig
 
 PROMPT_MODE_ALIASES = {
@@ -163,23 +170,28 @@ def continuous_from_sparse(q, iq, xrd_kwargs):
     return xrd["q"].cpu().numpy(), xrd["iq"][0].cpu().numpy(), xrd["iq"]
 
 
-def condition_from_sparse(q, iq, dense_iq, config):
+def condition_from_sparse(q, iq, xrd_kwargs, config, device):
     encoder = config.get("condition_encoder", "mlp")
+    artifact_batch = bragg_artifact_batch(
+        torch.tensor(q, dtype=torch.float32, device=device).unsqueeze(0),
+        torch.tensor(iq, dtype=torch.float32, device=device).unsqueeze(0),
+        spec=bragg_artifact_spec_from_config(config, augment=False),
+        qmin=xrd_kwargs["qmin"],
+        qmax=xrd_kwargs["qmax"],
+        qstep=xrd_kwargs["qstep"],
+        include_dense=encoder not in {"peak", "peak_fourier"},
+        include_peaks=encoder in {"peak", "peak_fourier", "hybrid"},
+        max_xrd_peaks=int(config.get("max_xrd_peaks", 0) or 0),
+        max_peak_list_peaks=int(config.get("max_peak_list_peaks", 0) or 0),
+    )
     if encoder not in {"peak", "peak_fourier", "hybrid"}:
-        return dense_iq
-    q_tensor = torch.tensor(q, dtype=torch.float32)
-    iq_tensor = torch.tensor(iq, dtype=torch.float32)
-    max_peaks = int(config.get("max_peak_list_peaks", 0) or 0)
-    if max_peaks > 0 and q_tensor.numel() > max_peaks:
-        indices = torch.topk(iq_tensor, k=max_peaks).indices
-        q_tensor = q_tensor[indices]
-        iq_tensor = iq_tensor[indices]
+        return artifact_batch["iq"]
     peak_condition = {
-        "peak_q": q_tensor.unsqueeze(0),
-        "peak_iq": iq_tensor.unsqueeze(0),
+        "peak_q": artifact_batch["peak_q"],
+        "peak_iq": artifact_batch["peak_iq"],
     }
     if encoder == "hybrid":
-        peak_condition["dense"] = dense_iq
+        peak_condition["dense"] = artifact_batch["iq"]
     return peak_condition
 
 
@@ -655,8 +667,8 @@ def main():
     index, name, reference_minicif, q_disc, iq_disc = read_sample(args.h5, args.index, args.seed)
     reference_parsed = parse_fn(reference_minicif)
     reference_structure = structure_fn(reference_minicif)
-    q_grid, reference_iq, cond_iq = continuous_from_sparse(q_disc, iq_disc, xrd_kwargs)
-    condition = condition_from_sparse(q_disc, iq_disc, cond_iq, config)
+    q_grid, reference_iq, _ = continuous_from_sparse(q_disc, iq_disc, xrd_kwargs)
+    condition = condition_from_sparse(q_disc, iq_disc, xrd_kwargs, config, device)
     prompt = prompt_from_minicif(reference_minicif, args.prompt_mode, tokenizer)
 
     print(f"checkpoint: {os.path.abspath(args.checkpoint)}")

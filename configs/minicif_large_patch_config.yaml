@@ -77,8 +77,8 @@ impurity_intensity_range_min: 0.01
 impurity_intensity_range_max: 0.05
 particle_size_range_min: 0.0
 particle_size_range_max: 0.0
-peak_asymmetry_range_min: -0.1
-peak_asymmetry_range_max: 0.1
+peak_asymmetry_range_min: 0.0
+peak_asymmetry_range_max: 0.0
 final_normalize_xrd: True
 max_xrd_peaks: 512
 xrd_augmentation_on_device: True

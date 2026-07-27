@@ -1,11 +1,353 @@
 #!/usr/bin/env python3
 
 import math
-from typing import Optional, Tuple
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Mapping, Optional, Tuple
 
 import torch
+import yaml
+
+from braggcalculator import (
+    AmorphousHump,
+    BackgroundArtifacts,
+    BackgroundPattern,
+    CalibrationArtifacts,
+    DetectorArtifacts,
+    IntensityArtifacts,
+    NoiseArtifacts,
+    PeakProfileArtifacts,
+    PreferredOrientation,
+    SimulationArtifacts,
+    SpuriousPeakArtifacts,
+    apply_peak_artifact_batch,
+    render_artifact_batch,
+)
 
 DEFAULT_QMAX_LIMIT_FRACTION = 0.95
+DEFAULT_BRAGG_MAX_ENTRIES = 4_194_304
+
+
+@dataclass(frozen=True)
+class BraggArtifactSpec:
+    artifacts: SimulationArtifacts
+    wavelength: float = 1.5406
+    max_entries: int = DEFAULT_BRAGG_MAX_ENTRIES
+    source: str = ""
+
+
+def _tuple_ranges(value):
+    if isinstance(value, list):
+        return tuple(_tuple_ranges(item) for item in value)
+    if isinstance(value, dict):
+        return {key: _tuple_ranges(item) for key, item in value.items()}
+    return value
+
+
+def load_bragg_artifact_spec(path: str) -> BraggArtifactSpec:
+    source = Path(path)
+    with source.open() as f:
+        raw = yaml.safe_load(f) or {}
+    if not isinstance(raw, dict):
+        raise ValueError("artifact configuration must be a YAML mapping")
+    unknown = set(raw) - {"artifacts", "wavelength", "max_entries"}
+    if unknown:
+        raise ValueError(f"unknown artifact configuration keys: {sorted(unknown)}")
+    config = _tuple_ranges(raw.get("artifacts", {}))
+    if not isinstance(config, dict):
+        raise ValueError("artifacts must be a YAML mapping")
+
+    calibration = CalibrationArtifacts(**config.pop("calibration", {}))
+
+    intensity_config = dict(config.pop("intensity", {}))
+    orientation = intensity_config.get("preferred_orientation")
+    if orientation is not None:
+        intensity_config["preferred_orientation"] = PreferredOrientation(**orientation)
+    intensity = IntensityArtifacts(**intensity_config)
+
+    profile = PeakProfileArtifacts(**config.pop("profile", {}))
+
+    background_config = dict(config.pop("background", {}))
+    humps = background_config.get("amorphous_humps")
+    if humps is not None:
+        background_config["amorphous_humps"] = tuple(
+            AmorphousHump(**hump) for hump in humps
+        )
+    measured = background_config.get("measured")
+    if isinstance(measured, dict):
+        measured_config = dict(measured)
+        measured_path = Path(measured_config.pop("path"))
+        if not measured_path.is_absolute():
+            measured_path = source.parent / measured_path
+        background_config["measured"] = BackgroundPattern.from_file(
+            measured_path, **measured_config
+        )
+    background = BackgroundArtifacts(**background_config)
+
+    noise = NoiseArtifacts(**config.pop("noise", {}))
+    detector = DetectorArtifacts(**config.pop("detector", {}))
+    spurious_peaks = SpuriousPeakArtifacts(**config.pop("spurious_peaks", {}))
+    simulation_kwargs = {
+        key: config.pop(key)
+        for key in (
+            "normalize_signal",
+            "clip_nonnegative",
+            "final_normalize",
+            "domain",
+            "seed",
+        )
+        if key in config
+    }
+    if config:
+        raise ValueError(f"unknown SimulationArtifacts keys: {sorted(config)}")
+
+    artifacts = SimulationArtifacts(
+        calibration=calibration,
+        intensity=intensity,
+        profile=profile,
+        background=background,
+        noise=noise,
+        detector=detector,
+        spurious_peaks=spurious_peaks,
+        **simulation_kwargs,
+    )
+    wavelength = float(raw.get("wavelength", 1.5406))
+    max_entries = int(raw.get("max_entries", DEFAULT_BRAGG_MAX_ENTRIES))
+    if wavelength <= 0:
+        raise ValueError("artifact wavelength must be positive")
+    if max_entries <= 0:
+        raise ValueError("artifact max_entries must be positive")
+    return BraggArtifactSpec(
+        artifacts=artifacts,
+        wavelength=wavelength,
+        max_entries=max_entries,
+        source=str(source),
+    )
+
+
+def _config_value(config, name, default):
+    if isinstance(config, Mapping):
+        return config.get(name, default)
+    return getattr(config, name, default)
+
+
+def _config_range(config, prefix, default):
+    return (
+        _config_value(config, f"{prefix}_min", default),
+        _config_value(config, f"{prefix}_max", default),
+    )
+
+
+def bragg_artifact_spec_from_config(config, augment=True) -> BraggArtifactSpec:
+    artifact_path = str(_config_value(config, "xrd_artifact_config", "") or "")
+    if augment and artifact_path:
+        return load_bragg_artifact_spec(artifact_path)
+
+    fwhm_range = _config_range(config, "fwhm_range", 0.05)
+    eta_range = _config_range(config, "eta_range", 0.5)
+    if not augment:
+        fwhm_range = (sum(fwhm_range) / 2.0,) * 2
+        eta_range = (sum(eta_range) / 2.0,) * 2
+
+    if augment:
+        particle_size = _config_range(config, "particle_size_range", 0.0)
+        asymmetry = _config_range(config, "peak_asymmetry_range", 0.0)
+        if particle_size != (0.0, 0.0):
+            raise ValueError(
+                "particle_size_range requires a Bragg artifact YAML with profile.model='tch'"
+            )
+        if asymmetry != (0.0, 0.0):
+            raise ValueError(
+                "q-domain peak_asymmetry_range is unsupported; use a Bragg TCH "
+                "artifact configuration or set it to zero"
+            )
+
+    calibration = (
+        CalibrationArtifacts(
+            zero_shift=_config_range(config, "q_shift_range", 0.0),
+            axis_scale=_config_range(config, "q_scale_range", 1.0),
+        )
+        if augment
+        else CalibrationArtifacts()
+    )
+    intensity = (
+        IntensityArtifacts(
+            scale=_config_range(config, "intensity_scale_range", 1.0),
+            peak_jitter=_config_range(
+                config, "peak_intensity_jitter_range", 1.0
+            ),
+            peak_dropout_probability=float(
+                _config_value(config, "peak_dropout_prob", 0.0)
+            ),
+        )
+        if augment
+        else IntensityArtifacts()
+    )
+    background = (
+        BackgroundArtifacts(
+            constant=_config_range(config, "background_range", 0.0)
+        )
+        if augment
+        else BackgroundArtifacts()
+    )
+    noise = (
+        NoiseArtifacts(gaussian_std=_config_range(config, "noise_range", 0.0))
+        if augment
+        else NoiseArtifacts()
+    )
+    detector = (
+        DetectorArtifacts(
+            random_mask_probability=float(_config_value(config, "mask_prob", 0.0))
+        )
+        if augment
+        else DetectorArtifacts()
+    )
+    impurity_count = (
+        (
+            int(_config_value(config, "impurity_peak_count_min", 0)),
+            int(_config_value(config, "impurity_peak_count_max", 0)),
+        )
+        if augment
+        else 0
+    )
+    spurious_peaks = SpuriousPeakArtifacts(
+        count=impurity_count,
+        intensity=_config_range(config, "impurity_intensity_range", 0.05),
+        fwhm=fwhm_range,
+        eta=eta_range,
+    )
+    artifacts = SimulationArtifacts(
+        calibration=calibration,
+        intensity=intensity,
+        profile=PeakProfileArtifacts(
+            model="pseudo_voigt",
+            fwhm=fwhm_range,
+            eta=eta_range,
+        ),
+        background=background,
+        noise=noise,
+        detector=detector,
+        spurious_peaks=spurious_peaks,
+        normalize_signal=True,
+        final_normalize=bool(
+            _config_value(config, "final_normalize_xrd", False)
+        ),
+        domain="q",
+    )
+    return BraggArtifactSpec(
+        artifacts=artifacts,
+        wavelength=float(_config_value(config, "xrd_wavelength", 1.5406)),
+        max_entries=int(
+            _config_value(
+                config, "xrd_artifact_max_entries", DEFAULT_BRAGG_MAX_ENTRIES
+            )
+        ),
+    )
+
+
+def _split_bragg_artifacts(artifacts):
+    peak_artifacts = SimulationArtifacts(
+        calibration=artifacts.calibration,
+        intensity=artifacts.intensity,
+        domain=artifacts.domain,
+        seed=artifacts.seed,
+    )
+    dense_artifacts = SimulationArtifacts(
+        profile=artifacts.profile,
+        background=artifacts.background,
+        noise=artifacts.noise,
+        detector=artifacts.detector,
+        spurious_peaks=artifacts.spurious_peaks,
+        normalize_signal=artifacts.normalize_signal,
+        clip_nonnegative=artifacts.clip_nonnegative,
+        final_normalize=artifacts.final_normalize,
+        domain=artifacts.domain,
+        seed=artifacts.seed,
+    )
+    return peak_artifacts, dense_artifacts
+
+
+def cap_peak_batch(batch_q, batch_iq, peak_mask, max_peaks):
+    if max_peaks is None or max_peaks <= 0 or batch_q.size(1) <= max_peaks:
+        return batch_q, batch_iq, peak_mask
+    scores = batch_iq.masked_fill(~peak_mask, float("-inf"))
+    indices = torch.topk(scores, k=max_peaks, dim=1).indices
+    batch_q = torch.gather(batch_q, 1, indices)
+    batch_iq = torch.gather(batch_iq, 1, indices)
+    peak_mask = torch.gather(peak_mask, 1, indices)
+    batch_q = torch.where(peak_mask, batch_q, torch.zeros_like(batch_q))
+    batch_iq = torch.where(peak_mask, batch_iq, torch.zeros_like(batch_iq))
+    return batch_q, batch_iq, peak_mask
+
+
+def bragg_artifact_batch(
+    batch_q,
+    batch_iq,
+    *,
+    spec: BraggArtifactSpec,
+    qmin=0.0,
+    qmax=10.0,
+    qstep=0.01,
+    include_dense=True,
+    include_peaks=False,
+    max_xrd_peaks=0,
+    max_peak_list_peaks=0,
+    generator=None,
+):
+    if qstep <= 0:
+        raise ValueError("qstep must be positive")
+    peak_mask = batch_q != 0
+    batch_q, batch_iq, peak_mask = cap_peak_batch(
+        batch_q, batch_iq, peak_mask, max_xrd_peaks
+    )
+    peak_artifacts, dense_artifacts = _split_bragg_artifacts(spec.artifacts)
+    augmented_q, augmented_iq, augmented_mask = apply_peak_artifact_batch(
+        batch_q,
+        batch_iq,
+        peak_mask=peak_mask,
+        artifacts=peak_artifacts,
+        domain="q",
+        wavelength=spec.wavelength,
+        generator=generator,
+    )
+    augmented_q = torch.where(
+        augmented_mask, augmented_q, torch.zeros_like(augmented_q)
+    )
+    augmented_iq = torch.where(
+        augmented_mask, augmented_iq, torch.zeros_like(augmented_iq)
+    )
+
+    result = {}
+    if include_peaks:
+        peak_q, peak_iq, _ = cap_peak_batch(
+            augmented_q,
+            augmented_iq,
+            augmented_mask,
+            max_peak_list_peaks,
+        )
+        result["peak_q"] = peak_q
+        result["peak_iq"] = peak_iq
+    if include_dense:
+        q_grid = torch.arange(
+            qmin,
+            qmax,
+            qstep,
+            dtype=batch_q.dtype,
+            device=batch_q.device,
+        )
+        result["q"] = q_grid
+        result["iq"] = render_artifact_batch(
+            augmented_q,
+            augmented_iq,
+            peak_mask=augmented_mask,
+            grid=q_grid,
+            artifacts=dense_artifacts,
+            domain="q",
+            wavelength=spec.wavelength,
+            generator=generator,
+            max_entries=spec.max_entries,
+        )
+    return result
 
 
 def nyquist_qstep(fwhm: float, points_per_fwhm: float = 2.0) -> float:

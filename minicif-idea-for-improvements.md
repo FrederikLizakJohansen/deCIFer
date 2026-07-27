@@ -24,6 +24,10 @@ Purpose: collect concrete ideas for improving the current deCIFer codebase, mode
   augmentation, fused AdamW, self/cross-attention KV caching, formula-aware
   evaluation, seven-crystal-system round-trip tests, dataset/config preflight,
   and v2 preparation/training/evaluation launchers.
+- 2026-07-27: Replaced minicif training-time peak perturbation and dense
+  rendering with BraggCalculator 0.3.0 batched artifacts. Added full-profile
+  hybrid training/pretraining configs and deterministic artifact evaluation
+  while preserving clean sparse HDF5 data.
 
 ## Review assumptions
 
@@ -427,18 +431,27 @@ Verification:
   - Keep a fixed non-COD validation/test set initially so gains from more data are not confused with easier splits.
 
 - P0 - Make the PXRD augmentation model more physically realistic.
-  Current augmentation covers broadening, noise, intensity scale, and masking. Real experimental patterns also include background, zero shift, sample displacement, preferred orientation, finite crystallite size/strain effects, impurity peaks, peak overlap, and detector/q calibration artifacts.
+  BraggCalculator 0.3.0 now applies batched, device-native calibration,
+  intensity, profile, background, spurious-peak, noise, and detector artifacts.
   Experiment: add one perturbation family at a time and evaluate robustness on experimental or intentionally shifted validation patterns.
 
   Current implementation:
   - Store sparse `xrd_disc.q` and `xrd_disc.iq` peak lists in HDF5.
-  - Generate continuous PXRD conditions at batch time to avoid storing many dense augmented traces.
+  - Generate artifact realizations and continuous PXRD conditions at batch time
+    to avoid storing dense augmented traces.
   - Support Nyquist-style q-grid selection through `nyquist_points_per_fwhm`.
-  - Support q shift, q scaling, peak intensity jitter, peak dropout, background, impurity peaks, particle-size broadening, peak asymmetry, noise, masking, and final normalization.
+  - Support q shift/scale/jitter, intensity jitter/dropout, TCH profile
+    broadening, crystallite size, microstrain, background, amorphous humps,
+    spurious peaks, three noise models, detector masking/saturation, and final
+    normalization.
+  - Use an unseeded YAML profile for training and a fixed-seed profile for
+    repeatable evaluation.
 
   Still needed:
   - hkl-aware preferred-orientation augmentation. This requires storing hkl metadata from XRD calculation; q/iq alone is not enough for a physically meaningful preferred-orientation transform.
-  - Experimental-background templates or Chebyshev background coefficients if we want richer background distributions than the current smooth random baseline.
+  - Experimental-background templates can be supplied through
+    BraggCalculator's measured-background field when suitable reference traces
+    are available.
   - A calibration sweep to choose q-grid size from the minimum useful FWHM instead of blindly preserving the old dense `qstep=0.01`.
 
 - P0 - Evaluate Till's realistic PXRD simulation pipeline.

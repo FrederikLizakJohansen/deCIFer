@@ -24,7 +24,7 @@ sbatch minislurm/prepare_minicif_v2_dataset.sh \
 ```
 
 The repository supports Python 3.12 and 3.13, as required by BraggCalculator
-0.1.0. Dataset preparation excludes structural targets longer than 769 tokens
+0.3.0. Dataset preparation excludes structural targets longer than 769 tokens
 before diffraction calculation; pass `--max-token-length 0` only for an
 intentional larger-context dataset.
 
@@ -50,11 +50,31 @@ Before the first full job, run the short CUDA integration config:
 
 ```bash
 sbatch minislurm/train_minicif_v2.sh \
-  --config configs/minicif_v2_gpu_smoke_config.yaml
+  --config configs/minicif_v2_hybrid_artifacts_smoke.yaml
 ```
 
 This performs only a few optimizer steps and is not intended to produce a useful
 checkpoint.
+
+The full BraggCalculator artifact model uses clean sparse HDF5 records and
+samples artifacts during training:
+
+```bash
+sbatch minislurm/train_minicif_v2.sh \
+  --config configs/minicif_v2_medium_hybrid_artifacts.yaml
+```
+
+For deterministic artifact evaluation:
+
+```bash
+CHECKPOINT=minicif_v2_model_medium_hybrid_artifacts/ckpt.pt \
+OUT_DIR=minicif_v2_model_medium_hybrid_artifacts/minicif_report \
+sbatch minislurm/evaluate_minicif_v2.sh \
+  --artifact-config configs/xrd_artifacts/full_evaluation.yaml
+```
+
+The training artifact profile is intentionally unseeded. The evaluation profile
+has a fixed seed. Omit `--artifact-config` for clean conditions.
 
 `train_minicif_v2.sh` runs `bin/audit_minicif_v2.py` before allocating model
 memory. Set `AUDIT_MAX_ITEMS=0` to deeply validate every record, or
@@ -79,6 +99,13 @@ sbatch minislurm/pretrain_pxrd_encoder.sh \
 Set `pretrained_condition_encoder_path` in a v2 training config to the resulting
 `minicif_v2_pxrd_encoder_pretrain/pxrd_encoder_pretrain.pt` only when the encoder
 width and Fourier-token settings match.
+
+Hybrid encoder pretraining with the full artifact profile uses:
+
+```bash
+sbatch minislurm/pretrain_pxrd_encoder.sh \
+  --config configs/minicif_pxrd_encoder_pretrain_bragg_artifacts.yaml
+```
 
 ## 1. Prepare data
 

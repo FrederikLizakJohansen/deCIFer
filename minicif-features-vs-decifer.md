@@ -48,20 +48,22 @@ This file lists the core minicif changes relative to the original deCIFer workfl
   checkpoints are filtered when splits are written.
 - Record-batched training uses a context-compatible dataset view and reports
   excluded overlength structures without rewriting the prepared data.
-- Reconstruct continuous PXRD conditions during training.
+- Keep prepared PXRD data clean and sparse; artifacts are sampled during
+  training instead of materialized into HDF5.
+- Use BraggCalculator 0.3.0's device-native batch APIs for peak transforms and
+  dense rendering, including a shared artifact realization for both hybrid
+  encoder branches.
 - Added Nyquist-style q-grid control through `nyquist_points_per_fwhm`.
-- Added training-time PXRD perturbations:
-  - q shift
-  - q scaling
-  - peak intensity jitter
-  - peak dropout
-  - smooth background
-  - impurity peaks
-  - particle-size broadening
-  - peak asymmetry
-  - noise
-  - masking
-  - final normalization
+- Added training-time calibration, peak-intensity, TCH profile, crystallite-size,
+  microstrain, background, amorphous-hump, spurious-peak, Gaussian/correlated/
+  Poisson-noise, detector-mask, saturation, and normalization artifacts.
+- Added external artifact YAML files, an unseeded full training profile, and a
+  fixed-seed evaluation profile.
+- Preserve the flat legacy augmentation fields by mapping supported values to
+  BraggCalculator pseudo-Voigt artifacts.
+- Do not apply the old axial-asymmetry parameter in q space. Physically
+  meaningful preferred orientation remains pending because the current dataset
+  does not store unmerged HKL and lattice metadata.
 
 ## Conditioning architecture
 

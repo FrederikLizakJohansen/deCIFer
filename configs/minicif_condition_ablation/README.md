@@ -556,4 +556,5 @@ If individual iterations are just very slow, lower the raw peak cap:
 max_raw_peaks_per_sample: 1024
 ```
 
-This cap is applied before padding, dense PXRD rendering, and peak-list augmentation, so extreme peak lists cannot dominate a batch.
+This cap is applied before padding and batched Bragg artifact rendering, so
+extreme peak lists cannot dominate a batch.

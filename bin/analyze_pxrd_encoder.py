@@ -16,13 +16,11 @@ from torch.nn.utils.rnn import pad_sequence
 from bin.pretrain_pxrd_encoder import (
     ContrastivePxrdModel,
     PxrdEncoderPretrainConfig,
-    cap_peak_list,
     effective_qstep,
     make_condition,
     move_to_device,
-    xrd_kwargs,
 )
-from decifer.pxrd import discrete_to_continuous_xrd
+from decifer.pxrd import bragg_artifact_batch, bragg_artifact_spec_from_config
 
 
 def parse_args():
@@ -102,32 +100,6 @@ def read_pxrd_rows(path, max_samples, seed, metadata_fields):
     return rows, n_total
 
 
-def clean_xrd_kwargs(config):
-    fwhm = 0.5 * (float(config.fwhm_range_min) + float(config.fwhm_range_max))
-    eta = 0.5 * (float(config.eta_range_min) + float(config.eta_range_max))
-    return {
-        "qmin": config.qmin,
-        "qmax": config.qmax,
-        "qstep": effective_qstep(config),
-        "nyquist_points_per_fwhm": None,
-        "fwhm_range": (fwhm, fwhm),
-        "eta_range": (eta, eta),
-        "noise_range": None,
-        "intensity_scale_range": None,
-        "mask_prob": None,
-        "q_shift_range": None,
-        "q_scale_range": None,
-        "peak_intensity_jitter_range": None,
-        "peak_dropout_prob": None,
-        "background_range": None,
-        "impurity_peak_count_range": None,
-        "particle_size_range": None,
-        "peak_asymmetry_range": None,
-        "final_normalize": config.final_normalize_xrd,
-        "max_peaks": config.max_xrd_peaks if config.max_xrd_peaks > 0 else None,
-    }
-
-
 def collate_rows(rows):
     batch = {
         "index": [row["index"] for row in rows],
@@ -140,32 +112,26 @@ def collate_rows(rows):
     return batch
 
 
-def make_clean_condition(batch_q, batch_iq, config, kwargs):
-    if config.condition_encoder in {"peak", "peak_fourier", "hybrid"}:
-        peak_q, peak_iq = cap_peak_list(batch_q, batch_iq, config.max_peak_list_peaks)
-    if config.condition_encoder in {"peak", "peak_fourier"}:
-        return {"peak_q": peak_q, "peak_iq": peak_iq}
-    dense = discrete_to_continuous_xrd(batch_q, batch_iq, **kwargs)["iq"]
-    if config.condition_encoder == "hybrid":
-        return {"dense": dense, "peak_q": peak_q, "peak_iq": peak_iq}
-    return dense
-
-
 @torch.no_grad()
 def embed_rows(model, config, rows, batch_size, device, use_training_augmentations=False):
     projected = []
     pooled = []
     dense_patterns = []
-    clean_kwargs = clean_xrd_kwargs(config)
-    aug_kwargs = xrd_kwargs(config)
+    clean_spec = bragg_artifact_spec_from_config(config, augment=False)
+    augmentation_spec = bragg_artifact_spec_from_config(config, augment=True)
+    artifact_generator = torch.Generator(device=device)
+    artifact_generator.manual_seed(config.seed + 10_000)
     for start in range(0, len(rows), batch_size):
         batch = collate_rows(rows[start:start + batch_size])
         batch_q = batch["xrd.q"].to(device)
         batch_iq = batch["xrd.iq"].to(device)
-        if use_training_augmentations:
-            condition = make_condition(batch_q, batch_iq, config, aug_kwargs)
-        else:
-            condition = make_clean_condition(batch_q, batch_iq, config, clean_kwargs)
+        condition = make_condition(
+            batch_q,
+            batch_iq,
+            config,
+            augmentation_spec if use_training_augmentations else clean_spec,
+            artifact_generator if use_training_augmentations else None,
+        )
         condition = move_to_device(condition, device)
         tokens = model.encoder(condition)
         pooled_batch = torch.nn.functional.normalize(tokens.mean(dim=1), dim=-1)
@@ -173,7 +139,17 @@ def embed_rows(model, config, rows, batch_size, device, use_training_augmentatio
         projected.append(projected_batch.cpu())
         pooled.append(pooled_batch.cpu())
 
-        dense = discrete_to_continuous_xrd(batch_q, batch_iq, **clean_kwargs)["iq"]
+        dense = bragg_artifact_batch(
+            batch_q,
+            batch_iq,
+            spec=clean_spec,
+            qmin=config.qmin,
+            qmax=config.qmax,
+            qstep=effective_qstep(config),
+            include_dense=True,
+            include_peaks=False,
+            max_xrd_peaks=config.max_xrd_peaks,
+        )["iq"]
         dense_patterns.append(dense.cpu())
     return {
         "projected": torch.cat(projected, dim=0).numpy(),

@@ -1,11 +1,55 @@
 import unittest
 
 import torch
+from braggcalculator import (
+    CalibrationArtifacts,
+    PeakProfileArtifacts,
+    SimulationArtifacts,
+)
 
-from bin.pretrain_pxrd_encoder import SyntheticPxrdDataset, collate_fn, nt_xent_loss, pxrd_similarity_loss
+from bin.pretrain_pxrd_encoder import (
+    PxrdEncoderPretrainConfig,
+    SyntheticPxrdDataset,
+    collate_fn,
+    make_condition,
+    nt_xent_loss,
+    pxrd_similarity_loss,
+)
+from decifer.pxrd import BraggArtifactSpec
 
 
 class PretrainPxrdEncoderTest(unittest.TestCase):
+    def test_hybrid_condition_uses_bragg_artifacts_and_masks_padding(self):
+        config = PxrdEncoderPretrainConfig(
+            condition_encoder="hybrid",
+            qmin=0.0,
+            qmax=4.0,
+            qstep=0.02,
+            max_xrd_peaks=0,
+            max_peak_list_peaks=0,
+        )
+        spec = BraggArtifactSpec(
+            artifacts=SimulationArtifacts(
+                calibration=CalibrationArtifacts(zero_shift=0.1),
+                profile=PeakProfileArtifacts(
+                    model="pseudo_voigt", fwhm=0.05
+                ),
+                domain="q",
+            )
+        )
+
+        condition = make_condition(
+            torch.tensor([[1.0, 0.0]]),
+            torch.tensor([[1.0, 0.0]]),
+            config,
+            spec,
+        )
+
+        self.assertEqual(condition["dense"].shape, (1, 200))
+        self.assertTrue(
+            torch.allclose(condition["peak_q"], torch.tensor([[1.1, 0.0]]))
+        )
+
     def test_nt_xent_loss_prefers_matching_pairs(self):
         z1 = torch.nn.functional.normalize(torch.eye(4), dim=-1)
         z2_good = z1.clone()

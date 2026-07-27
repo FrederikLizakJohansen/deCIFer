@@ -47,7 +47,11 @@ from decifer.minicif_v2 import (
     START_TOKEN as V2_START_TOKEN,
     MinicifV2Tokenizer,
 )
-from decifer.pxrd import discrete_to_continuous_xrd, nyquist_qstep
+from decifer.pxrd import (
+    bragg_artifact_batch,
+    bragg_artifact_spec_from_config,
+    nyquist_qstep,
+)
 from decifer.decifer_dataset import DeciferDataset, h5_record_token_lengths
     
 # Tokenizer, get start, padding and newline IDs
@@ -256,6 +260,9 @@ class TrainConfig:
     max_xrd_peaks: int = 0
     max_peak_list_peaks: int = 512
     xrd_augmentation_on_device: bool = False
+    xrd_artifact_config: str = ""
+    xrd_artifact_max_entries: int = 4_194_304
+    xrd_wavelength: float = 1.5406
 
     # AdamW optimizer
     learning_rate: float = 6e-4  # max learning rate
@@ -593,58 +600,6 @@ def base_metric_event(C, training_metrics, local_iteration_number, lr, event_typ
         "max_gpu_memory_mb": max_gpu_memory_mb,
     }
 
-def build_xrd_kwargs(C, augment=True):
-    qstep = effective_qstep(C)
-    if augment:
-        return {
-            'qmin': C.qmin,
-            'qmax': C.qmax,
-            'qstep': qstep,
-            'nyquist_points_per_fwhm': None,
-            'fwhm_range': (C.fwhm_range_min, C.fwhm_range_max),
-            'eta_range': (C.eta_range_min, C.eta_range_max),
-            'noise_range': (C.noise_range_min, C.noise_range_max),
-            'intensity_scale_range': (C.intensity_scale_range_min, C.intensity_scale_range_max),
-            'mask_prob': C.mask_prob,
-            'q_shift_range': _range_or_none(C.q_shift_range_min, C.q_shift_range_max, 0.0),
-            'q_scale_range': _range_or_none(C.q_scale_range_min, C.q_scale_range_max, 1.0),
-            'peak_intensity_jitter_range': _range_or_none(C.peak_intensity_jitter_range_min, C.peak_intensity_jitter_range_max, 1.0),
-            'peak_dropout_prob': C.peak_dropout_prob,
-            'background_range': _range_or_none(C.background_range_min, C.background_range_max, 0.0),
-            'impurity_peak_count_range': _int_range_or_none(C.impurity_peak_count_min, C.impurity_peak_count_max, 0),
-            'impurity_intensity_range': (C.impurity_intensity_range_min, C.impurity_intensity_range_max),
-            'particle_size_range': _range_or_none(C.particle_size_range_min, C.particle_size_range_max, 0.0),
-            'peak_asymmetry_range': _range_or_none(C.peak_asymmetry_range_min, C.peak_asymmetry_range_max, 0.0),
-            'final_normalize': C.final_normalize_xrd,
-            'max_peaks': C.max_xrd_peaks if C.max_xrd_peaks > 0 else None,
-        }
-
-    fwhm = 0.5 * (C.fwhm_range_min + C.fwhm_range_max)
-    eta = 0.5 * (C.eta_range_min + C.eta_range_max)
-    return {
-        'qmin': C.qmin,
-        'qmax': C.qmax,
-        'qstep': qstep,
-        'nyquist_points_per_fwhm': None,
-        'fwhm_range': (fwhm, fwhm),
-        'eta_range': (eta, eta),
-        'noise_range': None,
-        'intensity_scale_range': None,
-        'mask_prob': None,
-        'final_normalize': C.final_normalize_xrd,
-        'max_peaks': C.max_xrd_peaks if C.max_xrd_peaks > 0 else None,
-    }
-
-def _range_or_none(range_min, range_max, identity):
-    if range_min == identity and range_max == identity:
-        return None
-    return (range_min, range_max)
-
-def _int_range_or_none(range_min, range_max, identity):
-    if range_min == identity and range_max == identity:
-        return None
-    return (range_min, range_max)
-
 def effective_qstep(C):
     if C.nyquist_points_per_fwhm > 0:
         return nyquist_qstep(C.fwhm_range_min, C.nyquist_points_per_fwhm)
@@ -921,9 +876,14 @@ if __name__ == "__main__":
     # Setup datasets
     dataloaders = setup_datasets(C, distributed)
 
-    # Augmentation kwargs
-    augmentation_kwargs = build_xrd_kwargs(C, augment=True)
-    clean_xrd_kwargs = build_xrd_kwargs(C, augment=False)
+    augmentation_spec = bragg_artifact_spec_from_config(C, augment=True)
+    clean_artifact_spec = bragg_artifact_spec_from_config(C, augment=False)
+    if augmentation_spec.artifacts.seed is not None:
+        raise ValueError(
+            "training artifact configurations must not set artifacts.seed; "
+            "the training stream uses a device-local generator"
+        )
+    artifact_generators = {}
 
     # Initialize training metrics
     training_metrics = {
@@ -1061,73 +1021,55 @@ if __name__ == "__main__":
             return tensor.pin_memory().to(C.device, non_blocking=True)
         return tensor.to(C.device)
 
-    def cap_peak_list(batch_q, batch_iq):
-        if C.max_peak_list_peaks <= 0 or batch_q.size(1) <= C.max_peak_list_peaks:
-            return batch_q, batch_iq
-        valid = batch_q != 0
-        scores = batch_iq.masked_fill(~valid, float("-inf"))
-        peak_indices = torch.topk(scores, k=C.max_peak_list_peaks, dim=1).indices
-        batch_q = torch.gather(batch_q, 1, peak_indices)
-        batch_iq = torch.gather(batch_iq, 1, peak_indices)
-        valid = torch.gather(valid, 1, peak_indices)
-        batch_q = torch.where(valid, batch_q, torch.zeros_like(batch_q))
-        batch_iq = torch.where(valid, batch_iq, torch.zeros_like(batch_iq))
-        return batch_q, batch_iq
-
-    def uniform_like(shape, range_, like):
-        return torch.empty(*shape, dtype=like.dtype, device=like.device).uniform_(*range_)
-
-    def augment_peak_list(batch_q, batch_iq):
-        batch_q = batch_q.clone()
-        batch_iq = batch_iq.clone()
-        valid = batch_q != 0
-        q_scale_range = _range_or_none(C.q_scale_range_min, C.q_scale_range_max, 1.0)
-        if q_scale_range is not None:
-            batch_q *= uniform_like((batch_q.size(0), 1), q_scale_range, batch_q)
-        q_shift_range = _range_or_none(C.q_shift_range_min, C.q_shift_range_max, 0.0)
-        if q_shift_range is not None:
-            batch_q += uniform_like((batch_q.size(0), 1), q_shift_range, batch_q)
-        intensity_scale_range = _range_or_none(
-            C.intensity_scale_range_min, C.intensity_scale_range_max, 1.0
-        )
-        if intensity_scale_range is not None:
-            batch_iq *= uniform_like((batch_iq.size(0), 1), intensity_scale_range, batch_iq)
-        jitter_range = _range_or_none(
-            C.peak_intensity_jitter_range_min, C.peak_intensity_jitter_range_max, 1.0
-        )
-        if jitter_range is not None:
-            batch_iq *= uniform_like(batch_iq.shape, jitter_range, batch_iq)
-        if C.peak_dropout_prob > 0:
-            keep = torch.rand_like(batch_iq) > C.peak_dropout_prob
-            batch_iq *= keep
-            valid &= keep
-        batch_q = torch.where(valid, batch_q, torch.zeros_like(batch_q))
-        batch_iq = torch.where(valid, batch_iq, torch.zeros_like(batch_iq))
-        return cap_peak_list(batch_q, batch_iq)
+    def artifact_generator_for(tensor):
+        if C.seed is None:
+            return None
+        key = str(tensor.device)
+        if key not in artifact_generators:
+            generator = torch.Generator(device=tensor.device)
+            generator.manual_seed(C.seed + distributed["rank"] + 10_000)
+            artifact_generators[key] = generator
+        return artifact_generators[key]
 
     def append_condition_batch(cond_list, batch, augment):
-        xrd_kwargs = augmentation_kwargs if augment else clean_xrd_kwargs
         batch_q = batch['xrd.q']
         batch_iq = batch['xrd.iq']
         if C.xrd_augmentation_on_device:
             batch_q = move_tensor_to_device(batch_q)
             batch_iq = move_tensor_to_device(batch_iq)
 
-        if C.condition_encoder in {"peak", "peak_fourier", "hybrid"}:
-            if augment:
-                peak_q, peak_iq = augment_peak_list(batch_q, batch_iq)
-            else:
-                peak_q, peak_iq = cap_peak_list(batch_q, batch_iq)
-
+        include_peaks = C.condition_encoder in {"peak", "peak_fourier", "hybrid"}
+        include_dense = C.condition_encoder not in {"peak", "peak_fourier"}
+        artifact_batch = bragg_artifact_batch(
+            batch_q,
+            batch_iq,
+            spec=augmentation_spec if augment else clean_artifact_spec,
+            qmin=C.qmin,
+            qmax=C.qmax,
+            qstep=effective_qstep(C),
+            include_dense=include_dense,
+            include_peaks=include_peaks,
+            max_xrd_peaks=C.max_xrd_peaks,
+            max_peak_list_peaks=C.max_peak_list_peaks,
+            generator=artifact_generator_for(batch_q) if augment else None,
+        )
+        if include_peaks:
+            peak_q = artifact_batch["peak_q"]
+            peak_iq = artifact_batch["peak_iq"]
         if C.condition_encoder in {"peak", "peak_fourier"}:
-            for peak_q_item, peak_iq_item in zip(peak_q, peak_iq):
-                cond_list.append({"peak_q": peak_q_item, "peak_iq": peak_iq_item})
+            cond_list.extend(
+                {"peak_q": q_item, "peak_iq": iq_item}
+                for q_item, iq_item in zip(peak_q, peak_iq)
+            )
         elif C.condition_encoder == "hybrid":
-            dense_iq = discrete_to_continuous_xrd(batch_q, batch_iq, **xrd_kwargs)['iq']
-            for dense_item, peak_q_item, peak_iq_item in zip(dense_iq, peak_q, peak_iq):
-                cond_list.append({"dense": dense_item, "peak_q": peak_q_item, "peak_iq": peak_iq_item})
+            cond_list.extend(
+                {"dense": dense_item, "peak_q": q_item, "peak_iq": iq_item}
+                for dense_item, q_item, iq_item in zip(
+                    artifact_batch["iq"], peak_q, peak_iq
+                )
+            )
         else:
-            cond_list.extend(discrete_to_continuous_xrd(batch_q, batch_iq, **xrd_kwargs)['iq'])
+            cond_list.extend(artifact_batch["iq"])
 
     def stack_conditions(cond_list):
         if not cond_list:

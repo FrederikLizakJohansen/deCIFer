@@ -1,0 +1,46 @@
+wavelength: 1.5406
+max_entries: 4194304
+artifacts:
+  domain: q
+  normalize_signal: true
+  clip_nonnegative: true
+  final_normalize: true
+  calibration:
+    zero_shift: [-0.02, 0.02]
+    axis_scale: [0.998, 1.002]
+    peak_jitter_std: [0.0, 0.003]
+  intensity:
+    scale: [0.9, 1.0]
+    peak_jitter: [0.9, 1.1]
+    peak_dropout_probability: 0.03
+  profile:
+    model: tch
+    caglioti_u: [0.001, 0.004]
+    caglioti_v: [0.0, 0.001]
+    caglioti_w: [0.002, 0.006]
+    lorentzian_x: [0.001, 0.004]
+    lorentzian_y: [0.001, 0.004]
+    crystallite_size_nm: [20.0, 100.0]
+    microstrain: [0.0, 0.001]
+  background:
+    constant: [0.0, 0.03]
+    linear_slope: [-0.002, 0.002]
+    amorphous_humps:
+      - center: [2.0, 5.0]
+        fwhm: [0.3, 1.0]
+        height: [0.0, 0.08]
+        eta: [0.0, 0.4]
+  spurious_peaks:
+    count: [0, 3]
+    intensity: [0.005, 0.05]
+    fwhm: [0.03, 0.1]
+    eta: [0.2, 0.8]
+  noise:
+    gaussian_std: [0.0, 0.003]
+    correlated_std: [0.0, 0.003]
+    correlation_length: [0.02, 0.1]
+    poisson_count_scale: [5000.0, 20000.0]
+  detector:
+    random_mask_probability: 0.005
+    saturation_level: 0.95
+    quantization_step: 0.001

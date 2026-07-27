@@ -1,11 +1,115 @@
 import unittest
 
 import torch
+from braggcalculator import (
+    CalibrationArtifacts,
+    PeakProfileArtifacts,
+    SimulationArtifacts,
+    render_artifact_batch,
+)
 
-from decifer.pxrd import clamp_qmax_for_wavelength, discrete_to_continuous_xrd, max_q_for_wavelength, nyquist_qstep, q_range_to_two_theta_range
+from decifer.pxrd import (
+    BraggArtifactSpec,
+    bragg_artifact_batch,
+    clamp_qmax_for_wavelength,
+    discrete_to_continuous_xrd,
+    load_bragg_artifact_spec,
+    max_q_for_wavelength,
+    nyquist_qstep,
+    q_range_to_two_theta_range,
+)
 
 
 class PxrdTest(unittest.TestCase):
+    def test_bragg_peak_batch_restores_padding_after_position_shift(self):
+        spec = BraggArtifactSpec(
+            artifacts=SimulationArtifacts(
+                calibration=CalibrationArtifacts(zero_shift=0.1),
+                domain="q",
+            )
+        )
+
+        result = bragg_artifact_batch(
+            torch.tensor([[1.0, 0.0]]),
+            torch.tensor([[1.0, 0.0]]),
+            spec=spec,
+            include_dense=False,
+            include_peaks=True,
+        )
+
+        self.assertTrue(torch.allclose(result["peak_q"], torch.tensor([[1.1, 0.0]])))
+        self.assertTrue(torch.equal(result["peak_iq"], torch.tensor([[1.0, 0.0]])))
+
+    def test_bragg_hybrid_dense_branch_uses_same_shifted_peaks(self):
+        artifacts = SimulationArtifacts(
+            calibration=CalibrationArtifacts(zero_shift=0.2),
+            profile=PeakProfileArtifacts(
+                model="pseudo_voigt", fwhm=0.08, eta=0.4
+            ),
+            normalize_signal=True,
+            final_normalize=True,
+            domain="q",
+        )
+        result = bragg_artifact_batch(
+            torch.tensor([[1.0, 2.0, 0.0]]),
+            torch.tensor([[1.0, 0.5, 0.0]]),
+            spec=BraggArtifactSpec(artifacts=artifacts),
+            qmin=0.0,
+            qmax=4.0,
+            qstep=0.02,
+            include_dense=True,
+            include_peaks=True,
+        )
+        mask = result["peak_q"] != 0
+        expected = render_artifact_batch(
+            result["peak_q"],
+            result["peak_iq"],
+            peak_mask=mask,
+            grid=result["q"],
+            artifacts=SimulationArtifacts(
+                profile=artifacts.profile,
+                normalize_signal=True,
+                final_normalize=True,
+                domain="q",
+            ),
+            wavelength=1.5406,
+        )
+
+        self.assertTrue(torch.allclose(result["iq"], expected))
+
+    def test_full_artifact_yaml_is_seeded_and_repeatable(self):
+        spec = load_bragg_artifact_spec(
+            "configs/xrd_artifacts/full_evaluation.yaml"
+        )
+        batch_q = torch.tensor([[1.0, 2.0, 0.0]], dtype=torch.float32)
+        batch_iq = torch.tensor([[1.0, 0.5, 0.0]], dtype=torch.float32)
+
+        first = bragg_artifact_batch(
+            batch_q,
+            batch_iq,
+            spec=spec,
+            qmin=0.0,
+            qmax=4.0,
+            qstep=0.02,
+            include_dense=True,
+            include_peaks=True,
+        )
+        second = bragg_artifact_batch(
+            batch_q,
+            batch_iq,
+            spec=spec,
+            qmin=0.0,
+            qmax=4.0,
+            qstep=0.02,
+            include_dense=True,
+            include_peaks=True,
+        )
+
+        self.assertEqual(spec.artifacts.profile.model, "tch")
+        self.assertEqual(spec.artifacts.seed, 2026)
+        self.assertTrue(torch.equal(first["peak_q"], second["peak_q"]))
+        self.assertTrue(torch.equal(first["iq"], second["iq"]))
+
     def test_nyquist_qstep_uses_points_per_fwhm(self):
         self.assertEqual(nyquist_qstep(0.04, 4), 0.01)
 

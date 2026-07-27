@@ -28,7 +28,11 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 
 from decifer.decifer_model import DeciferConfig, build_condition_encoder
-from decifer.pxrd import discrete_to_continuous_xrd, nyquist_qstep
+from decifer.pxrd import (
+    bragg_artifact_batch,
+    bragg_artifact_spec_from_config,
+    nyquist_qstep,
+)
 
 
 METRIC_FIELDS = [
@@ -139,6 +143,9 @@ class PxrdEncoderPretrainConfig:
     final_normalize_xrd: bool = True
     max_xrd_peaks: int = 1024
     max_peak_list_peaks: int = 512
+    xrd_artifact_config: str = ""
+    xrd_artifact_max_entries: int = 4_194_304
+    xrd_wavelength: float = 1.5406
 
 
 def parse_config():
@@ -213,43 +220,6 @@ def effective_qstep(config):
     if config.nyquist_points_per_fwhm > 0:
         return nyquist_qstep(config.fwhm_range_min, config.nyquist_points_per_fwhm)
     return config.qstep
-
-
-def range_or_none(range_min, range_max, identity):
-    if range_min == identity and range_max == identity:
-        return None
-    return (range_min, range_max)
-
-
-def int_range_or_none(range_min, range_max, identity):
-    if range_min == identity and range_max == identity:
-        return None
-    return (range_min, range_max)
-
-
-def xrd_kwargs(config):
-    return {
-        "qmin": config.qmin,
-        "qmax": config.qmax,
-        "qstep": effective_qstep(config),
-        "nyquist_points_per_fwhm": None,
-        "fwhm_range": (config.fwhm_range_min, config.fwhm_range_max),
-        "eta_range": (config.eta_range_min, config.eta_range_max),
-        "noise_range": range_or_none(config.noise_range_min, config.noise_range_max, 0.0),
-        "intensity_scale_range": range_or_none(config.intensity_scale_range_min, config.intensity_scale_range_max, 1.0),
-        "mask_prob": config.mask_prob,
-        "q_shift_range": range_or_none(config.q_shift_range_min, config.q_shift_range_max, 0.0),
-        "q_scale_range": range_or_none(config.q_scale_range_min, config.q_scale_range_max, 1.0),
-        "peak_intensity_jitter_range": range_or_none(config.peak_intensity_jitter_range_min, config.peak_intensity_jitter_range_max, 1.0),
-        "peak_dropout_prob": config.peak_dropout_prob,
-        "background_range": range_or_none(config.background_range_min, config.background_range_max, 0.0),
-        "impurity_peak_count_range": int_range_or_none(config.impurity_peak_count_min, config.impurity_peak_count_max, 0),
-        "impurity_intensity_range": (config.impurity_intensity_range_min, config.impurity_intensity_range_max),
-        "particle_size_range": range_or_none(config.particle_size_range_min, config.particle_size_range_max, 0.0),
-        "peak_asymmetry_range": range_or_none(config.peak_asymmetry_range_min, config.peak_asymmetry_range_max, 0.0),
-        "final_normalize": config.final_normalize_xrd,
-        "max_peaks": config.max_xrd_peaks if config.max_xrd_peaks > 0 else None,
-    }
 
 
 def model_config(config):
@@ -378,32 +348,6 @@ def label_loss(logits_1, logits_2, labels):
     )
 
 
-def clean_xrd_kwargs(config):
-    fwhm = 0.5 * (config.fwhm_range_min + config.fwhm_range_max)
-    eta = 0.5 * (config.eta_range_min + config.eta_range_max)
-    return {
-        "qmin": config.qmin,
-        "qmax": config.qmax,
-        "qstep": effective_qstep(config),
-        "nyquist_points_per_fwhm": None,
-        "fwhm_range": (fwhm, fwhm),
-        "eta_range": (eta, eta),
-        "noise_range": None,
-        "intensity_scale_range": None,
-        "mask_prob": None,
-        "q_shift_range": None,
-        "q_scale_range": None,
-        "peak_intensity_jitter_range": None,
-        "peak_dropout_prob": None,
-        "background_range": None,
-        "impurity_peak_count_range": None,
-        "particle_size_range": None,
-        "peak_asymmetry_range": None,
-        "final_normalize": config.final_normalize_xrd,
-        "max_peaks": config.max_xrd_peaks if config.max_xrd_peaks > 0 else None,
-    }
-
-
 def needs_label_fields(config):
     return config.crystal_system_loss_weight > 0 or config.spacegroup_loss_weight > 0
 
@@ -465,56 +409,34 @@ def collate_fn(batch, max_raw_peaks_per_sample=0):
     return collated
 
 
-def cap_peak_list(batch_q, batch_iq, max_peaks):
-    if max_peaks <= 0 or batch_q.size(1) <= max_peaks:
-        return batch_q, batch_iq
-    valid = batch_q != 0
-    scores = batch_iq.masked_fill(~valid, float("-inf"))
-    peak_indices = torch.topk(scores, k=max_peaks, dim=1).indices
-    batch_q = torch.gather(batch_q, 1, peak_indices)
-    batch_iq = torch.gather(batch_iq, 1, peak_indices)
-    valid = torch.gather(valid, 1, peak_indices)
-    return torch.where(valid, batch_q, torch.zeros_like(batch_q)), torch.where(valid, batch_iq, torch.zeros_like(batch_iq))
-
-
-def uniform_like(shape, range_, like):
-    return torch.empty(*shape, dtype=like.dtype, device=like.device).uniform_(*range_)
-
-
-def augment_peak_list(batch_q, batch_iq, config):
-    batch_q = batch_q.clone()
-    batch_iq = batch_iq.clone()
-    valid = batch_q != 0
-    q_scale_range = range_or_none(config.q_scale_range_min, config.q_scale_range_max, 1.0)
-    if q_scale_range is not None:
-        batch_q = batch_q * uniform_like((batch_q.size(0), 1), q_scale_range, batch_q)
-    q_shift_range = range_or_none(config.q_shift_range_min, config.q_shift_range_max, 0.0)
-    if q_shift_range is not None:
-        batch_q = batch_q + uniform_like((batch_q.size(0), 1), q_shift_range, batch_q)
-    intensity_scale_range = range_or_none(config.intensity_scale_range_min, config.intensity_scale_range_max, 1.0)
-    if intensity_scale_range is not None:
-        batch_iq = batch_iq * uniform_like((batch_iq.size(0), 1), intensity_scale_range, batch_iq)
-    jitter_range = range_or_none(config.peak_intensity_jitter_range_min, config.peak_intensity_jitter_range_max, 1.0)
-    if jitter_range is not None:
-        batch_iq = batch_iq * uniform_like(batch_iq.shape, jitter_range, batch_iq)
-    if config.peak_dropout_prob > 0:
-        keep = torch.rand(batch_iq.shape, dtype=batch_iq.dtype, device=batch_iq.device) > config.peak_dropout_prob
-        batch_iq = batch_iq * keep
-        valid = valid & keep
-    batch_q = torch.where(valid, batch_q, torch.zeros_like(batch_q))
-    batch_iq = torch.where(valid, batch_iq, torch.zeros_like(batch_iq))
-    return cap_peak_list(batch_q, batch_iq, config.max_peak_list_peaks)
-
-
-def make_condition(batch_q, batch_iq, config, kwargs):
-    if config.condition_encoder in {"peak", "peak_fourier", "hybrid"}:
-        peak_q, peak_iq = augment_peak_list(batch_q, batch_iq, config)
+def make_condition(batch_q, batch_iq, config, spec, generator=None):
+    include_peaks = config.condition_encoder in {"peak", "peak_fourier", "hybrid"}
+    include_dense = config.condition_encoder not in {"peak", "peak_fourier"}
+    artifact_batch = bragg_artifact_batch(
+        batch_q,
+        batch_iq,
+        spec=spec,
+        qmin=config.qmin,
+        qmax=config.qmax,
+        qstep=effective_qstep(config),
+        include_dense=include_dense,
+        include_peaks=include_peaks,
+        max_xrd_peaks=config.max_xrd_peaks,
+        max_peak_list_peaks=config.max_peak_list_peaks,
+        generator=generator,
+    )
     if config.condition_encoder in {"peak", "peak_fourier"}:
-        return {"peak_q": peak_q, "peak_iq": peak_iq}
-    dense = discrete_to_continuous_xrd(batch_q, batch_iq, **kwargs)["iq"]
+        return {
+            "peak_q": artifact_batch["peak_q"],
+            "peak_iq": artifact_batch["peak_iq"],
+        }
     if config.condition_encoder == "hybrid":
-        return {"dense": dense, "peak_q": peak_q, "peak_iq": peak_iq}
-    return dense
+        return {
+            "dense": artifact_batch["iq"],
+            "peak_q": artifact_batch["peak_q"],
+            "peak_iq": artifact_batch["peak_iq"],
+        }
+    return artifact_batch["iq"]
 
 
 def move_to_device(value, device):
@@ -709,8 +631,15 @@ def main():
         print(f"Using CUDA device: {torch.cuda.get_device_name(device)}", flush=True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, betas=(config.beta1, config.beta2), weight_decay=config.weight_decay)
     resume_iteration = load_resume_checkpoint(config, model, optimizer, device)
-    kwargs = xrd_kwargs(config)
-    clean_kwargs = clean_xrd_kwargs(config)
+    augmentation_spec = bragg_artifact_spec_from_config(config, augment=True)
+    clean_artifact_spec = bragg_artifact_spec_from_config(config, augment=False)
+    if augmentation_spec.artifacts.seed is not None:
+        raise ValueError(
+            "pretraining artifact configurations must not set artifacts.seed; "
+            "the training stream uses a device-local generator"
+        )
+    artifact_generator = torch.Generator(device=device)
+    artifact_generator.manual_seed(config.seed + 10_000)
     metrics_path = os.path.join(config.out_dir, "contrastive_metrics.csv")
     latest_metrics_path = os.path.join(config.out_dir, "latest_metrics.json")
     live_plot_path = os.path.join(config.out_dir, "contrastive_live.png")
@@ -740,8 +669,12 @@ def main():
             crystal_system_labels = crystal_system_labels.to(device) - 1
         if spacegroup_labels is not None:
             spacegroup_labels = spacegroup_labels.to(device) - 1
-        condition_1 = make_condition(batch_q, batch_iq, config, kwargs)
-        condition_2 = make_condition(batch_q, batch_iq, config, kwargs)
+        condition_1 = make_condition(
+            batch_q, batch_iq, config, augmentation_spec, artifact_generator
+        )
+        condition_2 = make_condition(
+            batch_q, batch_iq, config, augmentation_spec, artifact_generator
+        )
         condition_1 = move_to_device(condition_1, device)
         condition_2 = move_to_device(condition_2, device)
 
@@ -758,7 +691,17 @@ def main():
             crystal_system_loss = torch.zeros((), dtype=loss.dtype, device=device)
             spacegroup_loss = torch.zeros((), dtype=loss.dtype, device=device)
             if config.pxrd_similarity_loss_weight > 0:
-                dense_target = discrete_to_continuous_xrd(batch_q, batch_iq, **clean_kwargs)["iq"]
+                dense_target = bragg_artifact_batch(
+                    batch_q,
+                    batch_iq,
+                    spec=clean_artifact_spec,
+                    qmin=config.qmin,
+                    qmax=config.qmax,
+                    qstep=effective_qstep(config),
+                    include_dense=True,
+                    include_peaks=False,
+                    max_xrd_peaks=config.max_xrd_peaks,
+                )["iq"]
                 pxrd_loss = pxrd_similarity_loss(
                     z1,
                     z2,

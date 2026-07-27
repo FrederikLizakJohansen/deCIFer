@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+from dataclasses import replace
 from typing import Dict, List, Optional
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -29,7 +30,16 @@ from decifer.minicif_v2 import (
     minicif_v2_to_structure,
     parse_minicif_v2,
 )
-from decifer.pxrd import clamp_qmax_for_wavelength, discrete_to_continuous_xrd, nyquist_qstep, q_range_to_two_theta_range
+from decifer.pxrd import (
+    BraggArtifactSpec,
+    bragg_artifact_batch,
+    bragg_artifact_spec_from_config,
+    clamp_qmax_for_wavelength,
+    discrete_to_continuous_xrd,
+    load_bragg_artifact_spec,
+    nyquist_qstep,
+    q_range_to_two_theta_range,
+)
 from bin.test_minicif_realtime import refine_best_candidate
 from bin.train import TrainConfig
 
@@ -197,35 +207,46 @@ def continuous_from_sparse(q, iq, xrd_kwargs):
     return xrd["q"].cpu().numpy(), xrd["iq"][0].cpu().numpy(), xrd["iq"]
 
 
-def cap_peak_list(q_tensor, iq_tensor, max_peaks):
-    if max_peaks <= 0 or q_tensor.numel() <= max_peaks:
-        return q_tensor, iq_tensor
-    valid = q_tensor != 0
-    scores = iq_tensor.masked_fill(~valid, float("-inf"))
-    peak_indices = torch.topk(scores, k=max_peaks).indices
-    q_tensor = q_tensor[peak_indices]
-    iq_tensor = iq_tensor[peak_indices]
-    valid = valid[peak_indices]
-    q_tensor = torch.where(valid, q_tensor, torch.zeros_like(q_tensor))
-    iq_tensor = torch.where(valid, iq_tensor, torch.zeros_like(iq_tensor))
-    return q_tensor, iq_tensor
-
-
-def condition_from_sparse(q, iq, xrd_kwargs, config):
+def condition_from_sparse(
+    q,
+    iq,
+    xrd_kwargs,
+    config,
+    artifact_spec: Optional[BraggArtifactSpec] = None,
+    artifact_device=None,
+):
     q_tensor = q if torch.is_tensor(q) else torch.tensor(q, dtype=torch.float32)
     iq_tensor = iq if torch.is_tensor(iq) else torch.tensor(iq, dtype=torch.float32)
     encoder = config.get("condition_encoder", "mlp")
-    _, reference_iq, dense_iq = continuous_from_sparse(q_tensor, iq_tensor, xrd_kwargs)
-    if encoder not in {"peak", "peak_fourier", "hybrid"}:
-        return reference_iq, dense_iq
-
-    max_peaks = int(config.get("max_peak_list_peaks", 0) or 0)
-    peak_q, peak_iq = cap_peak_list(q_tensor, iq_tensor, max_peaks)
-    peak_q = peak_q.unsqueeze(0)
-    peak_iq = peak_iq.unsqueeze(0)
+    _, reference_iq, _ = continuous_from_sparse(q_tensor, iq_tensor, xrd_kwargs)
+    artifact_spec = artifact_spec or bragg_artifact_spec_from_config(
+        config, augment=False
+    )
+    device = artifact_device or q_tensor.device
+    artifact_batch = bragg_artifact_batch(
+        q_tensor.to(device).unsqueeze(0),
+        iq_tensor.to(device).unsqueeze(0),
+        spec=artifact_spec,
+        qmin=xrd_kwargs["qmin"],
+        qmax=xrd_kwargs["qmax"],
+        qstep=xrd_kwargs["qstep"],
+        include_dense=encoder not in {"peak", "peak_fourier"},
+        include_peaks=encoder in {"peak", "peak_fourier", "hybrid"},
+        max_xrd_peaks=int(config.get("max_xrd_peaks", 0) or 0),
+        max_peak_list_peaks=int(config.get("max_peak_list_peaks", 0) or 0),
+    )
     if encoder in {"peak", "peak_fourier"}:
-        return reference_iq, {"peak_q": peak_q, "peak_iq": peak_iq}
-    return reference_iq, {"dense": dense_iq, "peak_q": peak_q, "peak_iq": peak_iq}
+        return reference_iq, {
+            "peak_q": artifact_batch["peak_q"],
+            "peak_iq": artifact_batch["peak_iq"],
+        }
+    if encoder == "hybrid":
+        return reference_iq, {
+            "dense": artifact_batch["iq"],
+            "peak_q": artifact_batch["peak_q"],
+            "peak_iq": artifact_batch["peak_iq"],
+        }
+    return reference_iq, artifact_batch["iq"]
 
 
 def structure_to_continuous_xrd(structure, xrd_kwargs, wavelength):
@@ -275,7 +296,7 @@ def generate_candidates(model, prompt, cond_vec, args, tokenizer):
 
 def evaluate_split(
     split, h5_path, model, tokenizer, parse_fn, structure_fn, end_token,
-    matcher, xrd_kwargs, config, args,
+    matcher, xrd_kwargs, config, args, artifact_spec=None,
 ):
     compatible_indices = compatible_evaluation_indices(h5_path, config)
     dataset = DeciferDataset(
@@ -301,7 +322,23 @@ def evaluate_split(
         try:
             reference_parsed = parse_fn(reference_minicif)
             reference_structure = structure_fn(reference_minicif)
-            reference_iq, cond = condition_from_sparse(item["xrd.q"], item["xrd.iq"], xrd_kwargs, config)
+            sample_artifact_spec = artifact_spec
+            if artifact_spec is not None and artifact_spec.artifacts.seed is not None:
+                sample_artifact_spec = replace(
+                    artifact_spec,
+                    artifacts=replace(
+                        artifact_spec.artifacts,
+                        seed=artifact_spec.artifacts.seed + source_sample_index,
+                    ),
+                )
+            reference_iq, cond = condition_from_sparse(
+                item["xrd.q"],
+                item["xrd.iq"],
+                xrd_kwargs,
+                config,
+                artifact_spec=sample_artifact_spec,
+                artifact_device=model.device,
+            )
         except Exception as exc:
             rows.append({
                 "split": split,
@@ -575,6 +612,11 @@ def main():
     parser.add_argument("--clean-fwhm", type=float, default=None)
     parser.add_argument("--eta", type=float, default=None)
     parser.add_argument("--wavelength", default="CuKa")
+    parser.add_argument(
+        "--artifact-config",
+        default="",
+        help="BraggCalculator artifact YAML used for deterministic robustness evaluation",
+    )
     parser.add_argument("--seed", type=int, default=1337)
     args = parser.parse_args()
     args.prompt_modes = args.prompt_modes or [args.prompt_mode]
@@ -594,6 +636,16 @@ def main():
     tokenizer, parse_fn, structure_fn, end_token = representation_api(tokenizer_name)
     matcher = StructureMatcher()
     xrd_kwargs = clean_xrd_kwargs(config, args)
+    artifact_spec = (
+        load_bragg_artifact_spec(args.artifact_config)
+        if args.artifact_config
+        else None
+    )
+    if artifact_spec is not None and artifact_spec.artifacts.seed is None:
+        artifact_spec = replace(
+            artifact_spec,
+            artifacts=replace(artifact_spec.artifacts, seed=args.seed),
+        )
     plot_learning_curves(checkpoint, out_dir)
 
     frames = []
@@ -601,7 +653,7 @@ def main():
         path = dataset_path(dataset_dir, split)
         frames.append(evaluate_split(
             split, path, model, tokenizer, parse_fn, structure_fn, end_token,
-            matcher, xrd_kwargs, config, args,
+            matcher, xrd_kwargs, config, args, artifact_spec,
         ))
     results = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     summary = summarize(results)
@@ -615,6 +667,11 @@ def main():
             "prompt_mode": args.prompt_mode,
             "prompt_modes": args.prompt_modes,
             "xrd_kwargs": xrd_kwargs,
+            "artifact_config": (
+                os.path.abspath(args.artifact_config)
+                if args.artifact_config
+                else None
+            ),
             "summary": summary.to_dict(orient="records"),
         }, f, indent=2)
     plot_metric_summary(summary, out_dir)

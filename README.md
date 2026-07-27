@@ -161,7 +161,8 @@ python bin/prepare_minicif_dataset.py \
 `--xrd-backend auto` is the default: it uses the installed BraggCalculator and
 falls back to pymatgen if it is unavailable. The resolved backend is stored in
 checkpoints and serialized splits, and mixed-backend resume/merge operations are
-rejected.
+rejected. BraggCalculator 0.3.0 or newer is required for the batched artifact
+pipeline.
 
 Preparation defaults to `--max-token-length 769`. Longer structural targets are
 rejected before diffraction calculation, so extreme structures do not consume
@@ -188,18 +189,26 @@ them for that config while preserving them in the HDF5 dataset for larger
 models. Exclusion counts are printed at startup and stored in
 `run_metadata.yaml`.
 
-Train the small pipeline check or the recommended medium baseline:
+Prepared HDF5 files contain clean sparse peak lists. BraggCalculator applies
+calibration, intensity, profile, background, spurious-peak, noise, and detector
+artifacts in batches during training. A new artifact realization is sampled for
+each batch, so artifacts do not increase dataset size and the clean dataset does
+not need to be regenerated when the artifact model changes. Validation remains
+clean and deterministic.
+
+Run the full-artifact pipeline check and recommended hybrid model:
 
 ```bash
-python bin/train.py --config configs/minicif_v2_gpu_smoke_config.yaml
-python bin/train.py --config configs/minicif_v2_small_config.yaml
-python bin/train.py --config configs/minicif_v2_medium_config.yaml
+python bin/train.py --config configs/minicif_v2_hybrid_artifacts_smoke.yaml
+python bin/train.py --config configs/minicif_v2_medium_hybrid_artifacts.yaml
 ```
 
-The GPU smoke config runs only a few optimizer steps and is not a scientific
-baseline. Use it first to verify CUDA, fused AdamW, HDF5 loading, and the complete
-v2 model path. Use the small config for early loss/validity checks and the medium
-config for the first research comparison.
+The smoke config runs only two optimizer steps and is not a scientific baseline.
+The standard `minicif_v2_small_config.yaml` and
+`minicif_v2_medium_config.yaml` remain the faster sparse Fourier peak baselines.
+Full profile artifacts require a `dense` or `hybrid` condition encoder because
+background and detector effects cannot be represented by a sparse peak list.
+The training artifact YAML must not set a fixed seed.
 
 At inference, the formula is optional input. `pxrd-elements` supplies only the
 known constituent set and lets the model infer stoichiometry; `pxrd-stoichiometry`
@@ -208,17 +217,25 @@ formula so composition can be validated deterministically.
 
 ```bash
 python bin/visualize_minicif.py \
-  --checkpoint minicif_v2_model_medium/ckpt.pt \
+  --checkpoint minicif_v2_model_medium_hybrid_artifacts/ckpt.pt \
   --dataset-dir data/noma_minicif_v2 \
+  --artifact-config configs/xrd_artifacts/full_evaluation.yaml \
   --prompt-modes pxrd pxrd-elements pxrd-stoichiometry \
                  pxrd-stoichiometry-cs pxrd-stoichiometry-cs-sg
 ```
 
+The evaluation artifact profile has a fixed seed. Each source record receives a
+repeatable, distinct artifact realization. Omit `--artifact-config` for clean
+evaluation.
+
 The v2 configs use record-aligned, length-bucketed token-budget batches, sparse
-Fourier peak conditioning, cross-attention, typed vocabulary heads, constrained
-lattice generation, fused AdamW on CUDA, and cached self/cross-attention during
-generation. Existing `minicif` and legacy deCIFer datasets/checkpoints remain
-separate and compatible with their original paths.
+Fourier or hybrid PXRD conditioning, cross-attention, typed vocabulary heads,
+constrained lattice generation, fused AdamW on CUDA, and cached
+self/cross-attention during generation. Preferred-orientation artifacts are not
+enabled yet: a physically meaningful transform requires unmerged HKL and lattice
+metadata, which the current sparse HDF5 schema does not store. Existing
+`minicif` and legacy deCIFer datasets/checkpoints remain separate and compatible
+with their original paths.
 
 ## Training
 ### Training From Scratch
