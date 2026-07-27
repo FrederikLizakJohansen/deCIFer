@@ -58,6 +58,7 @@ class PrepConfig:
     chunksize: int = 8
     max_runtime_seconds: int = 0
     no_resume: bool = False
+    max_token_length: int = 769
     num_decimal_places: int = 4
     wavelength: str = "CuKa"
     qmin: float = 0.0
@@ -161,6 +162,11 @@ def process_cif(args):
     else:
         raise ValueError(f"unknown representation: {config.representation}")
     cif_tokens = np.asarray(tokenizer.encode(tokenizer.tokenize_minicif(minicif_string)), dtype=np.int32)
+    if config.max_token_length > 0 and len(cif_tokens) > config.max_token_length:
+        raise ValueError(
+            f"{name}: token length {len(cif_tokens)} exceeds "
+            f"--max-token-length {config.max_token_length}"
+        )
 
     q_disc, iq_disc, xrd_backend = calculate_xrd_pattern(structure, config)
 
@@ -415,6 +421,27 @@ def split_rows(rows, val_fraction, test_fraction, seed, stratify_on="crystal_sys
     return splits
 
 
+def filter_rows_by_token_length(rows, max_token_length):
+    rows = list(rows)
+    if max_token_length <= 0:
+        return rows, []
+    kept = []
+    excluded = []
+    for row in rows:
+        length = int(row.get("cif_token_length", len(row["cif_tokenized"])))
+        if length <= max_token_length:
+            kept.append(row)
+        else:
+            excluded.append({
+                "source": row["cif_name"],
+                "error": (
+                    f"token length {length} exceeds "
+                    f"--max-token-length {max_token_length}"
+                ),
+            })
+    return kept, excluded
+
+
 def validate_checkpoint_representation(rows_by_source, representation):
     mismatched = [
         source
@@ -460,6 +487,12 @@ def main():
     parser.add_argument("--chunksize", type=int, default=8, help="Multiprocessing imap_unordered chunksize")
     parser.add_argument("--max-runtime-seconds", type=int, default=0, help="Stop cleanly after this many seconds, saving a checkpoint first; 0 disables")
     parser.add_argument("--no-resume", action="store_true", help="Ignore any existing prep checkpoint")
+    parser.add_argument(
+        "--max-token-length",
+        type=int,
+        default=769,
+        help="Exclude longer targets before diffraction calculation; 0 disables",
+    )
     parser.add_argument("--num-decimal-places", type=int, default=4)
     parser.add_argument("--wavelength", default="CuKa")
     parser.add_argument("--qmin", type=float, default=0.0)
@@ -494,6 +527,8 @@ def main():
         config.checkpoint_path = os.path.join(config.out_dir, "prep_checkpoint.pkl.gz")
     if config.chunksize < 1:
         raise ValueError("chunksize must be >= 1")
+    if config.max_token_length < 0:
+        raise ValueError("max_token_length must be >= 0")
 
     if config.merge_shards:
         rows_by_source, failures_by_source = load_shard_checkpoints(config.checkpoint_path, config.num_shards)
@@ -515,6 +550,10 @@ def main():
             if source_id(obj) in rows_by_source
         ]
         failures = list(failures_by_source.values())
+        rows, length_exclusions = filter_rows_by_token_length(
+            rows, config.max_token_length
+        )
+        failures.extend(length_exclusions)
         splits = split_rows(rows, config.val_fraction, config.test_fraction, config.seed, config.stratify_split_on)
         serialized_dir = os.path.join(config.out_dir, "serialized")
         for split, split_rows_ in splits.items():
@@ -632,6 +671,10 @@ def main():
         print(json.dumps(metadata, indent=2))
         return
 
+    rows, length_exclusions = filter_rows_by_token_length(
+        rows, config.max_token_length
+    )
+    failures.extend(length_exclusions)
     splits = split_rows(rows, config.val_fraction, config.test_fraction, config.seed, config.stratify_split_on)
     serialized_dir = os.path.join(config.out_dir, "serialized")
     for split, split_rows_ in splits.items():

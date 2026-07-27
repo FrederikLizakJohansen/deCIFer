@@ -21,6 +21,11 @@ sbatch minislurm/prepare_minicif_v2_dataset.sh \
   --xrd-backend braggcalculator
 ```
 
+Preparation excludes targets longer than 769 tokens before calculating their
+diffraction patterns. Pass a different `--max-token-length` only for a model
+with a different intended context; `0` disables the preparation limit. Training
+still applies the selected config's stricter limit when loading the shared data.
+
 To use different locations:
 
 ```bash

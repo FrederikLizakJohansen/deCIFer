@@ -163,6 +163,13 @@ falls back to pymatgen if it is unavailable. The resolved backend is stored in
 checkpoints and serialized splits, and mixed-backend resume/merge operations are
 rejected.
 
+Preparation defaults to `--max-token-length 769`. Longer structural targets are
+rejected before diffraction calculation, so extreme structures do not consume
+Bragg generation time or enter the standard prepared dataset. Smaller models
+apply their stricter context limit when loading the shared dataset. Use
+`--max-token-length 0` only when intentionally preparing data for a larger
+context model. Training still applies its own config-specific length filter.
+
 Audit the prepared splits before allocating a GPU. This checks sequence-length
 compatibility against the selected config, representation metadata, token/string
 round trips, formula and symmetry metadata, sampled Wyckoff expansion, and PXRD

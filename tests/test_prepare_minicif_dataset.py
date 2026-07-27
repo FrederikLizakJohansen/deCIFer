@@ -4,6 +4,7 @@ import os
 import pickle
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import h5py
 import numpy as np
@@ -23,6 +24,7 @@ select_inputs = prepare_minicif_dataset.select_inputs
 shard_checkpoint_path = prepare_minicif_dataset.shard_checkpoint_path
 shard_inputs = prepare_minicif_dataset.shard_inputs
 split_rows = prepare_minicif_dataset.split_rows
+filter_rows_by_token_length = prepare_minicif_dataset.filter_rows_by_token_length
 write_metadata = prepare_minicif_dataset.write_metadata
 write_split = prepare_minicif_dataset.write_split
 process_cif = prepare_minicif_dataset.process_cif
@@ -33,6 +35,37 @@ PrepConfig = prepare_minicif_dataset.PrepConfig
 
 
 class PrepareMinicifDatasetTest(unittest.TestCase):
+    def test_overlength_target_is_rejected_before_diffraction(self):
+        structure = Structure(
+            Lattice.cubic(4.0),
+            ["Na"],
+            [[0.0, 0.0, 0.0]],
+        )
+        config = PrepConfig(
+            raw_dir="raw",
+            out_dir="out",
+            representation="minicif_v2",
+            max_token_length=1,
+        )
+
+        with patch.object(prepare_minicif_dataset, "calculate_xrd_pattern") as calculate:
+            with self.assertRaisesRegex(ValueError, "exceeds --max-token-length 1"):
+                process_cif((("nacl", str(CifWriter(structure))), vars(config)))
+
+        calculate.assert_not_called()
+
+    def test_filter_rows_by_token_length_handles_resumed_checkpoints(self):
+        rows = [
+            {"cif_name": "short", "cif_tokenized": [1, 2], "cif_token_length": 2},
+            {"cif_name": "long", "cif_tokenized": [1, 2, 3], "cif_token_length": 3},
+        ]
+
+        kept, excluded = filter_rows_by_token_length(rows, max_token_length=2)
+
+        self.assertEqual([row["cif_name"] for row in kept], ["short"])
+        self.assertEqual(excluded[0]["source"], "long")
+        self.assertIn("token length 3", excluded[0]["error"])
+
     def test_v2_processing_writes_formula_representation_and_token_length(self):
         structure = Structure.from_spacegroup(
             "Fm-3m", Lattice.cubic(5.64), ["Na", "Cl"], [[0, 0, 0], [0.5, 0.5, 0.5]]

@@ -44,6 +44,8 @@ This file lists the core minicif changes relative to the original deCIFer workfl
 - Store sparse peak positions/intensities instead of dense precomputed augmented traces.
 - Added optional BraggCalculator sparse-pattern generation with automatic
   pymatgen fallback and persisted backend provenance.
+- Reject overlength targets before diffraction generation; resumed legacy
+  checkpoints are filtered when splits are written.
 - Record-batched training uses a context-compatible dataset view and reports
   excluded overlength structures without rewriting the prepared data.
 - Reconstruct continuous PXRD conditions during training.

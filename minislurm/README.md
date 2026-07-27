@@ -24,7 +24,9 @@ sbatch minislurm/prepare_minicif_v2_dataset.sh \
 ```
 
 The repository supports Python 3.12 and 3.13, as required by BraggCalculator
-0.1.0.
+0.1.0. Dataset preparation excludes structural targets longer than 769 tokens
+before diffraction calculation; pass `--max-token-length 0` only for an
+intentional larger-context dataset.
 
 Defaults are `data/noma` for the raw gzip source,
 `data/noma_minicif_v2` for prepared data, and
