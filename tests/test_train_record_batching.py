@@ -1,7 +1,10 @@
 import importlib.util
 import os
+import tempfile
 import unittest
 
+from omegaconf import OmegaConf
+import torch
 from torch.utils.data import SequentialSampler
 
 
@@ -10,9 +13,23 @@ spec = importlib.util.spec_from_file_location("train_module", MODULE_PATH)
 train_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(train_module)
 TokenBudgetBatchSampler = train_module.TokenBudgetBatchSampler
+load_trusted_checkpoint = train_module.load_trusted_checkpoint
 
 
 class TokenBudgetBatchSamplerTest(unittest.TestCase):
+    def test_trusted_checkpoint_loads_omegaconf_state(self):
+        with tempfile.NamedTemporaryFile(suffix=".pt") as checkpoint_file:
+            torch.save(
+                {"config": OmegaConf.create({"layers": [2, 4]})},
+                checkpoint_file.name,
+            )
+
+            checkpoint = load_trusted_checkpoint(
+                checkpoint_file.name, map_location="cpu"
+            )
+
+        self.assertEqual(list(checkpoint["config"].layers), [2, 4])
+
     def test_batches_cover_records_without_exceeding_padded_budget(self):
         lengths = [9, 10, 19, 20, 29, 30]
         sampler = TokenBudgetBatchSampler(

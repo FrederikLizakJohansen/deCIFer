@@ -616,16 +616,21 @@ def save_checkpoint(C, checkpoint, model, optimizer, training_metrics, local_ite
     print(f"saving checkpoint to {C.out_dir}...", flush=True)
     torch.save(checkpoint, os.path.join(C.out_dir, "ckpt.pt"))
 
+def load_trusted_checkpoint(path, map_location):
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
+
 def load_pretrained_condition_encoder(C, model):
     if not C.pretrained_condition_encoder_path:
         return
     if not C.condition:
         raise ValueError("pretrained_condition_encoder_path requires condition: True")
     print(f"Loading pretrained condition encoder from {C.pretrained_condition_encoder_path}...", flush=True)
-    try:
-        checkpoint = torch.load(C.pretrained_condition_encoder_path, map_location=C.device, weights_only=False)
-    except TypeError:
-        checkpoint = torch.load(C.pretrained_condition_encoder_path, map_location=C.device)
+    checkpoint = load_trusted_checkpoint(
+        C.pretrained_condition_encoder_path, map_location=C.device
+    )
     pretrained_config = checkpoint.get("decifer_config", {})
     expected_values = {
         "condition_encoder": C.condition_encoder,
@@ -946,7 +951,7 @@ if __name__ == "__main__":
 
         # Find checkpoint
         ckpt_path = os.path.join(C.out_dir, "ckpt.pt")
-        checkpoint = torch.load(ckpt_path, map_location=C.device)
+        checkpoint = load_trusted_checkpoint(ckpt_path, map_location=C.device)
         checkpoint_model_args = checkpoint["model_args"]
 
         # Force these config attributes to be equal otherwise we can't even resume training
