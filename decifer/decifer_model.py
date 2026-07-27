@@ -552,8 +552,12 @@ class TypedTokenHead(nn.Module):
             self.register_buffer(f"{name}_ids", torch.tensor(token_ids, dtype=torch.long), persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        logits = x.new_empty(*x.shape[:-1], self.vocab_size)
-        for name, projection in self.projections.items():
+        projections = iter(self.projections.items())
+        first_name, first_projection = next(projections)
+        first_logits = first_projection(x)
+        logits = first_logits.new_empty(*x.shape[:-1], self.vocab_size)
+        logits.index_copy_(-1, getattr(self, f"{first_name}_ids"), first_logits)
+        for name, projection in projections:
             logits.index_copy_(-1, getattr(self, f"{name}_ids"), projection(x))
         return logits
 

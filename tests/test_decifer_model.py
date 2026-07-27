@@ -111,6 +111,34 @@ class DeciferModelTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(logits).all())
         self.assertTrue(torch.isfinite(loss))
 
+    def test_typed_head_uses_autocast_projection_dtype(self):
+        tokenizer = MinicifV2Tokenizer()
+        model = Decifer(DeciferConfig(
+            tokenizer="minicif_v2",
+            vocab_size=tokenizer.vocab_size,
+            block_size=16,
+            n_layer=1,
+            n_head=1,
+            n_embd=16,
+            typed_token_heads=True,
+        ))
+        x = torch.randn(2, 4, 16, dtype=torch.float32)
+
+        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            logits = model.typed_head(x)
+            ids = tokenizer.encode(tokenizer.tokenize_minicif("<mcif2> Na "))
+            idx = torch.tensor([ids])
+            model_logits, loss = model(
+                idx,
+                targets=idx.clone(),
+                start_indices_batch=[[0]],
+            )
+
+        self.assertEqual(logits.dtype, torch.bfloat16)
+        self.assertEqual(logits.shape, (2, 4, tokenizer.vocab_size))
+        self.assertEqual(model_logits.dtype, torch.bfloat16)
+        self.assertTrue(torch.isfinite(loss))
+
     def test_mlp_condition_encoder_keeps_single_condition_token(self):
         tokenizer = MinicifTokenizer()
         model = Decifer(DeciferConfig(
