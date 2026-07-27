@@ -48,7 +48,7 @@ from decifer.minicif_v2 import (
     MinicifV2Tokenizer,
 )
 from decifer.pxrd import discrete_to_continuous_xrd, nyquist_qstep
-from decifer.decifer_dataset import DeciferDataset
+from decifer.decifer_dataset import DeciferDataset, h5_record_token_lengths
     
 # Tokenizer, get start, padding and newline IDs
 TOKENIZER = Tokenizer()
@@ -332,6 +332,7 @@ def _decode_h5_string(value):
 def validate_training_dataset(C):
     """Fail before model initialization when a record-batched dataset is incompatible."""
     expected_representation = C.tokenizer if C.tokenizer in {"minicif", "minicif_v2"} else None
+    split_stats = {}
     for split in ("train", "val", "test"):
         path = os.path.join(C.dataset, "serialized", f"{split}.h5")
         if not os.path.exists(path):
@@ -374,24 +375,52 @@ def validate_training_dataset(C):
                 )
             min_length = int(lengths.min())
             max_length = int(lengths.max())
+            longest_index = int(lengths.argmax())
+            longest_name = (
+                _decode_h5_string(h5["cif_name"][longest_index])
+                if "cif_name" in h5
+                else str(longest_index)
+            )
             if min_length < 2:
                 raise ValueError(f"{path} contains a record shorter than two tokens")
-            if max_length - 1 > C.block_size:
-                raise ValueError(
-                    f"{path} maximum record length {max_length} exceeds block_size + 1 "
-                    f"({C.block_size + 1})"
-                )
             condition_tokens = (
                 C.condition_n_tokens
                 if C.condition and not C.condition_cross_attention
                 else 0
             )
-            max_model_tokens = max_length - 1 + condition_tokens
+            max_record_length = C.block_size + 1 - condition_tokens
+            compatible = lengths <= max_record_length
+            n_compatible = int(compatible.sum())
+            n_excluded = int(len(lengths) - n_compatible)
+            split_stats[split] = {
+                "n_records": int(len(lengths)),
+                "n_compatible": n_compatible,
+                "n_excluded": n_excluded,
+                "max_record_length": max_length,
+                "longest_record": longest_name,
+                "model_record_limit": int(max_record_length),
+            }
+            if n_compatible == 0:
+                raise ValueError(
+                    f"{path} has no records that fit block_size={C.block_size}; "
+                    f"all {len(lengths)} records exceed the {max_record_length}-token "
+                    "record limit"
+                )
+            if n_excluded:
+                print(
+                    f"{path}: excluding {n_excluded}/{len(lengths)} records longer "
+                    f"than {max_record_length} tokens (maximum {max_length}, "
+                    f"record {longest_name!r}).",
+                    flush=True,
+                )
+            max_compatible_length = int(lengths[compatible].max())
+            max_model_tokens = max_compatible_length - 1 + condition_tokens
             if max_model_tokens > C.batch_token_budget:
                 raise ValueError(
                     f"{path} requires at least {max_model_tokens} model tokens for one record, "
                     f"but batch_token_budget={C.batch_token_budget}"
                 )
+    return split_stats
 
 def seed_everything(seed):
     if seed is None:
@@ -696,9 +725,14 @@ def token_lengths(dataset):
     dataset._open_file()
     if "cif_token_length" in dataset.h5_file:
         lengths = np.asarray(dataset.h5_file["cif_token_length"], dtype=np.int64)
+        if dataset.indices is not None:
+            lengths = lengths[dataset.indices]
     else:
         token_data = dataset.data["cif_tokens"]
-        lengths = np.fromiter((len(token_data[index]) for index in range(len(dataset))), dtype=np.int64)
+        lengths = np.fromiter(
+            (len(token_data[dataset.source_index(index)]) for index in range(len(dataset))),
+            dtype=np.int64,
+        )
     if dataset.lazy_open:
         dataset.close()
     return lengths
@@ -715,6 +749,12 @@ def record_batch_sampler(C, sampler, dataset, seed):
         bucket_size=C.length_bucket_size,
         seed=seed,
     )
+
+def compatible_record_indices(path, C):
+    condition_tokens = C.condition_n_tokens if C.condition and not C.condition_cross_attention else 0
+    max_record_length = C.block_size + 1 - condition_tokens
+    lengths = h5_record_token_lengths(path)
+    return np.flatnonzero(lengths <= max_record_length)
 
 def setup_datasets(C, distributed=None):
     if distributed is None:
@@ -750,14 +790,26 @@ def setup_datasets(C, distributed=None):
 
     # Initialise datasets/loaders 
     lazy_open = C.num_workers_dataloader > 0
-    train_dataset = DeciferDataset(os.path.join(C.dataset, "serialized/train.h5"), dataset_fields, lazy_open=lazy_open)
-    val_dataset = DeciferDataset(os.path.join(C.dataset, "serialized/val.h5"), dataset_fields, lazy_open=lazy_open)
-    test_dataset = DeciferDataset(os.path.join(C.dataset, "serialized/test.h5"), dataset_fields, lazy_open=lazy_open)
+    split_paths = {
+        split: os.path.join(C.dataset, "serialized", f"{split}.h5")
+        for split in ("train", "val", "test")
+    }
+    split_indices = (
+        {split: compatible_record_indices(path, C) for split, path in split_paths.items()}
+        if batching_strategy == "record"
+        else {split: None for split in split_paths}
+    )
+    train_dataset = DeciferDataset(split_paths["train"], dataset_fields, lazy_open=lazy_open, indices=split_indices["train"])
+    val_dataset = DeciferDataset(split_paths["val"], dataset_fields, lazy_open=lazy_open, indices=split_indices["val"])
+    test_dataset = DeciferDataset(split_paths["test"], dataset_fields, lazy_open=lazy_open, indices=split_indices["test"])
         
     # Random batching sampler, train
     if C.sampling_strategy == "crystal_system_balanced":
         train_dataset._open_file()
-        crystal_systems = [int(train_dataset.data["crystal_system"][idx]) for idx in range(len(train_dataset))]
+        crystal_systems = [
+            int(train_dataset.data["crystal_system"][train_dataset.source_index(idx)])
+            for idx in range(len(train_dataset))
+        ]
         if lazy_open:
             train_dataset.close()
         counts = {value: crystal_systems.count(value) for value in set(crystal_systems)}
@@ -851,7 +903,7 @@ if __name__ == "__main__":
 
     # Parse configuration
     C = parse_config()
-    validate_training_dataset(C)
+    dataset_stats = validate_training_dataset(C)
     distributed = setup_distributed(C)
     master_process = distributed["master_process"]
     
@@ -992,6 +1044,7 @@ if __name__ == "__main__":
     raw_model = model.module if distributed["ddp"] else model
     raw_model = raw_model._orig_mod if hasattr(raw_model, "_orig_mod") else raw_model
     checkpoint["run_metadata"] = build_run_metadata(C, raw_model)
+    checkpoint["run_metadata"]["dataset_splits"] = dataset_stats
     if master_process:
         write_run_metadata(C, checkpoint["run_metadata"])
         metrics_paths = initialize_metrics_logs(C)

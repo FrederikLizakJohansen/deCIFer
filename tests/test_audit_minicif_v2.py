@@ -10,7 +10,7 @@ import yaml
 from pymatgen.core import Lattice, Structure
 
 from bin.prepare_minicif_dataset import write_split
-from bin.train import configure_tokenizer, validate_training_dataset
+from bin.train import configure_tokenizer, setup_datasets, validate_training_dataset
 from decifer.minicif_v2 import (
     MinicifV2Tokenizer,
     canonicalize_structure_v2,
@@ -109,8 +109,51 @@ class AuditMinicifV2Test(unittest.TestCase):
             self.make_dataset(root)
             configure_tokenizer("minicif_v2")
 
-            with self.assertRaisesRegex(ValueError, "exceeds block_size"):
+            with self.assertRaisesRegex(ValueError, "no records that fit block_size"):
                 validate_training_dataset(self.training_config(root, block_size=8))
+
+    def test_overlength_records_are_reported_and_excluded(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.make_dataset(root)
+            train_path = os.path.join(root, "serialized", "train.h5")
+            with h5py.File(train_path, "r") as h5:
+                row = {
+                    "cif_name": h5["cif_name"].asstr()[0],
+                    "cif_tokenized": np.asarray(h5["cif_tokenized"][0], dtype=np.int32),
+                    "cif_token_length": int(h5["cif_token_length"][0]),
+                    "minicif_string": h5["minicif_string"].asstr()[0],
+                    "formula": h5["formula"].asstr()[0],
+                    "representation": h5["representation"].asstr()[0],
+                    "xrd_backend": h5["xrd_backend"].asstr()[0],
+                    "xrd_disc.q": np.asarray(h5["xrd_disc.q"][0], dtype=np.float32),
+                    "xrd_disc.iq": np.asarray(h5["xrd_disc.iq"][0], dtype=np.float32),
+                    "spacegroup": int(h5["spacegroup"][0]),
+                    "crystal_system": int(h5["crystal_system"][0]),
+                }
+            overlength_row = dict(row)
+            overlength_row["cif_name"] = "overlength"
+            overlength_row["cif_tokenized"] = np.resize(row["cif_tokenized"], 300)
+            overlength_row["cif_token_length"] = 300
+            write_split(train_path, [row, overlength_row])
+            config = self.training_config(
+                root,
+                block_size=256,
+                device="cpu",
+                sampling_strategy="random",
+                batch_size=1,
+                num_workers_dataloader=0,
+                seed=42,
+                length_bucket_size=16,
+            )
+
+            stats = validate_training_dataset(config)
+            dataloaders = setup_datasets(config)
+
+            self.assertEqual(stats["train"]["n_excluded"], 1)
+            self.assertEqual(stats["val"]["n_excluded"], 0)
+            self.assertEqual(len(dataloaders["train"].dataset), 1)
+            for dataloader in dataloaders.values():
+                dataloader.dataset.close()
 
 
 if __name__ == "__main__":

@@ -169,21 +169,40 @@ def audit_split(path, config, max_items=100, seed=1337):
             "p99": float(np.percentile(lengths, 99)),
             "max": int(lengths.max()),
         }
+        longest_index = int(lengths.argmax())
+        report["longest_record"] = {
+            "index": longest_index,
+            "cif_name": (
+                decode_string(h5["cif_name"][longest_index])
+                if "cif_name" in h5
+                else None
+            ),
+            "token_length": int(lengths[longest_index]),
+        }
         block_size = int(config["block_size"])
         condition_tokens = (
             int(config.get("condition_n_tokens", 1))
             if config.get("condition") and not config.get("condition_cross_attention")
             else 0
         )
-        max_model_tokens = int(lengths.max()) - 1 + condition_tokens
-        report["max_model_tokens"] = max_model_tokens
+        max_record_length = block_size + 1 - condition_tokens
+        compatible = lengths <= max_record_length
+        n_compatible = int(compatible.sum())
+        report["n_trainable_records"] = n_compatible
+        report["n_overlength_records"] = int(len(lengths) - n_compatible)
+        report["model_record_limit"] = max_record_length
+        report["max_model_tokens"] = (
+            int(lengths[compatible].max()) - 1 + condition_tokens
+            if n_compatible
+            else None
+        )
         report["block_size"] = block_size
         report["batch_token_budget"] = int(config["batch_token_budget"])
         if int(lengths.min()) < 2:
             add_error(report, -1, "a record is shorter than two tokens")
-        if int(lengths.max()) - 1 > block_size:
-            add_error(report, -1, "maximum record length exceeds block_size + 1")
-        if max_model_tokens > int(config["batch_token_budget"]):
+        if n_compatible == 0:
+            add_error(report, -1, "no records fit the model context window")
+        elif report["max_model_tokens"] > int(config["batch_token_budget"]):
             add_error(report, -1, "one record exceeds batch_token_budget")
 
         indices = sample_indices(n_records, max_items, seed)

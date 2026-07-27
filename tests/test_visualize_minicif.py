@@ -1,7 +1,10 @@
 import importlib.util
 import os
+import tempfile
 import unittest
 
+import h5py
+import numpy as np
 import pandas as pd
 
 from decifer.minicif import MinicifTokenizer
@@ -13,9 +16,30 @@ visualize_minicif = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(visualize_minicif)
 prompt_from_minicif = visualize_minicif.prompt_from_minicif
 summarize = visualize_minicif.summarize
+compatible_evaluation_indices = visualize_minicif.compatible_evaluation_indices
 
 
 class VisualizeMinicifTest(unittest.TestCase):
+    def test_evaluation_excludes_references_beyond_checkpoint_context(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "test.h5")
+            with h5py.File(path, "w") as h5:
+                h5.create_dataset(
+                    "cif_token_length",
+                    data=np.asarray([100, 641, 642], dtype=np.int32),
+                )
+
+            indices = compatible_evaluation_indices(
+                path,
+                {
+                    "block_size": 640,
+                    "condition": True,
+                    "condition_cross_attention": True,
+                },
+            )
+
+        np.testing.assert_array_equal(indices, [0, 1])
+
     def test_pxrd_prompt_modes_force_known_fields(self):
         tokenizer = MinicifTokenizer()
         minicif = (

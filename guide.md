@@ -42,6 +42,13 @@ python bin/audit_minicif_v2.py \
   --output minicif_v2_preflight.json
 ```
 
+The audit reports `n_overlength_records` for each split. Record-mode training
+automatically excludes targets that do not fit the selected model's context
+window and records the counts in `run_metadata.yaml`; it does not modify the
+prepared HDF5 files. This lets the medium model use records that are too long
+for the small model. Do not increase `block_size` to accommodate extreme
+thousands-of-token outliers.
+
 ## 2. Train the model
 
 First run the short GPU integration check:

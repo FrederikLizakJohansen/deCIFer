@@ -20,7 +20,7 @@ from pymatgen.analysis.diffraction.xrd import XRDCalculator
 from pymatgen.analysis.structure_matcher import StructureMatcher
 from tqdm.auto import tqdm
 
-from decifer.decifer_dataset import DeciferDataset
+from decifer.decifer_dataset import DeciferDataset, h5_record_token_lengths
 from decifer.decifer_model import Decifer, DeciferConfig
 from decifer.minicif import END_TOKEN, MinicifTokenizer, minicif_to_structure, parse_minicif
 from decifer.minicif_v2 import (
@@ -48,6 +48,20 @@ def representation_api(tokenizer_name):
     if tokenizer_name == "minicif_v2":
         return MinicifV2Tokenizer(), parse_minicif_v2, minicif_v2_to_structure, V2_END_TOKEN
     return MinicifTokenizer(), parse_minicif, minicif_to_structure, END_TOKEN
+
+
+def compatible_evaluation_indices(h5_path, config):
+    block_size = config.get("block_size")
+    if block_size is None:
+        return None
+    condition_tokens = (
+        int(config.get("condition_n_tokens", 1))
+        if config.get("condition") and not config.get("condition_cross_attention")
+        else 0
+    )
+    max_record_length = int(block_size) + 1 - condition_tokens
+    lengths = h5_record_token_lengths(h5_path)
+    return np.flatnonzero(lengths <= max_record_length)
 
 
 def rwp(reference, generated):
@@ -263,10 +277,25 @@ def evaluate_split(
     split, h5_path, model, tokenizer, parse_fn, structure_fn, end_token,
     matcher, xrd_kwargs, config, args,
 ):
-    dataset = DeciferDataset(h5_path, ["cif_name", "minicif_string", "cif_tokens", "xrd.q", "xrd.iq", "spacegroup", "crystal_system"])
+    compatible_indices = compatible_evaluation_indices(h5_path, config)
+    dataset = DeciferDataset(
+        h5_path,
+        ["cif_name", "minicif_string", "cif_tokens", "xrd.q", "xrd.iq", "spacegroup", "crystal_system"],
+        indices=compatible_indices,
+    )
+    if compatible_indices is not None:
+        n_total = len(h5_record_token_lengths(h5_path))
+        n_excluded = n_total - len(compatible_indices)
+        if n_excluded:
+            print(
+                f"{h5_path}: excluding {n_excluded}/{n_total} reference structures "
+                "that exceed the checkpoint context window.",
+                flush=True,
+            )
     n_items = len(dataset) if args.max_items <= 0 else min(args.max_items, len(dataset))
     rows = []
     for sample_index in tqdm(range(n_items), desc=f"Evaluating {split}"):
+        source_sample_index = dataset.source_index(sample_index)
         item = dataset[sample_index]
         reference_minicif = item["minicif_string"]
         try:
@@ -276,7 +305,7 @@ def evaluate_split(
         except Exception as exc:
             rows.append({
                 "split": split,
-                "sample_index": sample_index,
+                "sample_index": source_sample_index,
                 "cif_name": item["cif_name"],
                 "rep": -1,
                 "prompt_mode": None,
@@ -294,7 +323,7 @@ def evaluate_split(
             for rep, generated_minicif in enumerate(candidates):
                 row = {
                     "split": split,
-                    "sample_index": sample_index,
+                    "sample_index": source_sample_index,
                     "cif_name": item["cif_name"],
                     "prompt_mode": prompt_mode,
                     "rep": rep,

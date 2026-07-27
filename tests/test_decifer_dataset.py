@@ -35,6 +35,18 @@ class DeciferDatasetTest(unittest.TestCase):
             self.assertEqual(dataset[1]["spacegroup"].item(), 225)
             self.assertIsNotNone(dataset.h5_file)
 
+    def test_indices_create_a_source_mapped_view(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "data.h5")
+            with h5py.File(path, "w") as h5:
+                h5.create_dataset("spacegroup", data=np.asarray([1, 2, 225], dtype=np.int32))
+
+            dataset = DeciferDataset(path, ["spacegroup"], indices=[0, 2])
+
+            self.assertEqual(len(dataset), 2)
+            self.assertEqual(dataset[1]["spacegroup"].item(), 225)
+            self.assertEqual(dataset.source_index(1), 2)
+
     def test_crystal_system_balanced_training_sampler_is_weighted(self):
         from bin.train import setup_datasets
 

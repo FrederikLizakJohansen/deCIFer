@@ -5,6 +5,18 @@ import torch
 from torch.utils.data import Dataset
 import numpy as np
 
+
+def h5_record_token_lengths(h5_path):
+    with h5py.File(h5_path, "r") as h5:
+        if "cif_token_length" in h5:
+            return np.asarray(h5["cif_token_length"], dtype=np.int64)
+        return np.fromiter(
+            (len(tokens) for tokens in h5["cif_tokenized"]),
+            dtype=np.int64,
+            count=len(h5["cif_tokenized"]),
+        )
+
+
 class DeciferDataset(Dataset):
 
     KEY_MAPPINGS = {
@@ -13,11 +25,12 @@ class DeciferDataset(Dataset):
         'xrd.iq': 'xrd_disc.iq',
     }
 
-    def __init__(self, h5_path, data_keys, lazy_open=False):
+    def __init__(self, h5_path, data_keys, lazy_open=False, indices=None):
         # Key mappings for backward compatibility
         self.h5_path = h5_path
         self.data_keys = data_keys
         self.lazy_open = lazy_open
+        self.indices = None if indices is None else np.asarray(indices, dtype=np.int64)
         self.h5_file = None
         self.data = {}
         self.dataset_length = 0
@@ -49,7 +62,17 @@ class DeciferDataset(Dataset):
             else:
                 raise TypeError(f"The key '{key}' does not correspond to an h5py.Dataset.")
 
-        self.dataset_length = len(next(iter(self.data.values())))
+        source_length = len(next(iter(self.data.values())))
+        if self.indices is None:
+            self.dataset_length = source_length
+        else:
+            if self.indices.ndim != 1:
+                raise ValueError("indices must be one-dimensional")
+            if self.indices.size and (
+                self.indices.min() < 0 or self.indices.max() >= source_length
+            ):
+                raise IndexError("dataset indices are out of range")
+            self.dataset_length = len(self.indices)
 
     def close(self):
         if self.h5_file is not None:
@@ -72,8 +95,12 @@ class DeciferDataset(Dataset):
     def __len__(self):
         return self.dataset_length
 
+    def source_index(self, idx):
+        return idx if self.indices is None else int(self.indices[idx])
+
     def __getitem__(self, idx):
         self._open_file()
+        idx = self.source_index(idx)
         data = {}
         for key in self.data_keys:
             sequence = self.data[key][idx]

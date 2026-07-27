@@ -175,6 +175,12 @@ python bin/audit_minicif_v2.py \
   --output minicif_v2_preflight.json
 ```
 
+Valid structures can still be too long for a particular model context. The
+audit reports these as `n_overlength_records`, and record-mode training excludes
+them for that config while preserving them in the HDF5 dataset for larger
+models. Exclusion counts are printed at startup and stored in
+`run_metadata.yaml`.
+
 Train the small pipeline check or the recommended medium baseline:
 
 ```bash
