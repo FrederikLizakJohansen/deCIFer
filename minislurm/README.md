@@ -30,19 +30,19 @@ intentional larger-context dataset.
 
 Defaults are `data/noma` for the raw gzip source,
 `data/noma_minicif_v2` for prepared data, and
-`configs/minicif_v2_medium_config.yaml` for training. Override them through
+`configs/config_v2/peak/standard/medium.yaml` for training. Override them through
 environment variables:
 
 ```bash
 RAW_DIR=data/noma OUT_DIR=data/noma_minicif_v2 \
   sbatch minislurm/prepare_minicif_v2_dataset.sh
 
-CONFIG=configs/minicif_v2_small_config.yaml \
+CONFIG=configs/config_v2/peak/standard/small.yaml \
   sbatch minislurm/train_minicif_v2.sh
 
-CHECKPOINT=minicif_v2_model_small/ckpt.pt \
+CHECKPOINT=models/minicif_v2/peak/standard/small/ckpt.pt \
 DATASET_DIR=data/noma_minicif_v2 \
-OUT_DIR=minicif_v2_model_small/minicif_report \
+OUT_DIR=models/minicif_v2/peak/standard/small/minicif_report \
   sbatch minislurm/evaluate_minicif_v2.sh
 ```
 
@@ -50,7 +50,7 @@ Before the first full job, run the short CUDA integration config:
 
 ```bash
 sbatch minislurm/train_minicif_v2.sh \
-  --config configs/minicif_v2_hybrid_artifacts_smoke.yaml
+  --config configs/config_v2/smoke/hybrid.yaml
 ```
 
 This performs only a few optimizer steps and is not intended to produce a useful
@@ -61,14 +61,14 @@ samples artifacts during training:
 
 ```bash
 sbatch minislurm/train_minicif_v2.sh \
-  --config configs/minicif_v2_medium_hybrid_artifacts.yaml
+  --config configs/config_v2/hybrid/standard/medium.yaml
 ```
 
 For deterministic artifact evaluation:
 
 ```bash
-CHECKPOINT=minicif_v2_model_medium_hybrid_artifacts/ckpt.pt \
-OUT_DIR=minicif_v2_model_medium_hybrid_artifacts/minicif_report \
+CHECKPOINT=models/minicif_v2/hybrid/standard/medium/ckpt.pt \
+OUT_DIR=models/minicif_v2/hybrid/standard/medium/minicif_report \
 sbatch minislurm/evaluate_minicif_v2.sh \
   --artifact-config configs/xrd_artifacts/full_evaluation.yaml
 ```
@@ -84,7 +84,7 @@ Run the preflight directly on a login/CPU node:
 
 ```bash
 python bin/audit_minicif_v2.py \
-  --config configs/minicif_v2_medium_config.yaml \
+  --config configs/config_v2/peak/standard/medium.yaml \
   --max-items 100 \
   --output minicif_v2_preflight.json
 ```
@@ -93,12 +93,12 @@ Optional Fourier peak-encoder pretraining uses:
 
 ```bash
 sbatch minislurm/pretrain_pxrd_encoder.sh \
-  --config configs/minicif_v2_pxrd_encoder_pretrain.yaml
+  --config configs/config_v2/pretrain/peak_fourier_medium.yaml
 ```
 
 Set `pretrained_condition_encoder_path` in a v2 training config to the resulting
-`minicif_v2_pxrd_encoder_pretrain/pxrd_encoder_pretrain.pt` only when the encoder
-width and Fourier-token settings match.
+`models/minicif_v2/pretrain/peak_fourier_medium/pxrd_encoder_pretrain.pt` only
+when the encoder width and Fourier-token settings match.
 
 Hybrid encoder pretraining with the full artifact profile uses:
 

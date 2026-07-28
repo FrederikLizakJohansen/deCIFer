@@ -1,7 +1,4 @@
-# Recommended minicif_v2 research baseline. Scale only after measuring validation
-# structure/composition accuracy and tokens/s for this model.
-
-out_dir: 'minicif_v2_model_medium'
+out_dir: 'models/minicif_v2/peak/standard/large'
 eval_interval: 500
 eval_iters_train: 100
 eval_iters_val: 100
@@ -13,7 +10,6 @@ device: 'cuda'
 dtype: 'bfloat16'
 compile: False
 fused_optimizer: True
-
 always_save_checkpoint: False
 validate: True
 
@@ -21,23 +17,23 @@ dataset: 'data/noma_minicif_v2'
 tokenizer: 'minicif_v2'
 batching_strategy: 'record'
 length_bucket_size: 4096
-batch_size: 128
-batch_token_budget: 32768
+batch_size: 64
+batch_token_budget: 24576
 block_size: 768
 num_workers_dataloader: 8
 sampling_strategy: 'crystal_system_balanced'
 
-n_layer: 6
-n_head: 6
-n_embd: 384
+n_layer: 8
+n_head: 8
+n_embd: 512
 dropout: 0.1
 typed_token_heads: True
 
-learning_rate: 4e-4
-gradient_accumulation_steps: 4
+learning_rate: 3e-4
+gradient_accumulation_steps: 6
 max_iters: 100_000
 lr_decay_iters: 100_000
-min_lr: 4e-5
+min_lr: 3e-5
 weight_decay: 0.15
 beta2: 0.99
 warmup_iters: 1000
@@ -45,8 +41,9 @@ early_stopping_patience: 20
 
 condition: True
 condition_encoder: 'peak_fourier'
-condition_n_tokens: 24
-peak_fourier_bands: 10
+condition_n_tokens: 32
+peak_encoder_hidden_dim: 256
+peak_fourier_bands: 12
 max_peak_list_peaks: 512
 condition_cross_attention: True
 condition_cross_attention_every_n_layers: 2

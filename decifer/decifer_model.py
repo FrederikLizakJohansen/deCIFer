@@ -363,6 +363,22 @@ class PxrdConvEncoder(nn.Module):
         return self.proj(x) + self.token_pos
 
 
+def _build_pxrd_latent_layers(config: DeciferConfig) -> nn.ModuleList:
+    return nn.ModuleList([
+        nn.TransformerEncoderLayer(
+            d_model=config.n_embd,
+            nhead=config.n_head,
+            dim_feedforward=4 * config.n_embd,
+            dropout=config.dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+            bias=config.bias,
+        )
+        for _ in range(config.pxrd_encoder_layers)
+    ])
+
+
 class PxrdPyramidEncoder(nn.Module):
     """Hierarchical dense-PXRD encoder with early q-axis downsampling."""
 
@@ -404,19 +420,7 @@ class PxrdPyramidEncoder(nn.Module):
         self.token_pos = nn.Parameter(
             torch.zeros(config.condition_n_tokens, config.n_embd)
         )
-        self.latent_layers = nn.ModuleList([
-            nn.TransformerEncoderLayer(
-                d_model=config.n_embd,
-                nhead=config.n_head,
-                dim_feedforward=4 * config.n_embd,
-                dropout=config.dropout,
-                activation="gelu",
-                batch_first=True,
-                norm_first=True,
-                bias=config.bias,
-            )
-            for _ in range(config.pxrd_encoder_layers)
-        ])
+        self.latent_layers = _build_pxrd_latent_layers(config)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.conv(x.unsqueeze(1))
@@ -496,6 +500,7 @@ class PeakListEncoder(nn.Module):
         self.out_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.n_head = config.n_head
         self.n_embd = config.n_embd
+        self.latent_layers = _build_pxrd_latent_layers(config)
 
     def forward(
         self,
@@ -530,7 +535,10 @@ class PeakListEncoder(nn.Module):
         att = torch.where(torch.isfinite(att), att, torch.zeros_like(att))
         y = att @ v
         y = y.transpose(1, 2).contiguous().view(B, self.n_tokens, C)
-        return self.out_proj(y)
+        y = self.out_proj(y)
+        for layer in self.latent_layers:
+            y = layer(y)
+        return y
 
 
 class FourierPeakEncoder(nn.Module):
@@ -555,19 +563,7 @@ class FourierPeakEncoder(nn.Module):
         self.k_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.v_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.out_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-        self.latent_layers = nn.ModuleList([
-            nn.TransformerEncoderLayer(
-                d_model=config.n_embd,
-                nhead=config.n_head,
-                dim_feedforward=4 * config.n_embd,
-                dropout=config.dropout,
-                activation="gelu",
-                batch_first=True,
-                norm_first=True,
-                bias=config.bias,
-            )
-            for _ in range(config.pxrd_encoder_layers)
-        ])
+        self.latent_layers = _build_pxrd_latent_layers(config)
 
     def forward(
         self,
@@ -651,6 +647,8 @@ class HybridPxrdEncoder(nn.Module):
             self.dense_encoder = PxrdPatchEncoder(dense_config)
         elif config.hybrid_dense_encoder == "conv":
             self.dense_encoder = PxrdConvEncoder(dense_config)
+        elif config.hybrid_dense_encoder == "conv_pyramid":
+            self.dense_encoder = PxrdPyramidEncoder(dense_config)
         else:
             raise ValueError(f"unknown hybrid_dense_encoder: {config.hybrid_dense_encoder}")
         self.peak_encoder = PeakListEncoder(config, n_tokens=config.peak_condition_n_tokens)

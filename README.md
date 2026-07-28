@@ -178,7 +178,7 @@ array integrity. It exits nonzero on any failure.
 
 ```bash
 python bin/audit_minicif_v2.py \
-  --config configs/minicif_v2_small_config.yaml \
+  --config configs/config_v2/peak/standard/small.yaml \
   --max-items 100 \
   --output minicif_v2_preflight.json
 ```
@@ -199,13 +199,14 @@ clean and deterministic.
 Run the full-artifact pipeline check and recommended hybrid model:
 
 ```bash
-python bin/train.py --config configs/minicif_v2_hybrid_artifacts_smoke.yaml
-python bin/train.py --config configs/minicif_v2_medium_hybrid_artifacts.yaml
+python bin/train.py --config configs/config_v2/smoke/hybrid.yaml
+python bin/train.py --config configs/config_v2/hybrid/standard/medium.yaml
 ```
 
 The smoke config runs only two optimizer steps and is not a scientific baseline.
-The standard `minicif_v2_small_config.yaml` and
-`minicif_v2_medium_config.yaml` remain the faster sparse Fourier peak baselines.
+The complete v2 matrix lives under `configs/config_v2`. It provides small,
+medium, and large peak, dense, and hybrid models with standard and
+encoder-heavy parameter allocations.
 Full profile artifacts require a `dense` or `hybrid` condition encoder because
 background and detector effects cannot be represented by a sparse peak list.
 The training artifact YAML must not set a fixed seed.
@@ -217,7 +218,7 @@ formula so composition can be validated deterministically.
 
 ```bash
 python bin/visualize_minicif.py \
-  --checkpoint minicif_v2_model_medium_hybrid_artifacts/ckpt.pt \
+  --checkpoint models/minicif_v2/hybrid/standard/medium/ckpt.pt \
   --dataset-dir data/noma_minicif_v2 \
   --artifact-config configs/xrd_artifacts/full_evaluation.yaml \
   --prompt-modes pxrd pxrd-elements pxrd-stoichiometry \

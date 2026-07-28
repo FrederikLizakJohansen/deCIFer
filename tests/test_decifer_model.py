@@ -468,6 +468,40 @@ class DeciferModelTest(unittest.TestCase):
         self.assertEqual(logits.shape, (1, idx.size(1), tokenizer.vocab_size))
         self.assertIsNotNone(loss)
 
+    def test_encoder_heavy_hybrid_runs_forward_and_configures_optimizer(self):
+        tokenizer = MinicifTokenizer()
+        model = Decifer(DeciferConfig(
+            tokenizer="minicif",
+            vocab_size=tokenizer.vocab_size,
+            block_size=16,
+            n_layer=1,
+            n_head=1,
+            n_embd=16,
+            condition=True,
+            condition_encoder="hybrid",
+            hybrid_dense_encoder="conv_pyramid",
+            condition_n_tokens=4,
+            dense_condition_n_tokens=2,
+            peak_condition_n_tokens=2,
+            peak_encoder_hidden_dim=8,
+            pxrd_encoder_channels=8,
+            pxrd_encoder_layers=1,
+            condition_cross_attention=True,
+        ))
+        idx = torch.tensor([tokenizer.encode(tokenizer.tokenize_minicif("<mcif> Na "))])
+        cond = {
+            "dense": torch.randn(1, 32),
+            "peak_q": torch.tensor([[1.0, 2.0, 0.0]], dtype=torch.float32),
+            "peak_iq": torch.tensor([[1.0, 0.5, 0.0]], dtype=torch.float32),
+        }
+
+        logits, loss = model(idx, cond, idx.clone(), [[0]])
+        optimizer = model.configure_optimizers(0.1, 1e-3, (0.9, 0.95))
+
+        self.assertEqual(logits.shape, (1, idx.size(1), tokenizer.vocab_size))
+        self.assertIsNotNone(loss)
+        self.assertEqual(len(optimizer.param_groups), 2)
+
     def test_hybrid_cross_attention_handles_block_without_start_token(self):
         tokenizer = MinicifTokenizer()
         model = Decifer(DeciferConfig(

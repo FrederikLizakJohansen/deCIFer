@@ -1,6 +1,6 @@
 # Optional contrastive initialization for the Fourier peak encoder used by minicif_v2.
 
-out_dir: 'minicif_v2_pxrd_encoder_pretrain'
+out_dir: 'models/minicif_v2/pretrain/peak_fourier_medium'
 dataset: 'data/noma_minicif_v2'
 split: 'train'
 resume: True

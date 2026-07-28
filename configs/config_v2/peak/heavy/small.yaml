@@ -1,49 +1,51 @@
-# Short CUDA integration check. This validates the full v2 training path but is
-# too small to produce a useful checkpoint or performance result.
-
-out_dir: 'minicif_v2_gpu_smoke'
-eval_interval: 100
-log_interval: 1
-metrics_log_interval: 1
+out_dir: 'models/minicif_v2/peak/heavy/small'
+eval_interval: 500
+eval_iters_train: 100
+eval_iters_val: 100
+log_interval: 20
+metrics_log_interval: 20
 init_from: 'scratch'
 
 device: 'cuda'
 dtype: 'bfloat16'
 compile: False
 fused_optimizer: True
-
 always_save_checkpoint: False
-validate: False
+validate: True
 
 dataset: 'data/noma_minicif_v2'
 tokenizer: 'minicif_v2'
 batching_strategy: 'record'
-length_bucket_size: 256
-batch_size: 8
-batch_token_budget: 2048
+length_bucket_size: 4096
+batch_size: 128
+batch_token_budget: 24576
 block_size: 768
-num_workers_dataloader: 0
-sampling_strategy: 'random'
+num_workers_dataloader: 8
+sampling_strategy: 'crystal_system_balanced'
 
 n_layer: 2
 n_head: 4
-n_embd: 64
+n_embd: 128
 dropout: 0.1
 typed_token_heads: True
 
-learning_rate: 1e-3
-gradient_accumulation_steps: 1
-max_iters: 2
-decay_lr: False
+learning_rate: 8e-4
+gradient_accumulation_steps: 4
+max_iters: 100_000
+lr_decay_iters: 100_000
+min_lr: 8e-5
 weight_decay: 0.1
 beta2: 0.99
+warmup_iters: 1000
+early_stopping_patience: 20
 
 condition: True
 condition_encoder: 'peak_fourier'
-condition_n_tokens: 8
-peak_fourier_bands: 4
-peak_encoder_hidden_dim: 64
-max_peak_list_peaks: 256
+condition_n_tokens: 16
+peak_encoder_hidden_dim: 128
+peak_fourier_bands: 8
+pxrd_encoder_layers: 4
+max_peak_list_peaks: 512
 condition_cross_attention: True
 condition_cross_attention_every_n_layers: 1
 condition_dropout_prob: 0.1
@@ -52,8 +54,8 @@ minicif_constrained_decoding: True
 
 qmin: 0.0
 qmax: 10.0
-q_shift_range_min: -0.01
-q_shift_range_max: 0.01
+q_shift_range_min: -0.02
+q_shift_range_max: 0.02
 q_scale_range_min: 0.998
 q_scale_range_max: 1.002
 intensity_scale_range_min: 0.9

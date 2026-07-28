@@ -11,6 +11,7 @@ logs/
 experiments/
 experiments_old/
 cl_experiments/
+models/
 
 # Ignore notebook for testing
 notebooks_testing/

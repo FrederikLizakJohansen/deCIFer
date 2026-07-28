@@ -85,6 +85,10 @@ This file lists the core minicif changes relative to the original deCIFer workfl
   assigns about 55% of all parameters to PXRD encoding.
 - Peak-list q positions are normalized against the configured training q range rather than the per-sample maximum q, preserving absolute q-position information.
 - Added a hybrid PXRD encoder that concatenates dense-trace tokens and peak-list tokens.
+- Encoder-heavy hybrid models use a hierarchical dense branch and latent
+  self-attention in both PXRD branches.
+- Organized the v2 training matrix under `configs/config_v2`, with peak, dense,
+  and hybrid representations in standard/heavy small, medium, and large tiers.
 - Condition tokens are inserted at each `<mcif>` start, preserving packed-batch condition alignment.
 - Added optional true cross-attention from generated minicif tokens into PXRD memory tokens through `condition_cross_attention`.
 - Added `condition_cross_attention_every_n_layers` to control how often transformer blocks attend to PXRD memory.

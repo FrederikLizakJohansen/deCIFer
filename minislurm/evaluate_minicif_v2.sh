@@ -6,9 +6,9 @@
 #SBATCH --mem-per-cpu=12G
 #SBATCH --output=logs/minicif_v2_eval_%j.out
 
-CHECKPOINT="${CHECKPOINT:-minicif_v2_model_medium/ckpt.pt}"
+CHECKPOINT="${CHECKPOINT:-models/minicif_v2/peak/standard/medium/ckpt.pt}"
 DATASET_DIR="${DATASET_DIR:-data/noma_minicif_v2}"
-OUT_DIR="${OUT_DIR:-minicif_v2_model_medium/minicif_report}"
+OUT_DIR="${OUT_DIR:-models/minicif_v2/peak/standard/medium/minicif_report}"
 
 mkdir -p logs
 export PYTHONPATH="$(pwd):${PYTHONPATH:-}"

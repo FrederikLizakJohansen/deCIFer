@@ -10,114 +10,97 @@ python -m pip install -e .
 sbatch minislurm/prepare_minicif_v2_dataset.sh \
   --xrd-backend braggcalculator
 python bin/audit_minicif_v2.py \
-  --config configs/minicif_v2_medium_hybrid_artifacts.yaml \
+  --config configs/config_v2/hybrid/standard/medium.yaml \
   --max-items 100 \
   --output minicif_v2_preflight.json
 ```
 
-The preparation job reads `data/noma`, writes `data/noma_minicif_v2`, and
-rejects targets longer than 769 tokens before calculating diffraction. It stores
-clean sparse Bragg peaks. Full backgrounds, broadening, noise, detector effects,
-and other artifacts are generated on the GPU during training, so an existing
-clean minicif v2 dataset does not need to be regenerated.
+Preparation reads `data/noma`, writes `data/noma_minicif_v2`, and rejects
+targets longer than 769 tokens before diffraction calculation. The dataset
+stores clean sparse Bragg peaks. Dense-profile artifacts are generated during
+training.
 
 ## 2. Train
 
-Run the two-step artifact-path smoke test, then the medium model:
+Run the two-step artifact smoke test:
 
 ```bash
 sbatch minislurm/train_minicif_v2.sh \
-  --config configs/minicif_v2_hybrid_artifacts_smoke.yaml
-sbatch minislurm/train_minicif_v2.sh \
-  --config configs/minicif_v2_medium_hybrid_artifacts.yaml
+  --config configs/config_v2/smoke/hybrid.yaml
 ```
 
-The medium checkpoint is written to
-`minicif_v2_model_medium_hybrid_artifacts/ckpt.pt`.
+Production configs follow:
 
-The three PXRD representation variants are:
+```text
+configs/config_v2/{peak,dense,hybrid}/{standard,heavy}/{small,medium,large}.yaml
+```
 
-| Config | PXRD input |
-| --- | --- |
-| `minicif_v2_medium_config.yaml` | sparse q positions and peak intensities |
-| `minicif_v2_medium_dense_artifacts.yaml` | continuous PXRD intensity trace |
-| `minicif_v2_medium_hybrid_artifacts.yaml` | continuous trace plus sparse peaks |
-
-Train the dense-only member with:
+For example:
 
 ```bash
+# Sparse Fourier peaks, standard medium decoder
 sbatch minislurm/train_minicif_v2.sh \
-  --config configs/minicif_v2_medium_dense_artifacts.yaml
-```
+  --config configs/config_v2/peak/standard/medium.yaml
 
-An additional encoder-allocation experiment assigns about 4.1M of its 7.7M
-parameters to a hierarchical dense-PXRD encoder and uses a compact three-layer
-minicif decoder:
-
-```bash
+# Continuous PXRD, encoder-heavy medium model
 sbatch minislurm/train_minicif_v2.sh \
-  --config configs/minicif_v2_dense_encoder_heavy_artifacts.yaml
-```
+  --config configs/config_v2/dense/heavy/medium.yaml
 
-Compare the dense-only and encoder-heavy configs to isolate parameter allocation.
-Compare the sparse, dense-only, and hybrid configs to study PXRD representation.
-
-The equivalent encoder-heavy sparse experiment assigns about 4.3M of its 7.9M
-parameters to Fourier-encoded peak positions and intensities:
-
-```bash
+# Continuous PXRD plus sparse peaks, encoder-heavy large model
 sbatch minislurm/train_minicif_v2.sh \
-  --config configs/minicif_v2_peak_fourier_encoder_heavy.yaml
+  --config configs/config_v2/hybrid/heavy/large.yaml
 ```
 
-Optional standalone PXRD encoder pretraining:
+Checkpoints are organized under:
 
-```bash
-sbatch minislurm/pretrain_pxrd_encoder.sh \
-  --config configs/minicif_pxrd_encoder_pretrain_bragg_artifacts.yaml
+```text
+models/minicif_v2/{representation}/{allocation}/{size}/ckpt.pt
 ```
+
+Dense and hybrid configs sample the full BraggCalculator artifact profile from
+`configs/xrd_artifacts/full_training.yaml`. Peak configs apply q-position and
+intensity perturbations to sparse peaks.
 
 ## 3. Evaluate
 
-Use the fixed-seed artifact profile for repeatable artifact evaluation:
+Evaluate the default peak-standard-medium model:
 
 ```bash
-CHECKPOINT=minicif_v2_model_medium_hybrid_artifacts/ckpt.pt \
+sbatch minislurm/evaluate_minicif_v2.sh
+```
+
+Evaluate another model with deterministic artifacts:
+
+```bash
+CHECKPOINT=models/minicif_v2/hybrid/standard/medium/ckpt.pt \
 DATASET_DIR=data/noma_minicif_v2 \
-OUT_DIR=minicif_v2_model_medium_hybrid_artifacts/minicif_report \
+OUT_DIR=models/minicif_v2/hybrid/standard/medium/minicif_report \
 sbatch minislurm/evaluate_minicif_v2.sh \
   --artifact-config configs/xrd_artifacts/full_evaluation.yaml
 ```
 
-Remove `--artifact-config` to evaluate with clean simulated conditions.
+Omit `--artifact-config` for clean simulated conditions.
 
-To export combined reference/generated PXRD and structure examples:
+To export reference/generated PXRD and structure examples during evaluation:
 
 ```bash
 python bin/visualize_minicif.py \
-  --checkpoint minicif_v2_model_medium/ckpt.pt \
+  --checkpoint models/minicif_v2/peak/standard/medium/ckpt.pt \
   --dataset-dir data/noma_minicif_v2 \
-  --out-dir minicif_v2_model_medium/minicif_report \
+  --out-dir models/minicif_v2/peak/standard/medium/minicif_report \
   --splits test \
   --prompt-modes pxrd-elements \
   --num-reps 8 \
   --plot-examples 6
 ```
 
-Figures are written to `OUT_DIR/examples/test/`. Each figure uses the valid
-candidate with the lowest Rwp for that sample and prompt mode.
-
-To plot examples from an evaluation that has already finished:
+To plot examples from an existing evaluation:
 
 ```bash
 python bin/plot_minicif_examples.py \
-  --report-dir minicif_v2_model_medium/minicif_report \
+  --report-dir models/minicif_v2/peak/standard/medium/minicif_report \
   --num-examples 8 \
   --selection random \
   --splits test \
   --prompt-modes pxrd-elements
 ```
-
-This reads the existing evaluation CSV and summary JSON. It does not load the
-model or generate new structures. Figures and an `examples.csv` manifest are
-written under `REPORT_DIR/evaluation_examples/`.

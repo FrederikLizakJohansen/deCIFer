@@ -7,7 +7,7 @@
 #SBATCH --mem-per-cpu=16G
 #SBATCH --output=logs/minicif_v2_train_%j.out
 
-CONFIG="${CONFIG:-configs/minicif_v2_medium_config.yaml}"
+CONFIG="${CONFIG:-configs/config_v2/peak/standard/medium.yaml}"
 ARGS=("$@")
 HAS_CONFIG=0
 for ((i = 0; i < ${#ARGS[@]}; i++)); do
