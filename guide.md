@@ -55,3 +55,34 @@ sbatch minislurm/evaluate_minicif_v2.sh \
 ```
 
 Remove `--artifact-config` to evaluate with clean simulated conditions.
+
+To export combined reference/generated PXRD and structure examples:
+
+```bash
+python bin/visualize_minicif.py \
+  --checkpoint minicif_v2_model_medium/ckpt.pt \
+  --dataset-dir data/noma_minicif_v2 \
+  --out-dir minicif_v2_model_medium/minicif_report \
+  --splits test \
+  --prompt-modes pxrd-elements \
+  --num-reps 8 \
+  --plot-examples 6
+```
+
+Figures are written to `OUT_DIR/examples/test/`. Each figure uses the valid
+candidate with the lowest Rwp for that sample and prompt mode.
+
+To plot examples from an evaluation that has already finished:
+
+```bash
+python bin/plot_minicif_examples.py \
+  --report-dir minicif_v2_model_medium/minicif_report \
+  --num-examples 8 \
+  --selection random \
+  --splits test \
+  --prompt-modes pxrd-elements
+```
+
+This reads the existing evaluation CSV and summary JSON. It does not load the
+model or generate new structures. Figures and an `examples.csv` manifest are
+written under `REPORT_DIR/evaluation_examples/`.

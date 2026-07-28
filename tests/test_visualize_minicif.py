@@ -6,6 +6,7 @@ import unittest
 import h5py
 import numpy as np
 import pandas as pd
+from pymatgen.core import Lattice, Structure
 
 from decifer.minicif import MinicifTokenizer
 from decifer.minicif_v2 import MinicifV2Tokenizer
@@ -18,9 +19,41 @@ prompt_from_minicif = visualize_minicif.prompt_from_minicif
 summarize = visualize_minicif.summarize
 compatible_evaluation_indices = visualize_minicif.compatible_evaluation_indices
 plot_rwp_distribution = visualize_minicif.plot_rwp_distribution
+save_evaluation_example = visualize_minicif.save_evaluation_example
 
 
 class VisualizeMinicifTest(unittest.TestCase):
+    def test_save_evaluation_example_writes_split_specific_figure(self):
+        structure = Structure(Lattice.cubic(3.0), ["Na"], [[0, 0, 0]])
+        reference_iq = np.asarray([1.0, 0.5, 0.0])
+        rows = [{
+            "rep": 0,
+            "rwp": 0.1,
+            "generated_iq": np.asarray([0.9, 0.4, 0.0]),
+            "generated_structure": structure,
+        }]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = save_evaluation_example(
+                tmpdir,
+                "test",
+                42,
+                "pxrd-elements",
+                {"qmin": 0.0, "qstep": 0.1},
+                reference_iq,
+                structure,
+                rows,
+                "toy",
+                1,
+            )
+
+            self.assertTrue(
+                path.endswith(
+                    "examples/test/sample_0000042_pxrd-elements.png"
+                )
+            )
+            self.assertTrue(os.path.isfile(path))
+
     def test_evaluation_excludes_references_beyond_checkpoint_context(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "test.h5")

@@ -40,7 +40,7 @@ from decifer.pxrd import (
     nyquist_qstep,
     q_range_to_two_theta_range,
 )
-from bin.test_minicif_realtime import refine_best_candidate
+from bin.test_minicif_realtime import refine_best_candidate, save_fit_figure
 from bin.train import TrainConfig
 
 PROMPT_MODE_ALIASES = {
@@ -261,6 +261,40 @@ def structure_to_continuous_xrd(structure, xrd_kwargs, wavelength):
     return iq_cont
 
 
+def save_evaluation_example(
+    out_dir,
+    split,
+    source_sample_index,
+    prompt_mode,
+    xrd_kwargs,
+    reference_iq,
+    reference_structure,
+    figure_rows,
+    sample_name,
+    figure_supercell,
+):
+    path = os.path.join(
+        out_dir,
+        "examples",
+        split,
+        f"sample_{source_sample_index:07d}_{prompt_mode}.png",
+    )
+    q_grid = (
+        xrd_kwargs["qmin"]
+        + np.arange(len(reference_iq)) * xrd_kwargs["qstep"]
+    )
+    save_fit_figure(
+        path,
+        q_grid,
+        reference_iq,
+        reference_structure,
+        figure_rows,
+        sample_name,
+        figure_supercell,
+    )
+    return path
+
+
 def repeat_condition(cond_vec, batch_size, device):
     if cond_vec is None:
         return None
@@ -296,7 +330,7 @@ def generate_candidates(model, prompt, cond_vec, args, tokenizer):
 
 def evaluate_split(
     split, h5_path, model, tokenizer, parse_fn, structure_fn, end_token,
-    matcher, xrd_kwargs, config, args, artifact_spec=None,
+    matcher, xrd_kwargs, config, args, artifact_spec=None, out_dir="",
 ):
     compatible_indices = compatible_evaluation_indices(h5_path, config)
     dataset = DeciferDataset(
@@ -357,6 +391,8 @@ def evaluate_split(
             candidates = generate_candidates(model, prompt, cond, args, tokenizer)
             mode_rows = []
             refine_inputs = []
+            figure_rows = []
+            plot_example = args.plot_examples > 0 and sample_index < args.plot_examples
             for rep, generated_minicif in enumerate(candidates):
                 row = {
                     "split": split,
@@ -402,6 +438,13 @@ def evaluate_split(
                         "match": match,
                         "composition_match": generated_structure.composition.reduced_formula == reference_structure.composition.reduced_formula,
                     })
+                    if plot_example:
+                        figure_rows.append({
+                            "rep": rep,
+                            "rwp": row["rwp"],
+                            "generated_iq": generated_iq,
+                            "generated_structure": generated_structure,
+                        })
                     if args.refine_best:
                         refine_inputs.append({
                             "rep": rep,
@@ -423,6 +466,29 @@ def evaluate_split(
                         if row["rep"] == refinement["source_rep"]:
                             row["refined_rwp"] = refinement["rwp_after"]
                             break
+                    if (
+                        plot_example
+                        and refinement["rwp_after"] <= refinement["rwp_before"]
+                    ):
+                        figure_rows.append({
+                            "rep": f"refined {refinement['source_rep']}",
+                            "rwp": refinement["rwp_after"],
+                            "generated_iq": refinement["generated_iq"],
+                            "generated_structure": refinement["generated_structure"],
+                        })
+            if plot_example and figure_rows:
+                save_evaluation_example(
+                    out_dir,
+                    split,
+                    source_sample_index,
+                    prompt_mode,
+                    xrd_kwargs,
+                    reference_iq,
+                    reference_structure,
+                    figure_rows,
+                    f"{item['cif_name']} | {prompt_mode}",
+                    args.figure_supercell,
+                )
             rows.extend(mode_rows)
     return pd.DataFrame(rows)
 
@@ -608,6 +674,18 @@ def main():
     parser.add_argument("--refine-best", action="store_true", help="Refine candidate lattices against the PXRD (coarse scale scan + local refine) and report refined Rwp")
     parser.add_argument("--refine-topk", type=int, default=4, help="Number of top-Rwp candidates to refine per sample for --refine-best")
     parser.add_argument("--refine-max-nfev", type=int, default=30, help="Maximum simulator evaluations per candidate for --refine-best")
+    parser.add_argument(
+        "--plot-examples",
+        type=int,
+        default=0,
+        help="Plot the best generated PXRD and structure for the first N samples per split",
+    )
+    parser.add_argument(
+        "--figure-supercell",
+        type=int,
+        default=1,
+        help="Supercell repeat count for example structure panels",
+    )
     parser.add_argument("--qmin", type=float, default=None)
     parser.add_argument("--qmax", type=float, default=None)
     parser.add_argument("--qstep", type=float, default=None)
@@ -655,7 +733,7 @@ def main():
         path = dataset_path(dataset_dir, split)
         frames.append(evaluate_split(
             split, path, model, tokenizer, parse_fn, structure_fn, end_token,
-            matcher, xrd_kwargs, config, args, artifact_spec,
+            matcher, xrd_kwargs, config, args, artifact_spec, out_dir,
         ))
     results = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     summary = summarize(results)
