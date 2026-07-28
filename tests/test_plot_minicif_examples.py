@@ -98,6 +98,27 @@ class PlotMinicifExamplesTest(unittest.TestCase):
             self.assertTrue(os.path.isfile(manifest_path))
             self.assertEqual(len(pd.read_csv(manifest_path)), 1)
 
+    def test_default_selection_can_cover_every_crystal_system(self):
+        candidates = pd.DataFrame([
+            {
+                "sample_index": crystal_system,
+                "reference_crystal_system": crystal_system,
+                "rwp": 0.1 * crystal_system,
+            }
+            for crystal_system in range(1, 8)
+            for _ in range(2)
+        ])
+
+        selected = plot_minicif_examples.choose_examples(
+            candidates,
+            count=7,
+            selection="crystal-system",
+            seed=1337,
+        )
+
+        self.assertEqual(len(selected), 7)
+        self.assertEqual(set(selected["reference_crystal_system"]), set(range(1, 8)))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -227,7 +227,9 @@ python bin/visualize_minicif.py \
 
 The evaluation artifact profile has a fixed seed. Each source record receives a
 repeatable, distinct artifact realization. Omit `--artifact-config` for clean
-evaluation.
+evaluation. Reports include linear-scale learning curves, overall and
+per-crystal-system metrics, best-Rwp distributions and CDFs, Rwp-versus-RMSD,
+and default PXRD-plus-structure examples covering the available crystal systems.
 
 The v2 configs use record-aligned, length-bucketed token-budget batches, sparse
 Fourier or hybrid PXRD conditioning, cross-attention, typed vocabulary heads,

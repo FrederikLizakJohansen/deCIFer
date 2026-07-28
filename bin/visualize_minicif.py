@@ -53,6 +53,16 @@ PROMPT_MODE_ALIASES = {
     "pxrd-stoichiometry-cs-sg": "formula-cs-sg",
 }
 
+CRYSTAL_SYSTEM_NAMES = {
+    1: "triclinic",
+    2: "monoclinic",
+    3: "orthorhombic",
+    4: "tetragonal",
+    5: "trigonal",
+    6: "hexagonal",
+    7: "cubic",
+}
+
 
 def representation_api(tokenizer_name):
     if tokenizer_name == "minicif_v2":
@@ -348,6 +358,20 @@ def evaluate_split(
                 flush=True,
             )
     n_items = len(dataset) if args.max_items <= 0 else min(args.max_items, len(dataset))
+    source_indices = (
+        np.arange(n_items, dtype=np.int64)
+        if dataset.indices is None
+        else dataset.indices[:n_items]
+    )
+    crystal_system_values = np.asarray(dataset.data["crystal_system"])[source_indices]
+    available_crystal_systems = [
+        crystal_system
+        for crystal_system in CRYSTAL_SYSTEM_NAMES
+        if crystal_system in set(int(value) for value in crystal_system_values)
+    ]
+    example_targets = set(available_crystal_systems[:args.plot_examples])
+    plotted_examples = {mode: set() for mode in args.prompt_modes}
+    plotted_example_counts = {mode: 0 for mode in args.prompt_modes}
     rows = []
     for sample_index in tqdm(range(n_items), desc=f"Evaluating {split}"):
         source_sample_index = dataset.source_index(sample_index)
@@ -392,7 +416,21 @@ def evaluate_split(
             mode_rows = []
             refine_inputs = []
             figure_rows = []
-            plot_example = args.plot_examples > 0 and sample_index < args.plot_examples
+            reference_crystal_system = int(reference_parsed.crystal_system)
+            missing_target = (
+                reference_crystal_system in example_targets
+                and reference_crystal_system not in plotted_examples[prompt_mode]
+            )
+            targets_complete = example_targets.issubset(
+                plotted_examples[prompt_mode]
+            )
+            plot_example = args.plot_examples > 0 and (
+                missing_target
+                or (
+                    targets_complete
+                    and plotted_example_counts[prompt_mode] < args.plot_examples
+                )
+            )
             for rep, generated_minicif in enumerate(candidates):
                 row = {
                     "split": split,
@@ -486,9 +524,14 @@ def evaluate_split(
                     reference_iq,
                     reference_structure,
                     figure_rows,
-                    f"{item['cif_name']} | {prompt_mode}",
+                    (
+                        f"{item['cif_name']} | {prompt_mode} | "
+                        f"{CRYSTAL_SYSTEM_NAMES.get(reference_crystal_system, reference_crystal_system)}"
+                    ),
                     args.figure_supercell,
                 )
+                plotted_examples[prompt_mode].add(reference_crystal_system)
+                plotted_example_counts[prompt_mode] += 1
             rows.extend(mode_rows)
     return pd.DataFrame(rows)
 
@@ -542,6 +585,70 @@ def summarize(df):
     return pd.DataFrame(summaries)
 
 
+def summarize_by_crystal_system(df):
+    required = {"split", "sample_index", "reference_crystal_system"}
+    if df.empty or not required.issubset(df.columns):
+        return pd.DataFrame()
+    group_cols = ["split"]
+    if "prompt_mode" in df.columns:
+        group_cols.append("prompt_mode")
+    rows = []
+    for group_key, group_df in df.groupby(group_cols, dropna=False):
+        if not isinstance(group_key, tuple):
+            group_key = (group_key,)
+        for crystal_system, system_df in group_df.groupby(
+            "reference_crystal_system", dropna=True
+        ):
+            samples = []
+            for _, sample_df in system_df.groupby("sample_index"):
+                sample = {}
+                for source, target in (
+                    ("parse_ok", "valid_minicif_rate"),
+                    ("structure_ok", "structure_rate"),
+                    ("match", "best_of_k_match_rate"),
+                    ("element_set_match", "element_set_accuracy"),
+                    ("composition_match", "composition_match_rate"),
+                    ("space_group_match", "space_group_accuracy"),
+                    ("crystal_system_match", "crystal_system_accuracy"),
+                ):
+                    sample[target] = (
+                        bool(sample_df[source].fillna(False).any())
+                        if source in sample_df
+                        else np.nan
+                    )
+                sample["best_rwp"] = (
+                    float(sample_df["rwp"].dropna().min())
+                    if "rwp" in sample_df and not sample_df["rwp"].dropna().empty
+                    else np.nan
+                )
+                samples.append(sample)
+            sample_df = pd.DataFrame(samples)
+            row = {
+                "split": group_key[0],
+                "reference_crystal_system": int(crystal_system),
+                "crystal_system_name": CRYSTAL_SYSTEM_NAMES.get(
+                    int(crystal_system), str(int(crystal_system))
+                ),
+                "n_samples": len(sample_df),
+            }
+            if len(group_key) > 1:
+                row["prompt_mode"] = group_key[1]
+            for metric in (
+                "valid_minicif_rate",
+                "structure_rate",
+                "best_of_k_match_rate",
+                "element_set_accuracy",
+                "composition_match_rate",
+                "space_group_accuracy",
+                "crystal_system_accuracy",
+            ):
+                row[metric] = float(sample_df[metric].mean())
+            row["median_best_rwp"] = float(sample_df["best_rwp"].median())
+            row["mean_best_rwp"] = float(sample_df["best_rwp"].mean())
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def plot_learning_curves(checkpoint, out_dir):
     metrics = checkpoint.get("training_metrics") or {}
     epochs = metrics.get("epochs") or list(range(len(metrics.get("train_losses", []))))
@@ -556,7 +663,6 @@ def plot_learning_curves(checkpoint, out_dir):
         ax.plot(epochs[:len(val_losses)], val_losses, label="validation")
     ax.set_xlabel("iteration")
     ax.set_ylabel("cross-entropy loss")
-    ax.set_yscale("log")
     ax.grid(alpha=0.3)
     ax.legend()
     fig.tight_layout()
@@ -601,15 +707,167 @@ def plot_rwp_distribution(df, out_dir):
     if "rwp" not in df or df["rwp"].dropna().empty:
         return
     fig, ax = plt.subplots(figsize=(7, 4.5), dpi=160)
-    splits = list(df["split"].dropna().unique())
-    values = [df.loc[df["split"] == split, "rwp"].dropna().to_numpy() for split in splits]
+    group_cols = ["split"] + (
+        ["prompt_mode"] if "prompt_mode" in df.columns else []
+    )
+    groups = list(df.groupby(group_cols, dropna=False))
+    labels = [
+        "/".join(str(value) for value in (key if isinstance(key, tuple) else (key,)))
+        for key, _ in groups
+    ]
+    values = [group["rwp"].dropna().to_numpy() for _, group in groups]
     ax.boxplot(values, showfliers=False)
-    ax.set_xticks(range(1, len(splits) + 1))
-    ax.set_xticklabels(splits)
+    ax.set_xticks(range(1, len(labels) + 1))
+    ax.set_xticklabels(labels, rotation=30, ha="right")
     ax.set_ylabel("Rwp")
     ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
     fig.savefig(os.path.join(out_dir, "rwp_distribution.png"))
+    plt.close(fig)
+
+
+def _metric_group_label(key):
+    values = key if isinstance(key, tuple) else (key,)
+    return "/".join(str(value) for value in values)
+
+
+def plot_best_rwp_cdf(df, out_dir):
+    if "rwp" not in df or df["rwp"].dropna().empty:
+        return
+    group_cols = ["split"] + (
+        ["prompt_mode"] if "prompt_mode" in df.columns else []
+    )
+    fig, ax = plt.subplots(figsize=(8, 5), dpi=160)
+    for key, group in df.groupby(group_cols, dropna=False):
+        best = group.groupby("sample_index")["rwp"].min().dropna().sort_values()
+        if best.empty:
+            continue
+        fraction = np.arange(1, len(best) + 1) / len(best)
+        ax.step(best.to_numpy(), fraction, where="post", label=_metric_group_label(key))
+    ax.set_xlabel("best-of-k Rwp")
+    ax.set_ylabel("fraction of samples")
+    ax.set_ylim(0, 1)
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, "best_rwp_cdf.png"))
+    plt.close(fig)
+
+
+def _crystal_system_matrix(summary, metric):
+    group_cols = ["split"] + (
+        ["prompt_mode"] if "prompt_mode" in summary.columns else []
+    )
+    groups = list(summary.groupby(group_cols, dropna=False))
+    labels = [_metric_group_label(key) for key, _ in groups]
+    matrix = np.full((len(groups), len(CRYSTAL_SYSTEM_NAMES)), np.nan)
+    for row_index, (_, group) in enumerate(groups):
+        for _, row in group.iterrows():
+            crystal_system = int(row["reference_crystal_system"])
+            if crystal_system in CRYSTAL_SYSTEM_NAMES:
+                matrix[row_index, crystal_system - 1] = row[metric]
+    return matrix, labels
+
+
+def plot_crystal_system_metrics(summary, out_dir):
+    if summary.empty:
+        return
+    metrics = [
+        ("structure_rate", "valid structure"),
+        ("element_set_accuracy", "element set"),
+        ("composition_match_rate", "composition"),
+        ("crystal_system_accuracy", "crystal system"),
+        ("space_group_accuracy", "space group"),
+        ("best_of_k_match_rate", "structure match"),
+    ]
+    fig, axes = plt.subplots(
+        2,
+        3,
+        figsize=(18, 8),
+        dpi=160,
+        squeeze=False,
+        constrained_layout=True,
+    )
+    image = None
+    for panel_index, (ax, (metric, title)) in enumerate(zip(axes.flat, metrics)):
+        matrix, labels = _crystal_system_matrix(summary, metric)
+        image = ax.imshow(matrix, aspect="auto", vmin=0, vmax=1, cmap="viridis")
+        ax.set_title(title)
+        ax.set_xticks(range(7))
+        ax.set_xticklabels(
+            ["tri", "mono", "ortho", "tetra", "trig", "hexa", "cubic"],
+            rotation=45,
+            ha="right",
+        )
+        ax.set_yticks(range(len(labels)))
+        ax.set_yticklabels(labels if panel_index % 3 == 0 else [], fontsize=7)
+        for row_index in range(matrix.shape[0]):
+            for column_index in range(matrix.shape[1]):
+                value = matrix[row_index, column_index]
+                if np.isfinite(value):
+                    ax.text(
+                        column_index,
+                        row_index,
+                        f"{value:.2f}",
+                        ha="center",
+                        va="center",
+                        fontsize=6,
+                        color="black" if value > 0.65 else "white",
+                    )
+    if image is not None:
+        fig.colorbar(image, ax=axes.ravel().tolist(), label="best-of-k sample rate")
+    fig.savefig(os.path.join(out_dir, "crystal_system_metrics.png"))
+    plt.close(fig)
+
+
+def plot_crystal_system_rwp(summary, out_dir):
+    if summary.empty or summary["median_best_rwp"].dropna().empty:
+        return
+    matrix, labels = _crystal_system_matrix(summary, "median_best_rwp")
+    fig, ax = plt.subplots(
+        figsize=(9, max(4, 0.45 * len(labels) + 2)),
+        dpi=160,
+    )
+    image = ax.imshow(matrix, aspect="auto", cmap="magma_r")
+    ax.set_xticks(range(7))
+    ax.set_xticklabels(
+        CRYSTAL_SYSTEM_NAMES.values(),
+        rotation=35,
+        ha="right",
+    )
+    ax.set_yticks(range(len(labels)))
+    ax.set_yticklabels(labels)
+    ax.set_title("Median best-of-k Rwp by reference crystal system")
+    fig.colorbar(image, ax=ax, label="median best-of-k Rwp")
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, "crystal_system_rwp.png"))
+    plt.close(fig)
+
+
+def plot_rwp_vs_rmsd(df, out_dir):
+    if not {"rwp", "rmsd"}.issubset(df.columns):
+        return
+    valid = df.dropna(subset=["rwp", "rmsd"])
+    if valid.empty:
+        return
+    group_cols = ["split"] + (
+        ["prompt_mode"] if "prompt_mode" in valid.columns else []
+    )
+    fig, ax = plt.subplots(figsize=(7, 5), dpi=160)
+    for key, group in valid.groupby(group_cols, dropna=False):
+        ax.scatter(
+            group["rwp"],
+            group["rmsd"],
+            s=13,
+            alpha=0.35,
+            label=_metric_group_label(key),
+        )
+    ax.set_xlabel("Rwp")
+    ax.set_ylabel("matched structure RMSD")
+    ax.grid(alpha=0.25)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, "rwp_vs_rmsd.png"))
     plt.close(fig)
 
 
@@ -677,8 +935,11 @@ def main():
     parser.add_argument(
         "--plot-examples",
         type=int,
-        default=0,
-        help="Plot the best generated PXRD and structure for the first N samples per split",
+        default=7,
+        help=(
+            "Maximum PXRD-plus-structure examples per split and prompt mode, "
+            "stratified across reference crystal systems; 0 disables figures"
+        ),
     )
     parser.add_argument(
         "--figure-supercell",
@@ -737,9 +998,14 @@ def main():
         ))
     results = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     summary = summarize(results)
+    crystal_system_summary = summarize_by_crystal_system(results)
 
     results.to_csv(os.path.join(out_dir, "minicif_generation_metrics.csv"), index=False)
     summary.to_csv(os.path.join(out_dir, "minicif_summary.csv"), index=False)
+    crystal_system_summary.to_csv(
+        os.path.join(out_dir, "minicif_crystal_system_summary.csv"),
+        index=False,
+    )
     with open(os.path.join(out_dir, "minicif_summary.json"), "w") as f:
         json.dump({
             "checkpoint": os.path.abspath(args.checkpoint),
@@ -756,6 +1022,10 @@ def main():
         }, f, indent=2)
     plot_metric_summary(summary, out_dir)
     plot_rwp_distribution(results, out_dir)
+    plot_best_rwp_cdf(results, out_dir)
+    plot_crystal_system_metrics(crystal_system_summary, out_dir)
+    plot_crystal_system_rwp(crystal_system_summary, out_dir)
+    plot_rwp_vs_rmsd(results, out_dir)
     print(summary.to_string(index=False))
     print(f"Wrote minicif report to {out_dir}")
 

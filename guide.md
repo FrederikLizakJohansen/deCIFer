@@ -81,7 +81,12 @@ sbatch minislurm/evaluate_minicif_v2.sh \
 
 Omit `--artifact-config` for clean simulated conditions.
 
-To export reference/generated PXRD and structure examples during evaluation:
+Evaluation writes overall metrics, per-crystal-system metrics, Rwp distributions
+and CDFs, an Rwp-versus-RMSD figure, and a linear-scale learning curve. It also
+exports one reference/generated PXRD-plus-structure example for every available
+crystal system by default. Pass `--plot-examples 0` to disable example figures.
+
+Run evaluation directly with a specific prompt:
 
 ```bash
 python bin/visualize_minicif.py \
@@ -90,8 +95,7 @@ python bin/visualize_minicif.py \
   --out-dir models/minicif_v2/peak/standard/medium/minicif_report \
   --splits test \
   --prompt-modes pxrd-elements \
-  --num-reps 8 \
-  --plot-examples 6
+  --num-reps 8
 ```
 
 To plot examples from an existing evaluation:
@@ -99,8 +103,6 @@ To plot examples from an existing evaluation:
 ```bash
 python bin/plot_minicif_examples.py \
   --report-dir models/minicif_v2/peak/standard/medium/minicif_report \
-  --num-examples 8 \
-  --selection random \
   --splits test \
   --prompt-modes pxrd-elements
 ```

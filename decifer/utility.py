@@ -840,7 +840,7 @@ def get_rmsd(cif_string_sample, cif_string_gen, matcher):
         print(e)
         return None
 
-def plot_loss_curves(paths, ylog=True, xlog=False, xmin=None, xmax=None, ymin=None, ymax=None, offset=0.02, plot_metrics=True, figsize=(10, 5)):
+def plot_loss_curves(paths, ylog=False, xlog=False, xmin=None, xmax=None, ymin=None, ymax=None, offset=0.02, plot_metrics=True, figsize=(10, 5)):
     # Apply Seaborn style
     sns.set_theme(style="whitegrid")
     #plt.figure(figsize=figsize, dpi=150)
@@ -914,4 +914,3 @@ def plot_loss_curves(paths, ylog=True, xlog=False, xmin=None, xmax=None, ymin=No
 
     # Show the plot
     plt.show()
-

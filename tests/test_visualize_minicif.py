@@ -17,8 +17,13 @@ visualize_minicif = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(visualize_minicif)
 prompt_from_minicif = visualize_minicif.prompt_from_minicif
 summarize = visualize_minicif.summarize
+summarize_by_crystal_system = visualize_minicif.summarize_by_crystal_system
 compatible_evaluation_indices = visualize_minicif.compatible_evaluation_indices
+plot_best_rwp_cdf = visualize_minicif.plot_best_rwp_cdf
+plot_crystal_system_metrics = visualize_minicif.plot_crystal_system_metrics
+plot_crystal_system_rwp = visualize_minicif.plot_crystal_system_rwp
 plot_rwp_distribution = visualize_minicif.plot_rwp_distribution
+plot_rwp_vs_rmsd = visualize_minicif.plot_rwp_vs_rmsd
 save_evaluation_example = visualize_minicif.save_evaluation_example
 
 
@@ -176,6 +181,48 @@ class VisualizeMinicifTest(unittest.TestCase):
             self.assertTrue(
                 os.path.isfile(os.path.join(tmpdir, "rwp_distribution.png"))
             )
+
+    def test_crystal_system_summary_and_comprehensive_figures(self):
+        rows = []
+        for crystal_system in (1, 7):
+            for rep, rwp_value in enumerate((0.4, 0.2)):
+                rows.append({
+                    "split": "test",
+                    "prompt_mode": "pxrd-elements",
+                    "sample_index": crystal_system,
+                    "rep": rep,
+                    "reference_crystal_system": crystal_system,
+                    "parse_ok": True,
+                    "structure_ok": True,
+                    "match": rep == 1,
+                    "element_set_match": True,
+                    "composition_match": rep == 1,
+                    "space_group_match": rep == 1,
+                    "crystal_system_match": True,
+                    "rwp": rwp_value + 0.01 * crystal_system,
+                    "rmsd": 0.3 + 0.1 * rep,
+                })
+        metrics = pd.DataFrame(rows)
+
+        crystal_summary = summarize_by_crystal_system(metrics)
+
+        self.assertEqual(set(crystal_summary["reference_crystal_system"]), {1, 7})
+        self.assertTrue((crystal_summary["best_of_k_match_rate"] == 1.0).all())
+        self.assertTrue((crystal_summary["composition_match_rate"] == 1.0).all())
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plot_best_rwp_cdf(metrics, tmpdir)
+            plot_crystal_system_metrics(crystal_summary, tmpdir)
+            plot_crystal_system_rwp(crystal_summary, tmpdir)
+            plot_rwp_vs_rmsd(metrics, tmpdir)
+
+            for filename in (
+                "best_rwp_cdf.png",
+                "crystal_system_metrics.png",
+                "crystal_system_rwp.png",
+                "rwp_vs_rmsd.png",
+            ):
+                self.assertTrue(os.path.isfile(os.path.join(tmpdir, filename)))
 
 
 if __name__ == "__main__":

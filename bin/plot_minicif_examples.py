@@ -68,6 +68,28 @@ def choose_examples(candidates, count, selection, seed):
         return candidates.nsmallest(count, "rwp").reset_index(drop=True)
     if selection == "worst":
         return candidates.nlargest(count, "rwp").reset_index(drop=True)
+    if selection == "crystal-system" and "reference_crystal_system" in candidates:
+        rng = np.random.default_rng(seed)
+        selected_indices = []
+        groups = [
+            group.index.to_numpy()
+            for _, group in candidates.groupby(
+                "reference_crystal_system", sort=True, dropna=True
+            )
+        ]
+        if count < len(groups):
+            group_indices = rng.choice(len(groups), size=count, replace=False)
+            groups = [groups[index] for index in sorted(group_indices)]
+        for indices in groups:
+            selected_indices.append(int(rng.choice(indices)))
+        remaining = count - len(selected_indices)
+        if remaining > 0:
+            available = candidates.index.difference(selected_indices).to_numpy()
+            selected_indices.extend(
+                int(index)
+                for index in rng.choice(available, size=remaining, replace=False)
+            )
+        return candidates.loc[selected_indices].reset_index(drop=True)
     return candidates.sample(n=count, random_state=seed).reset_index(drop=True)
 
 
@@ -140,6 +162,7 @@ def plot_examples(candidates, xrd_kwargs, output_dir, wavelength, supercell):
             "rep": row.get("rep"),
             "evaluation_rwp": row["rwp"],
             "rendered_rwp": rendered_rwp,
+            "reference_crystal_system": row.get("reference_crystal_system"),
             "figure_path": os.path.abspath(path),
         })
     manifest_path = os.path.join(output_dir, "examples.csv")
@@ -161,11 +184,11 @@ def main():
         default="",
         help="Output directory; defaults to REPORT_DIR/evaluation_examples",
     )
-    parser.add_argument("--num-examples", type=int, default=8)
+    parser.add_argument("--num-examples", type=int, default=7)
     parser.add_argument(
         "--selection",
-        choices=["random", "best", "worst"],
-        default="random",
+        choices=["crystal-system", "random", "best", "worst"],
+        default="crystal-system",
     )
     parser.add_argument("--splits", nargs="+", default=None)
     parser.add_argument("--prompt-modes", nargs="+", default=None)

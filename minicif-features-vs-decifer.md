@@ -94,6 +94,9 @@ This file lists the core minicif changes relative to the original deCIFer workfl
 - Added `condition_cross_attention_every_n_layers` to control how often transformer blocks attend to PXRD memory.
 - Cached the fixed cross-attention keys and values during autoregressive
   generation, alongside the causal self-attention cache.
+- Expanded evaluation reports with linear-scale learning curves, crystal-system
+  metric summaries, best-Rwp CDFs, Rwp/RMSD diagnostics, and default
+  PXRD-plus-structure examples stratified by reference crystal system.
 
 ## Attention and packing
 
