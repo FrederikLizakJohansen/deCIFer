@@ -555,6 +555,19 @@ class FourierPeakEncoder(nn.Module):
         self.k_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.v_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.out_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.latent_layers = nn.ModuleList([
+            nn.TransformerEncoderLayer(
+                d_model=config.n_embd,
+                nhead=config.n_head,
+                dim_feedforward=4 * config.n_embd,
+                dropout=config.dropout,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True,
+                bias=config.bias,
+            )
+            for _ in range(config.pxrd_encoder_layers)
+        ])
 
     def forward(
         self,
@@ -599,7 +612,10 @@ class FourierPeakEncoder(nn.Module):
             attention_mask[~valid.any(dim=1), :, :, 0] = True
         y = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_mask)
         y = y.transpose(1, 2).contiguous().view(batch_size, self.n_tokens, width)
-        return self.out_proj(y)
+        y = self.out_proj(y)
+        for layer in self.latent_layers:
+            y = layer(y)
+        return y
 
 
 class TypedTokenHead(nn.Module):

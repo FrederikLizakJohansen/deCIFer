@@ -62,6 +62,14 @@ sbatch minislurm/train_minicif_v2.sh \
 Compare the dense-only and encoder-heavy configs to isolate parameter allocation.
 Compare the sparse, dense-only, and hybrid configs to study PXRD representation.
 
+The equivalent encoder-heavy sparse experiment assigns about 4.3M of its 7.9M
+parameters to Fourier-encoded peak positions and intensities:
+
+```bash
+sbatch minislurm/train_minicif_v2.sh \
+  --config configs/minicif_v2_peak_fourier_encoder_heavy.yaml
+```
+
 Optional standalone PXRD encoder pretraining:
 
 ```bash

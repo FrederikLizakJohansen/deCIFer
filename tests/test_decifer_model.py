@@ -91,6 +91,38 @@ class DeciferModelTest(unittest.TestCase):
 
         self.assertFalse(torch.allclose(low, shifted))
 
+    def test_fourier_peak_latent_layers_run_forward_and_configure_optimizer(self):
+        tokenizer = MinicifTokenizer()
+        model = Decifer(DeciferConfig(
+            tokenizer="minicif",
+            vocab_size=tokenizer.vocab_size,
+            block_size=16,
+            n_layer=1,
+            n_head=1,
+            n_embd=16,
+            condition=True,
+            condition_encoder="peak_fourier",
+            condition_n_tokens=2,
+            peak_encoder_hidden_dim=16,
+            peak_fourier_bands=4,
+            condition_cross_attention=True,
+            pxrd_encoder_layers=1,
+        ))
+        idx = torch.tensor([
+            tokenizer.encode(tokenizer.tokenize_minicif("<mcif> Na "))
+        ])
+        cond = {
+            "peak_q": torch.tensor([[1.0, 2.0, 0.0]]),
+            "peak_iq": torch.tensor([[1.0, 0.5, 0.0]]),
+        }
+
+        logits, loss = model(idx, cond, idx.clone(), [[0]])
+        optimizer = model.configure_optimizers(0.1, 1e-3, (0.9, 0.95))
+
+        self.assertEqual(logits.shape, (1, idx.size(1), tokenizer.vocab_size))
+        self.assertIsNotNone(loss)
+        self.assertEqual(len(optimizer.param_groups), 2)
+
     def test_typed_head_covers_v2_vocabulary(self):
         tokenizer = MinicifV2Tokenizer()
         model = Decifer(DeciferConfig(

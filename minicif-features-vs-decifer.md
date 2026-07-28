@@ -80,6 +80,9 @@ This file lists the core minicif changes relative to the original deCIFer workfl
 - Added `peak_fourier`, which encodes absolute q with fixed Fourier features and
   pools variable-length peak lists through learned latent queries without first
   materializing a dense PXRD trace.
+- The Fourier peak encoder can apply bidirectional self-attention to its pooled
+  tokens for encoder-heavy sparse models. The reference sparse-heavy config
+  assigns about 55% of all parameters to PXRD encoding.
 - Peak-list q positions are normalized against the configured training q range rather than the per-sample maximum q, preserving absolute q-position information.
 - Added a hybrid PXRD encoder that concatenates dense-trace tokens and peak-list tokens.
 - Condition tokens are inserted at each `<mcif>` start, preserving packed-batch condition alignment.
