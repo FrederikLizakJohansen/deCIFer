@@ -252,6 +252,19 @@ class DeciferModelTest(unittest.TestCase):
         self.assertEqual(logits.shape, (1, idx.size(1), tokenizer.vocab_size))
         self.assertIsNotNone(loss)
 
+        optimizer = model.configure_optimizers(0.1, 1e-3, (0.9, 0.95))
+        decay_params = {
+            id(parameter)
+            for group in optimizer.param_groups
+            if group["weight_decay"] == 0.1
+            for parameter in group["params"]
+        }
+        in_proj_weight = model.transformer.cond_embedding.latent_layers[
+            0
+        ].self_attn.in_proj_weight
+
+        self.assertIn(id(in_proj_weight), decay_params)
+
     def test_condition_encoder_state_loads_from_pretrain_checkpoint_shape(self):
         tokenizer = MinicifTokenizer()
         config = DeciferConfig(

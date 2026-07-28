@@ -1175,7 +1175,11 @@ class Decifer(nn.Module):
         # separate out all parameters to those that will and won't experience regularizing weight decay
         decay = set()
         no_decay = set()
-        whitelist_weight_modules = (torch.nn.Linear, torch.nn.Conv1d)
+        whitelist_weight_modules = (
+            torch.nn.Linear,
+            torch.nn.Conv1d,
+            torch.nn.MultiheadAttention,
+        )
         blacklist_weight_modules = (torch.nn.LayerNorm, LayerNorm, torch.nn.Embedding)
         for mn, m in self.named_modules():
             for pn, p in m.named_parameters():
