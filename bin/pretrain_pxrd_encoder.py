@@ -108,6 +108,7 @@ class PxrdEncoderPretrainConfig:
     bias: bool = False
     pxrd_encoder_channels: int = 64
     pxrd_encoder_kernel_size: int = 7
+    pxrd_encoder_layers: int = 0
     condition_embedder_hidden_layers: List[int] = field(default_factory=lambda: [256])
 
     qmin: float = 0.0
@@ -240,6 +241,7 @@ def model_config(config):
         bias=config.bias,
         pxrd_encoder_channels=config.pxrd_encoder_channels,
         pxrd_encoder_kernel_size=config.pxrd_encoder_kernel_size,
+        pxrd_encoder_layers=config.pxrd_encoder_layers,
         condition_embedder_hidden_layers=config.condition_embedder_hidden_layers,
     )
 

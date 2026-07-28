@@ -221,6 +221,7 @@ class TrainConfig:
     typed_token_heads: bool = False
     pxrd_encoder_channels: int = 64
     pxrd_encoder_kernel_size: int = 7
+    pxrd_encoder_layers: int = 0
     condition_embedder_hidden_layers: List[int] = field(default_factory=lambda: [512])
     pretrained_condition_encoder_path: str = ""
     freeze_pretrained_condition_encoder: bool = False
@@ -930,6 +931,7 @@ if __name__ == "__main__":
         condition_dropout_prob=C.condition_dropout_prob,
         pxrd_encoder_channels=C.pxrd_encoder_channels,
         pxrd_encoder_kernel_size=C.pxrd_encoder_kernel_size,
+        pxrd_encoder_layers=C.pxrd_encoder_layers,
         condition_embedder_hidden_layers = C.condition_embedder_hidden_layers,
     )
 

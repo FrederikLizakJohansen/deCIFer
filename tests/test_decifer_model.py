@@ -11,6 +11,7 @@ from decifer.decifer_model import (
     PeakListEncoder,
     PxrdConvEncoder,
     PxrdPatchEncoder,
+    PxrdPyramidEncoder,
 )
 from decifer.minicif import MinicifTokenizer
 from decifer.minicif_v2 import MinicifV2Tokenizer
@@ -206,6 +207,50 @@ class DeciferModelTest(unittest.TestCase):
         optimizer = model.configure_optimizers(0.1, 1e-3, (0.9, 0.95))
 
         self.assertEqual(len(optimizer.param_groups), 2)
+
+    def test_pyramid_encoder_downsamples_dense_pxrd_into_tokens(self):
+        encoder = PxrdPyramidEncoder(DeciferConfig(
+            condition_size=128,
+            condition_n_tokens=8,
+            n_embd=16,
+            pxrd_encoder_channels=8,
+            pxrd_encoder_kernel_size=7,
+        ))
+
+        tokens = encoder(torch.randn(2, 128))
+
+        self.assertEqual(tokens.shape, (2, 8, 16))
+
+    def test_pyramid_condition_encoder_runs_model_forward(self):
+        tokenizer = MinicifTokenizer()
+        model = Decifer(DeciferConfig(
+            tokenizer="minicif",
+            vocab_size=tokenizer.vocab_size,
+            block_size=16,
+            n_layer=1,
+            n_head=1,
+            n_embd=16,
+            condition=True,
+            condition_size=128,
+            condition_encoder="conv_pyramid",
+            condition_n_tokens=8,
+            pxrd_encoder_channels=8,
+            condition_cross_attention=True,
+            pxrd_encoder_layers=1,
+        ))
+        idx = torch.tensor([
+            tokenizer.encode(tokenizer.tokenize_minicif("<mcif> Na "))
+        ])
+
+        logits, loss = model(
+            idx,
+            torch.randn(1, 128),
+            idx.clone(),
+            [[0]],
+        )
+
+        self.assertEqual(logits.shape, (1, idx.size(1), tokenizer.vocab_size))
+        self.assertIsNotNone(loss)
 
     def test_condition_encoder_state_loads_from_pretrain_checkpoint_shape(self):
         tokenizer = MinicifTokenizer()

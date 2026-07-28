@@ -35,6 +35,33 @@ sbatch minislurm/train_minicif_v2.sh \
 The medium checkpoint is written to
 `minicif_v2_model_medium_hybrid_artifacts/ckpt.pt`.
 
+The three PXRD representation variants are:
+
+| Config | PXRD input |
+| --- | --- |
+| `minicif_v2_medium_config.yaml` | sparse q positions and peak intensities |
+| `minicif_v2_medium_dense_artifacts.yaml` | continuous PXRD intensity trace |
+| `minicif_v2_medium_hybrid_artifacts.yaml` | continuous trace plus sparse peaks |
+
+Train the dense-only member with:
+
+```bash
+sbatch minislurm/train_minicif_v2.sh \
+  --config configs/minicif_v2_medium_dense_artifacts.yaml
+```
+
+An additional encoder-allocation experiment assigns about 4.1M of its 7.7M
+parameters to a hierarchical dense-PXRD encoder and uses a compact three-layer
+minicif decoder:
+
+```bash
+sbatch minislurm/train_minicif_v2.sh \
+  --config configs/minicif_v2_dense_encoder_heavy_artifacts.yaml
+```
+
+Compare the dense-only and encoder-heavy configs to isolate parameter allocation.
+Compare the sparse, dense-only, and hybrid configs to study PXRD representation.
+
 Optional standalone PXRD encoder pretraining:
 
 ```bash

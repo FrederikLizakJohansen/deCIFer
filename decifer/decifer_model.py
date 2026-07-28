@@ -47,6 +47,7 @@ class DeciferConfig:
     condition_dropout_prob: float = 0.0
     pxrd_encoder_channels: int = 64
     pxrd_encoder_kernel_size: int = 7
+    pxrd_encoder_layers: int = 0
     condition_embedder_hidden_layers: List[int] = field(default_factory=lambda: [512])
     plot_attention: bool = False
     tokenizer: str = "legacy"
@@ -362,6 +363,69 @@ class PxrdConvEncoder(nn.Module):
         return self.proj(x) + self.token_pos
 
 
+class PxrdPyramidEncoder(nn.Module):
+    """Hierarchical dense-PXRD encoder with early q-axis downsampling."""
+
+    def __init__(self, config: DeciferConfig):
+        super().__init__()
+        self.n_tokens = config.condition_n_tokens
+        kernel_size = config.pxrd_encoder_kernel_size
+        padding = kernel_size // 2
+        base = config.pxrd_encoder_channels
+        widths = (base, 2 * base, 4 * base)
+        self.conv = nn.Sequential(
+            nn.Conv1d(
+                1, widths[0], kernel_size, stride=2, padding=padding, bias=config.bias
+            ),
+            nn.GELU(),
+            nn.Conv1d(
+                widths[0], widths[0], kernel_size, padding=padding, bias=config.bias
+            ),
+            nn.GELU(),
+            nn.Conv1d(
+                widths[0], widths[1], kernel_size, stride=2, padding=padding, bias=config.bias
+            ),
+            nn.GELU(),
+            nn.Conv1d(
+                widths[1], widths[1], kernel_size, padding=padding, bias=config.bias
+            ),
+            nn.GELU(),
+            nn.Conv1d(
+                widths[1], widths[2], kernel_size, stride=2, padding=padding, bias=config.bias
+            ),
+            nn.GELU(),
+            nn.Conv1d(
+                widths[2], widths[2], kernel_size, padding=padding, bias=config.bias
+            ),
+            nn.GELU(),
+            nn.AdaptiveAvgPool1d(config.condition_n_tokens),
+        )
+        self.proj = nn.Linear(widths[-1], config.n_embd, bias=config.bias)
+        self.token_pos = nn.Parameter(
+            torch.zeros(config.condition_n_tokens, config.n_embd)
+        )
+        self.latent_layers = nn.ModuleList([
+            nn.TransformerEncoderLayer(
+                d_model=config.n_embd,
+                nhead=config.n_head,
+                dim_feedforward=4 * config.n_embd,
+                dropout=config.dropout,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True,
+                bias=config.bias,
+            )
+            for _ in range(config.pxrd_encoder_layers)
+        ])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv(x.unsqueeze(1))
+        x = self.proj(x.transpose(1, 2)) + self.token_pos
+        for layer in self.latent_layers:
+            x = layer(x)
+        return x
+
+
 class PxrdPatchEncoder(nn.Module):
     """Position-preserving dense-PXRD encoder.
 
@@ -603,6 +667,8 @@ def build_condition_encoder(config: DeciferConfig) -> nn.Module:
         )
     if config.condition_encoder == "conv":
         return PxrdConvEncoder(config)
+    if config.condition_encoder == "conv_pyramid":
+        return PxrdPyramidEncoder(config)
     if config.condition_encoder == "patch":
         return PxrdPatchEncoder(config)
     if config.condition_encoder == "peak":
@@ -655,6 +721,8 @@ class Decifer(nn.Module):
             raise ValueError("condition_n_tokens must be >= 1")
         if config.pxrd_encoder_kernel_size < 1:
             raise ValueError("pxrd_encoder_kernel_size must be >= 1")
+        if config.pxrd_encoder_layers < 0:
+            raise ValueError("pxrd_encoder_layers must be >= 0")
         if config.typed_token_heads and config.tokenizer != "minicif_v2":
             raise ValueError("typed_token_heads requires tokenizer='minicif_v2'")
 

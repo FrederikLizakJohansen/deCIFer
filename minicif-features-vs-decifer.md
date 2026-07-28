@@ -73,6 +73,9 @@ This file lists the core minicif changes relative to the original deCIFer workfl
 - Added `condition_n_tokens`, allowing PXRD conditioning to use multiple non-generated condition tokens per minicif record.
 - Added a 1D convolutional PXRD encoder over dense q-grid intensity traces.
 - The conv encoder adaptively pools q-space to latent condition tokens and projects them to transformer width.
+- Added an encoder-heavy hierarchical convolution that downsamples q before its
+  widest stages, then applies bidirectional self-attention to the pooled PXRD
+  tokens. Its reference config assigns 53.6% of all parameters to PXRD encoding.
 - Added a sparse peak-list encoder over `xrd_disc.q` and `xrd_disc.iq`.
 - Added `peak_fourier`, which encodes absolute q with fixed Fourier features and
   pools variable-length peak lists through learned latent queries without first
