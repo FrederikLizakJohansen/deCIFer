@@ -86,6 +86,25 @@ and CDFs, an Rwp-versus-RMSD figure, and a linear-scale learning curve. It also
 exports one reference/generated PXRD-plus-structure example for every available
 crystal system by default. Pass `--plot-examples 0` to disable example figures.
 
+To refine every generated candidate with BraggCalculator 0.4.1:
+
+```bash
+python bin/visualize_minicif.py \
+  --checkpoint models/minicif_v2/peak/standard/medium/ckpt.pt \
+  --dataset-dir data/noma_minicif_v2 \
+  --out-dir models/minicif_v2/peak/standard/medium/minicif_report \
+  --splits test \
+  --prompt-modes pxrd-elements \
+  --num-reps 8 \
+  --refinement-config configs/refinement/quick.yaml
+```
+
+The report compares initial and refined metrics and Rwp distributions globally
+and by crystal system. Full per-candidate results are stored in
+`minicif_refinement_results.jsonl.gz`. See
+`configs/refinement/README.md` for two-theta/Q, X-ray/neutron, policy,
+parameter-group, device, wavelength, and species-assignment settings.
+
 Run evaluation directly with a specific prompt:
 
 ```bash

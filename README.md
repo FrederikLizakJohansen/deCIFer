@@ -231,6 +231,24 @@ evaluation. Reports include linear-scale learning curves, overall and
 per-crystal-system metrics, best-Rwp distributions and CDFs, Rwp-versus-RMSD,
 and default PXRD-plus-structure examples covering the available crystal systems.
 
+Add BraggCalculator 0.4.1 refinement for every valid generated candidate:
+
+```bash
+python bin/visualize_minicif.py \
+  --checkpoint models/minicif_v2/peak/standard/medium/ckpt.pt \
+  --dataset-dir data/noma_minicif_v2 \
+  --refinement-config configs/refinement/quick.yaml
+```
+
+The existing CSV outputs gain refined structural and fit metrics. The evaluator
+also writes the complete refinement results to
+`minicif_refinement_results.jsonl.gz`, including profiles, residuals,
+parameters, histories, warnings, convergence data, and refined CIFs. Figures
+compare Rwp before and after refinement globally and for each reference crystal
+system. Candidate-specific refinement failures are recorded without stopping
+the run. Configuration and CLI options are listed in
+[`configs/refinement/README.md`](configs/refinement/README.md).
+
 The v2 configs use record-aligned, length-bucketed token-budget batches, sparse
 Fourier or hybrid PXRD conditioning, cross-attention, typed vocabulary heads,
 constrained lattice generation, fused AdamW on CUDA, and cached

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import gzip
 import json
 import os
 import sys
@@ -19,8 +20,14 @@ import pandas as pd
 import torch
 from pymatgen.analysis.diffraction.xrd import XRDCalculator
 from pymatgen.analysis.structure_matcher import StructureMatcher
+from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
 from tqdm.auto import tqdm
 
+from decifer.bragg_refinement import (
+    failed_refinement_record,
+    load_bragg_refinement_config,
+    run_bragg_refinement,
+)
 from decifer.decifer_dataset import DeciferDataset, h5_record_token_lengths
 from decifer.decifer_model import Decifer, DeciferConfig
 from decifer.minicif import END_TOKEN, MinicifTokenizer, minicif_to_structure, parse_minicif
@@ -40,7 +47,7 @@ from decifer.pxrd import (
     nyquist_qstep,
     q_range_to_two_theta_range,
 )
-from bin.test_minicif_realtime import refine_best_candidate, save_fit_figure
+from bin.test_minicif_realtime import save_fit_figure
 from bin.train import TrainConfig
 
 PROMPT_MODE_ALIASES = {
@@ -88,6 +95,80 @@ def rwp(reference, generated):
     reference = np.asarray(reference, dtype=float)
     generated = np.asarray(generated, dtype=float)
     return float(np.sqrt(np.sum((reference - generated) ** 2) / (np.sum(reference ** 2) + 1e-16)))
+
+
+def profile_fit_statistics(observed, calculated):
+    observed = np.asarray(observed, dtype=float)
+    calculated = np.asarray(calculated, dtype=float)
+    sigma = np.sqrt(np.maximum(observed, 0.0) + 1.0)
+    weights = 1.0 / sigma**2
+    residual = observed - calculated
+    denominator = np.sum(weights * observed**2)
+    return {
+        "r_wp": float(
+            np.sqrt(
+                np.sum(weights * residual**2)
+                / (denominator + 1e-16)
+            )
+        ),
+        "chi_squared": float(np.mean((residual / sigma) ** 2)),
+    }
+
+
+def refined_structure_metrics(
+    reference_structure,
+    refined_structure,
+    reference_space_group,
+    reference_crystal_system,
+    matcher,
+    rmsd_threshold,
+):
+    rmsd = matcher.get_rms_dist(reference_structure, refined_structure)
+    rmsd_value = None if rmsd is None else float(rmsd[0])
+    match = rmsd_value is not None
+    if rmsd_threshold > 0 and rmsd_value is not None:
+        match = rmsd_value <= rmsd_threshold
+    symmetry = SpacegroupAnalyzer(refined_structure)
+    refined_space_group = int(symmetry.get_space_group_number())
+    refined_crystal_system_name = symmetry.get_crystal_system()
+    crystal_system_ids = {
+        name: identifier for identifier, name in CRYSTAL_SYSTEM_NAMES.items()
+    }
+    refined_crystal_system = crystal_system_ids[refined_crystal_system_name]
+    reference_elements = {
+        element.symbol for element in reference_structure.composition.elements
+    }
+    refined_elements = {
+        element.symbol for element in refined_structure.composition.elements
+    }
+    composition_match = (
+        refined_structure.composition.reduced_formula
+        == reference_structure.composition.reduced_formula
+    )
+    return {
+        "refined_structure_ok": True,
+        "refined_rmsd": rmsd_value,
+        "refined_match": match,
+        "refined_space_group": refined_space_group,
+        "refined_crystal_system": refined_crystal_system,
+        "refined_space_group_match": (
+            refined_space_group == int(reference_space_group)
+        ),
+        "refined_crystal_system_match": (
+            refined_crystal_system == int(reference_crystal_system)
+        ),
+        "refined_element_set_match": refined_elements == reference_elements,
+        "refined_extra_elements": len(refined_elements - reference_elements),
+        "refined_missing_elements": len(reference_elements - refined_elements),
+        "refined_composition_match": composition_match,
+        "refined_formula_match": composition_match,
+    }
+
+
+def write_refinement_record(handle, identity, record):
+    if handle is None:
+        return
+    handle.write(json.dumps({**identity, **record}, allow_nan=False) + "\n")
 
 
 def load_checkpoint(path, device, use_best=True):
@@ -229,6 +310,7 @@ def condition_from_sparse(
     iq_tensor = iq if torch.is_tensor(iq) else torch.tensor(iq, dtype=torch.float32)
     encoder = config.get("condition_encoder", "mlp")
     _, reference_iq, _ = continuous_from_sparse(q_tensor, iq_tensor, xrd_kwargs)
+    has_evaluation_artifacts = artifact_spec is not None
     artifact_spec = artifact_spec or bragg_artifact_spec_from_config(
         config, augment=False
     )
@@ -240,23 +322,31 @@ def condition_from_sparse(
         qmin=xrd_kwargs["qmin"],
         qmax=xrd_kwargs["qmax"],
         qstep=xrd_kwargs["qstep"],
-        include_dense=encoder not in {"peak", "peak_fourier"},
+        include_dense=(
+            has_evaluation_artifacts
+            or encoder not in {"peak", "peak_fourier"}
+        ),
         include_peaks=encoder in {"peak", "peak_fourier", "hybrid"},
         max_xrd_peaks=int(config.get("max_xrd_peaks", 0) or 0),
         max_peak_list_peaks=int(config.get("max_peak_list_peaks", 0) or 0),
     )
+    observed_iq = (
+        artifact_batch["iq"][0].detach().cpu().numpy()
+        if has_evaluation_artifacts
+        else reference_iq
+    )
     if encoder in {"peak", "peak_fourier"}:
-        return reference_iq, {
+        return reference_iq, observed_iq, {
             "peak_q": artifact_batch["peak_q"],
             "peak_iq": artifact_batch["peak_iq"],
         }
     if encoder == "hybrid":
-        return reference_iq, {
+        return reference_iq, observed_iq, {
             "dense": artifact_batch["iq"],
             "peak_q": artifact_batch["peak_q"],
             "peak_iq": artifact_batch["peak_iq"],
         }
-    return reference_iq, artifact_batch["iq"]
+    return reference_iq, observed_iq, artifact_batch["iq"]
 
 
 def structure_to_continuous_xrd(structure, xrd_kwargs, wavelength):
@@ -341,6 +431,7 @@ def generate_candidates(model, prompt, cond_vec, args, tokenizer):
 def evaluate_split(
     split, h5_path, model, tokenizer, parse_fn, structure_fn, end_token,
     matcher, xrd_kwargs, config, args, artifact_spec=None, out_dir="",
+    refinement_config=None, refinement_handle=None,
 ):
     compatible_indices = compatible_evaluation_indices(h5_path, config)
     dataset = DeciferDataset(
@@ -389,7 +480,7 @@ def evaluate_split(
                         seed=artifact_spec.artifacts.seed + source_sample_index,
                     ),
                 )
-            reference_iq, cond = condition_from_sparse(
+            reference_iq, observed_iq, cond = condition_from_sparse(
                 item["xrd.q"],
                 item["xrd.iq"],
                 xrd_kwargs,
@@ -414,7 +505,6 @@ def evaluate_split(
             prompt = prompt_from_minicif(reference_minicif, prompt_mode, tokenizer)
             candidates = generate_candidates(model, prompt, cond, args, tokenizer)
             mode_rows = []
-            refine_inputs = []
             figure_rows = []
             reference_crystal_system = int(reference_parsed.crystal_system)
             missing_target = (
@@ -432,6 +522,15 @@ def evaluate_split(
                 )
             )
             for rep, generated_minicif in enumerate(candidates):
+                refinement_identity = {
+                    "split": split,
+                    "sample_index": source_sample_index,
+                    "cif_name": item["cif_name"],
+                    "prompt_mode": prompt_mode,
+                    "rep": rep,
+                    "generated_minicif": generated_minicif,
+                }
+                refinement_record = None
                 row = {
                     "split": split,
                     "sample_index": source_sample_index,
@@ -447,6 +546,10 @@ def evaluate_split(
                     "parse_ok": False,
                     "structure_ok": False,
                     "match": False,
+                    "refinement_requested": bool(
+                        refinement_config is not None
+                        and refinement_config.enabled
+                    ),
                 }
                 try:
                     generated_parsed = parse_fn(generated_minicif)
@@ -483,37 +586,146 @@ def evaluate_split(
                             "generated_iq": generated_iq,
                             "generated_structure": generated_structure,
                         })
-                    if args.refine_best:
-                        refine_inputs.append({
-                            "rep": rep,
-                            "rwp": row["rwp"],
-                            "generated_crystal_system": generated_parsed.crystal_system,
-                            "generated_structure": generated_structure,
-                        })
+                    if refinement_config is not None and refinement_config.enabled:
+                        initial_fit_statistics = profile_fit_statistics(
+                            observed_iq, generated_iq
+                        )
+                        initial_fit_statistics["evaluation_r_wp"] = row["rwp"]
+                        initial_metrics = {
+                            "evaluation_r_wp": row["rwp"],
+                            "rmsd": row["rmsd"],
+                            "match": row["match"],
+                            "composition_match": row["composition_match"],
+                            "space_group_match": row["space_group_match"],
+                            "crystal_system_match": row["crystal_system_match"],
+                            "element_set_match": row["element_set_match"],
+                        }
+                        refinement_result, refinement_record = run_bragg_refinement(
+                            xrd_kwargs["qmin"]
+                            + np.arange(len(observed_iq)) * xrd_kwargs["qstep"],
+                            observed_iq,
+                            generated_structure,
+                            refinement_config,
+                            initial_fit_statistics=initial_fit_statistics,
+                        )
+                        row["refinement_attempted"] = True
+                        row["refinement_succeeded"] = (
+                            refinement_result is not None
+                        )
+                        if refinement_result is None:
+                            error = refinement_record["error"]
+                            row["refinement_error"] = (
+                                f"{error['type']}: {error['message']}"
+                            )
+                        else:
+                            fit_statistics = refinement_result.fit_statistics
+                            row.update({
+                                "refinement_initial_r_wp": (
+                                    initial_fit_statistics["r_wp"]
+                                ),
+                                "refinement_initial_chi_squared": (
+                                    initial_fit_statistics["chi_squared"]
+                                ),
+                                "refinement_status": refinement_result.status,
+                                "refinement_converged": (
+                                    refinement_result.status == "converged"
+                                ),
+                                "refinement_convergence_classification": (
+                                    refinement_result.convergence.get(
+                                        "classification"
+                                    )
+                                ),
+                                "refinement_r_wp": fit_statistics.get("r_wp"),
+                                "refinement_chi_squared": fit_statistics.get(
+                                    "chi_squared"
+                                ),
+                                "refinement_held_out_r_wp": fit_statistics.get(
+                                    "held_out_r_wp"
+                                ),
+                                "refinement_warning_count": len(
+                                    refinement_result.warnings
+                                ),
+                                "refinement_parameter_count": len(
+                                    refinement_result.parameters
+                                ),
+                            })
+                            try:
+                                refined_structure = (
+                                    refinement_result.refined_structure
+                                )
+                                refined_iq = structure_to_continuous_xrd(
+                                    refined_structure,
+                                    xrd_kwargs,
+                                    args.wavelength,
+                                )
+                                row["refined_rwp"] = rwp(
+                                    reference_iq, refined_iq
+                                )
+                                row["refinement_improved_rwp"] = (
+                                    row["refined_rwp"] < row["rwp"]
+                                )
+                                row.update(refined_structure_metrics(
+                                    reference_structure,
+                                    refined_structure,
+                                    reference_parsed.space_group,
+                                    reference_parsed.crystal_system,
+                                    matcher,
+                                    args.rmsd_threshold,
+                                ))
+                                refinement_record["refined_fit_statistics"][
+                                    "evaluation_r_wp"
+                                ] = row["refined_rwp"]
+                                refinement_record["evaluation_metrics"] = {
+                                    "initial": initial_metrics,
+                                    "refined": {
+                                        key: row[key]
+                                        for key in (
+                                            "refined_rwp",
+                                            "refined_rmsd",
+                                            "refined_match",
+                                            "refined_composition_match",
+                                            "refined_space_group_match",
+                                            "refined_crystal_system_match",
+                                            "refined_element_set_match",
+                                        )
+                                    },
+                                }
+                                if plot_example:
+                                    figure_rows.append({
+                                        "rep": f"refined {rep}",
+                                        "rwp": row["refined_rwp"],
+                                        "generated_iq": refined_iq,
+                                        "generated_structure": refined_structure,
+                                    })
+                            except Exception as exc:
+                                row["refined_metric_error"] = str(exc)
+                                refinement_record["evaluation_metric_error"] = {
+                                    "type": type(exc).__name__,
+                                    "message": str(exc),
+                                }
                 except Exception as exc:
                     row["error"] = str(exc)
+                    if refinement_config is not None and refinement_config.enabled:
+                        refinement_record = failed_refinement_record(
+                            refinement_config,
+                            exc,
+                            initial_fit_statistics={
+                                "evaluation_r_wp": row.get("rwp")
+                            },
+                        )
+                        row["refinement_attempted"] = False
+                        row["refinement_succeeded"] = False
+                        row["refinement_error"] = (
+                            f"InvalidCandidate: {exc}"
+                        )
+                if refinement_record is not None:
+                    write_refinement_record(
+                        refinement_handle,
+                        refinement_identity,
+                        refinement_record,
+                    )
                 mode_rows.append(row)
 
-            if args.refine_best and refine_inputs:
-                refinement = refine_best_candidate(
-                    refine_inputs, reference_iq, xrd_kwargs, args.wavelength,
-                    max_nfev=args.refine_max_nfev, top_k=args.refine_topk,
-                )
-                if refinement is not None:
-                    for row in mode_rows:
-                        if row["rep"] == refinement["source_rep"]:
-                            row["refined_rwp"] = refinement["rwp_after"]
-                            break
-                    if (
-                        plot_example
-                        and refinement["rwp_after"] <= refinement["rwp_before"]
-                    ):
-                        figure_rows.append({
-                            "rep": f"refined {refinement['source_rep']}",
-                            "rwp": refinement["rwp_after"],
-                            "generated_iq": refinement["generated_iq"],
-                            "generated_structure": refinement["generated_structure"],
-                        })
             if plot_example and figure_rows:
                 save_evaluation_example(
                     out_dir,
@@ -547,12 +759,11 @@ def summarize(df):
         valid_rwp = split_df.dropna(subset=["rwp"]) if "rwp" in split_df else split_df.iloc[0:0]
         by_sample = split_df.groupby("sample_index")
         best_rwp = by_sample["rwp"].min() if "rwp" in split_df else pd.Series(dtype=float)
-        # After refinement the best achievable Rwp per sample is the min over both the raw
-        # candidate Rwp and the refined Rwp of the surfaced candidate.
         if "refined_rwp" in split_df:
-            combined = split_df[["rwp", "refined_rwp"]].min(axis=1, skipna=True)
-            best_refined_rwp = combined.groupby(split_df["sample_index"]).min()
+            valid_refined_rwp = split_df.dropna(subset=["refined_rwp"])
+            best_refined_rwp = by_sample["refined_rwp"].min()
         else:
+            valid_refined_rwp = split_df.iloc[0:0]
             best_refined_rwp = pd.Series(dtype=float)
         summary = {
             "split": group_key[0],
@@ -569,6 +780,7 @@ def summarize(df):
             "mean_best_rwp": float(best_rwp.mean()) if not best_rwp.empty else np.nan,
             "median_best_refined_rwp": float(best_refined_rwp.median()) if not best_refined_rwp.empty else np.nan,
             "mean_best_refined_rwp": float(best_refined_rwp.mean()) if not best_refined_rwp.empty else np.nan,
+            "median_refined_rwp": float(valid_refined_rwp["refined_rwp"].median()) if not valid_refined_rwp.empty else np.nan,
             "median_generated_n_tokens": float(split_df["generated_n_tokens"].dropna().median()) if "generated_n_tokens" in split_df else np.nan,
             "median_matched_rmsd": float(split_df.loc[split_df["match"] == True, "rmsd"].median()) if "rmsd" in split_df else np.nan,
             "space_group_accuracy": float(split_df["space_group_match"].fillna(False).mean()) if "space_group_match" in split_df else np.nan,
@@ -578,6 +790,19 @@ def summarize(df):
             "mean_missing_elements": float(split_df["missing_elements"].dropna().mean()) if "missing_elements" in split_df else np.nan,
             "composition_match_rate": float(split_df["composition_match"].fillna(False).mean()) if "composition_match" in split_df else np.nan,
             "formula_accuracy": float(split_df["formula_match"].fillna(False).mean()) if "formula_match" in split_df else np.nan,
+            "refinement_success_rate": float(split_df["refinement_succeeded"].fillna(False).mean()) if "refinement_succeeded" in split_df else np.nan,
+            "refinement_rwp_improvement_rate": float(split_df["refinement_improved_rwp"].dropna().mean()) if "refinement_improved_rwp" in split_df else np.nan,
+            "refined_structure_rate": float(split_df["refined_structure_ok"].fillna(False).mean()) if "refined_structure_ok" in split_df else np.nan,
+            "refined_candidate_match_rate": float(split_df["refined_match"].fillna(False).mean()) if "refined_match" in split_df else np.nan,
+            "refined_best_of_k_match_rate": float(by_sample["refined_match"].max().fillna(False).mean()) if "refined_match" in split_df else np.nan,
+            "refined_space_group_accuracy": float(split_df["refined_space_group_match"].fillna(False).mean()) if "refined_space_group_match" in split_df else np.nan,
+            "refined_crystal_system_accuracy": float(split_df["refined_crystal_system_match"].fillna(False).mean()) if "refined_crystal_system_match" in split_df else np.nan,
+            "refined_element_set_accuracy": float(split_df["refined_element_set_match"].fillna(False).mean()) if "refined_element_set_match" in split_df else np.nan,
+            "refined_composition_match_rate": float(split_df["refined_composition_match"].fillna(False).mean()) if "refined_composition_match" in split_df else np.nan,
+            "refined_formula_accuracy": float(split_df["refined_formula_match"].fillna(False).mean()) if "refined_formula_match" in split_df else np.nan,
+            "mean_refined_extra_elements": float(split_df["refined_extra_elements"].dropna().mean()) if "refined_extra_elements" in split_df else np.nan,
+            "mean_refined_missing_elements": float(split_df["refined_missing_elements"].dropna().mean()) if "refined_missing_elements" in split_df else np.nan,
+            "median_refined_matched_rmsd": float(split_df.loc[split_df["refined_match"] == True, "refined_rmsd"].median()) if "refined_rmsd" in split_df and "refined_match" in split_df else np.nan,
         }
         if len(group_key) > 1:
             summary["prompt_mode"] = group_key[1]
@@ -610,6 +835,13 @@ def summarize_by_crystal_system(df):
                     ("composition_match", "composition_match_rate"),
                     ("space_group_match", "space_group_accuracy"),
                     ("crystal_system_match", "crystal_system_accuracy"),
+                    ("refinement_succeeded", "refinement_success_rate"),
+                    ("refined_structure_ok", "refined_structure_rate"),
+                    ("refined_match", "refined_best_of_k_match_rate"),
+                    ("refined_element_set_match", "refined_element_set_accuracy"),
+                    ("refined_composition_match", "refined_composition_match_rate"),
+                    ("refined_space_group_match", "refined_space_group_accuracy"),
+                    ("refined_crystal_system_match", "refined_crystal_system_accuracy"),
                 ):
                     sample[target] = (
                         bool(sample_df[source].fillna(False).any())
@@ -619,6 +851,12 @@ def summarize_by_crystal_system(df):
                 sample["best_rwp"] = (
                     float(sample_df["rwp"].dropna().min())
                     if "rwp" in sample_df and not sample_df["rwp"].dropna().empty
+                    else np.nan
+                )
+                sample["best_refined_rwp"] = (
+                    float(sample_df["refined_rwp"].dropna().min())
+                    if "refined_rwp" in sample_df
+                    and not sample_df["refined_rwp"].dropna().empty
                     else np.nan
                 )
                 samples.append(sample)
@@ -641,10 +879,23 @@ def summarize_by_crystal_system(df):
                 "composition_match_rate",
                 "space_group_accuracy",
                 "crystal_system_accuracy",
+                "refinement_success_rate",
+                "refined_structure_rate",
+                "refined_best_of_k_match_rate",
+                "refined_element_set_accuracy",
+                "refined_composition_match_rate",
+                "refined_space_group_accuracy",
+                "refined_crystal_system_accuracy",
             ):
                 row[metric] = float(sample_df[metric].mean())
             row["median_best_rwp"] = float(sample_df["best_rwp"].median())
             row["mean_best_rwp"] = float(sample_df["best_rwp"].mean())
+            row["median_best_refined_rwp"] = float(
+                sample_df["best_refined_rwp"].median()
+            )
+            row["mean_best_refined_rwp"] = float(
+                sample_df["best_refined_rwp"].mean()
+            )
             rows.append(row)
     return pd.DataFrame(rows)
 
@@ -703,19 +954,88 @@ def plot_metric_summary(summary, out_dir):
     plt.close(fig)
 
 
+def plot_refinement_metric_comparison(summary, out_dir):
+    if (
+        summary.empty
+        or "refinement_success_rate" not in summary
+        or summary["refinement_success_rate"].dropna().empty
+    ):
+        return
+    metrics = [
+        (
+            "best_of_k_match_rate",
+            "refined_best_of_k_match_rate",
+            "structure match",
+        ),
+        (
+            "element_set_accuracy",
+            "refined_element_set_accuracy",
+            "element set",
+        ),
+        (
+            "composition_match_rate",
+            "refined_composition_match_rate",
+            "composition",
+        ),
+        (
+            "crystal_system_accuracy",
+            "refined_crystal_system_accuracy",
+            "crystal system",
+        ),
+        (
+            "space_group_accuracy",
+            "refined_space_group_accuracy",
+            "space group",
+        ),
+    ]
+    labels = summary["split"].astype(str)
+    if "prompt_mode" in summary.columns:
+        labels = labels + "/" + summary["prompt_mode"].astype(str)
+    fig, axes = plt.subplots(
+        2,
+        3,
+        figsize=(16, 8),
+        dpi=160,
+        squeeze=False,
+        constrained_layout=True,
+    )
+    x = np.arange(len(summary))
+    for ax, (initial, refined, title) in zip(axes.flat, metrics):
+        ax.bar(x - 0.2, summary[initial], width=0.4, label="initial")
+        ax.bar(x + 0.2, summary[refined], width=0.4, label="refined")
+        ax.set_title(title)
+        ax.set_ylim(0, 1)
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=7)
+        ax.grid(axis="y", alpha=0.25)
+    success_ax = axes.flat[-1]
+    success_ax.bar(x, summary["refinement_success_rate"], width=0.6)
+    success_ax.set_title("refinement success")
+    success_ax.set_ylim(0, 1)
+    success_ax.set_xticks(x)
+    success_ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=7)
+    success_ax.grid(axis="y", alpha=0.25)
+    axes.flat[0].legend(frameon=False)
+    fig.savefig(os.path.join(out_dir, "refinement_metric_comparison.png"))
+    plt.close(fig)
+
+
 def plot_rwp_distribution(df, out_dir):
     if "rwp" not in df or df["rwp"].dropna().empty:
         return
-    fig, ax = plt.subplots(figsize=(7, 4.5), dpi=160)
+    fig, ax = plt.subplots(figsize=(9, 4.8), dpi=160)
     group_cols = ["split"] + (
         ["prompt_mode"] if "prompt_mode" in df.columns else []
     )
     groups = list(df.groupby(group_cols, dropna=False))
-    labels = [
-        "/".join(str(value) for value in (key if isinstance(key, tuple) else (key,)))
-        for key, _ in groups
-    ]
-    values = [group["rwp"].dropna().to_numpy() for _, group in groups]
+    values = []
+    labels = []
+    for key, group in groups:
+        group_label = _metric_group_label(key)
+        for column, state in (("rwp", "initial"), ("refined_rwp", "refined")):
+            if column in group and not group[column].dropna().empty:
+                values.append(group[column].dropna().to_numpy())
+                labels.append(f"{group_label}\n{state}")
     ax.boxplot(values, showfliers=False)
     ax.set_xticks(range(1, len(labels) + 1))
     ax.set_xticklabels(labels, rotation=30, ha="right")
@@ -739,11 +1059,24 @@ def plot_best_rwp_cdf(df, out_dir):
     )
     fig, ax = plt.subplots(figsize=(8, 5), dpi=160)
     for key, group in df.groupby(group_cols, dropna=False):
-        best = group.groupby("sample_index")["rwp"].min().dropna().sort_values()
-        if best.empty:
-            continue
-        fraction = np.arange(1, len(best) + 1) / len(best)
-        ax.step(best.to_numpy(), fraction, where="post", label=_metric_group_label(key))
+        for column, state in (("rwp", "initial"), ("refined_rwp", "refined")):
+            if column not in group:
+                continue
+            best = (
+                group.groupby("sample_index")[column]
+                .min()
+                .dropna()
+                .sort_values()
+            )
+            if best.empty:
+                continue
+            fraction = np.arange(1, len(best) + 1) / len(best)
+            ax.step(
+                best.to_numpy(),
+                fraction,
+                where="post",
+                label=f"{_metric_group_label(key)}/{state}",
+            )
     ax.set_xlabel("best-of-k Rwp")
     ax.set_ylabel("fraction of samples")
     ax.set_ylim(0, 1)
@@ -769,17 +1102,7 @@ def _crystal_system_matrix(summary, metric):
     return matrix, labels
 
 
-def plot_crystal_system_metrics(summary, out_dir):
-    if summary.empty:
-        return
-    metrics = [
-        ("structure_rate", "valid structure"),
-        ("element_set_accuracy", "element set"),
-        ("composition_match_rate", "composition"),
-        ("crystal_system_accuracy", "crystal system"),
-        ("space_group_accuracy", "space group"),
-        ("best_of_k_match_rate", "structure match"),
-    ]
+def _plot_crystal_system_metric_panels(summary, metrics, path):
     fig, axes = plt.subplots(
         2,
         3,
@@ -816,31 +1139,170 @@ def plot_crystal_system_metrics(summary, out_dir):
                     )
     if image is not None:
         fig.colorbar(image, ax=axes.ravel().tolist(), label="best-of-k sample rate")
-    fig.savefig(os.path.join(out_dir, "crystal_system_metrics.png"))
+    fig.savefig(path)
     plt.close(fig)
+
+
+def plot_crystal_system_metrics(summary, out_dir):
+    if summary.empty:
+        return
+    _plot_crystal_system_metric_panels(
+        summary,
+        [
+            ("structure_rate", "valid structure"),
+            ("element_set_accuracy", "element set"),
+            ("composition_match_rate", "composition"),
+            ("crystal_system_accuracy", "crystal system"),
+            ("space_group_accuracy", "space group"),
+            ("best_of_k_match_rate", "structure match"),
+        ],
+        os.path.join(out_dir, "crystal_system_metrics.png"),
+    )
+    if (
+        "refinement_success_rate" in summary
+        and not summary["refinement_success_rate"].dropna().empty
+    ):
+        _plot_crystal_system_metric_panels(
+            summary,
+            [
+                ("refined_structure_rate", "refined structure"),
+                ("refined_element_set_accuracy", "refined element set"),
+                (
+                    "refined_composition_match_rate",
+                    "refined composition",
+                ),
+                (
+                    "refined_crystal_system_accuracy",
+                    "refined crystal system",
+                ),
+                (
+                    "refined_space_group_accuracy",
+                    "refined space group",
+                ),
+                (
+                    "refined_best_of_k_match_rate",
+                    "refined structure match",
+                ),
+            ],
+            os.path.join(out_dir, "crystal_system_refined_metrics.png"),
+        )
 
 
 def plot_crystal_system_rwp(summary, out_dir):
     if summary.empty or summary["median_best_rwp"].dropna().empty:
         return
-    matrix, labels = _crystal_system_matrix(summary, "median_best_rwp")
-    fig, ax = plt.subplots(
-        figsize=(9, max(4, 0.45 * len(labels) + 2)),
+    has_refined = (
+        "median_best_refined_rwp" in summary
+        and not summary["median_best_refined_rwp"].dropna().empty
+    )
+    columns = [
+        ("median_best_rwp", "initial"),
+        ("median_best_refined_rwp", "refined"),
+    ] if has_refined else [("median_best_rwp", "initial")]
+    fig, axes = plt.subplots(
+        1,
+        len(columns),
+        figsize=(9 * len(columns), max(4, 0.45 * len(summary) + 2)),
         dpi=160,
+        squeeze=False,
+        constrained_layout=True,
     )
-    image = ax.imshow(matrix, aspect="auto", cmap="magma_r")
-    ax.set_xticks(range(7))
-    ax.set_xticklabels(
-        CRYSTAL_SYSTEM_NAMES.values(),
-        rotation=35,
-        ha="right",
+    matrices = [
+        (*_crystal_system_matrix(summary, column), title)
+        for column, title in columns
+    ]
+    finite = np.concatenate(
+        [matrix[np.isfinite(matrix)] for matrix, _, _ in matrices]
     )
-    ax.set_yticks(range(len(labels)))
-    ax.set_yticklabels(labels)
-    ax.set_title("Median best-of-k Rwp by reference crystal system")
-    fig.colorbar(image, ax=ax, label="median best-of-k Rwp")
-    fig.tight_layout()
+    vmin, vmax = float(finite.min()), float(finite.max())
+    if np.isclose(vmin, vmax):
+        vmax = vmin + 1e-12
+    for ax, (matrix, labels, title) in zip(axes.flat, matrices):
+        image = ax.imshow(
+            matrix,
+            aspect="auto",
+            cmap="magma_r",
+            vmin=vmin,
+            vmax=vmax,
+        )
+        ax.set_xticks(range(7))
+        ax.set_xticklabels(
+            CRYSTAL_SYSTEM_NAMES.values(),
+            rotation=35,
+            ha="right",
+        )
+        ax.set_yticks(range(len(labels)))
+        ax.set_yticklabels(labels)
+        ax.set_title(f"{title} median best-of-k Rwp")
+    fig.colorbar(
+        image,
+        ax=axes.ravel().tolist(),
+        label="median best-of-k Rwp",
+    )
     fig.savefig(os.path.join(out_dir, "crystal_system_rwp.png"))
+    plt.close(fig)
+
+
+def plot_crystal_system_rwp_distribution(df, out_dir):
+    required = {"rwp", "reference_crystal_system"}
+    if df.empty or not required.issubset(df.columns):
+        return
+    group_cols = ["split"] + (
+        ["prompt_mode"] if "prompt_mode" in df.columns else []
+    )
+    groups = list(df.groupby(group_cols, dropna=False))
+    fig, axes = plt.subplots(
+        len(groups),
+        1,
+        figsize=(12, max(4.5, 4.2 * len(groups))),
+        dpi=160,
+        squeeze=False,
+    )
+    for ax, (key, group) in zip(axes.flat, groups):
+        positions = []
+        values = []
+        colors = []
+        for crystal_system in CRYSTAL_SYSTEM_NAMES:
+            system = group[
+                group["reference_crystal_system"] == crystal_system
+            ]
+            initial = system["rwp"].dropna().to_numpy()
+            if initial.size:
+                positions.append(crystal_system - 0.18)
+                values.append(initial)
+                colors.append("#0072B2")
+            if "refined_rwp" in system:
+                refined = system["refined_rwp"].dropna().to_numpy()
+                if refined.size:
+                    positions.append(crystal_system + 0.18)
+                    values.append(refined)
+                    colors.append("#D55E00")
+        if values:
+            artists = ax.boxplot(
+                values,
+                positions=positions,
+                widths=0.3,
+                showfliers=False,
+                patch_artist=True,
+            )
+            for patch, color in zip(artists["boxes"], colors):
+                patch.set_facecolor(color)
+                patch.set_alpha(0.65)
+        ax.plot([], [], color="#0072B2", linewidth=8, alpha=0.65, label="initial")
+        if "refined_rwp" in group:
+            ax.plot([], [], color="#D55E00", linewidth=8, alpha=0.65, label="refined")
+        ax.set_xticks(range(1, 8))
+        ax.set_xticklabels(
+            CRYSTAL_SYSTEM_NAMES.values(),
+            rotation=25,
+            ha="right",
+        )
+        ax.set_ylabel("Rwp")
+        ax.set_title(_metric_group_label(key))
+        ax.grid(axis="y", alpha=0.25)
+        ax.legend(frameon=False)
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, "crystal_system_rwp_distribution.png"))
     plt.close(fig)
 
 
@@ -860,8 +1322,19 @@ def plot_rwp_vs_rmsd(df, out_dir):
             group["rmsd"],
             s=13,
             alpha=0.35,
-            label=_metric_group_label(key),
+            label=f"{_metric_group_label(key)}/initial",
         )
+    if {"refined_rwp", "refined_rmsd"}.issubset(df.columns):
+        refined = df.dropna(subset=["refined_rwp", "refined_rmsd"])
+        for key, group in refined.groupby(group_cols, dropna=False):
+            ax.scatter(
+                group["refined_rwp"],
+                group["refined_rmsd"],
+                s=18,
+                marker="x",
+                alpha=0.5,
+                label=f"{_metric_group_label(key)}/refined",
+            )
     ax.set_xlabel("Rwp")
     ax.set_ylabel("matched structure RMSD")
     ax.grid(alpha=0.25)
@@ -929,9 +1402,52 @@ def main():
     parser.add_argument("--use-current", action="store_true", help="Use current_model instead of best_model_state")
     parser.add_argument("--rmsd-threshold", type=float, default=0.0, help="Optional positive RMSD threshold for match rate")
     parser.add_argument("--cfg-scale", type=float, default=None, help="Classifier-free guidance scale (>1 strengthens PXRD conditioning; requires condition_dropout_prob>0 at train time)")
-    parser.add_argument("--refine-best", action="store_true", help="Refine candidate lattices against the PXRD (coarse scale scan + local refine) and report refined Rwp")
-    parser.add_argument("--refine-topk", type=int, default=4, help="Number of top-Rwp candidates to refine per sample for --refine-best")
-    parser.add_argument("--refine-max-nfev", type=int, default=30, help="Maximum simulator evaluations per candidate for --refine-best")
+    parser.add_argument(
+        "--refine",
+        action="store_true",
+        help="Refine every valid generated candidate with BraggCalculator",
+    )
+    parser.add_argument(
+        "--refinement-config",
+        default="",
+        help="YAML configuration for RefinementPolicy and optional species assignment",
+    )
+    parser.add_argument(
+        "--refinement-domain",
+        choices=["q", "two_theta"],
+        default=None,
+        help="Observed-pattern coordinate domain; overrides the refinement YAML",
+    )
+    parser.add_argument(
+        "--refinement-radiation",
+        choices=["xray", "neutron"],
+        default=None,
+        help="Radiation model; overrides the refinement YAML",
+    )
+    parser.add_argument(
+        "--refinement-wavelength",
+        type=float,
+        default=None,
+        help="Refinement wavelength in angstrom; defaults to --wavelength",
+    )
+    parser.add_argument(
+        "--refinement-device",
+        default=None,
+        help="Torch device for refinement; defaults to --device",
+    )
+    parser.add_argument(
+        "--refinement-policy",
+        choices=["quick", "cautious", "robust"],
+        default=None,
+        help="RefinementPolicy preset; overrides the refinement YAML",
+    )
+    parser.add_argument(
+        "--refine-best",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument("--refine-topk", type=int, default=4, help=argparse.SUPPRESS)
+    parser.add_argument("--refine-max-nfev", type=int, default=30, help=argparse.SUPPRESS)
     parser.add_argument(
         "--plot-examples",
         type=int,
@@ -977,6 +1493,19 @@ def main():
     tokenizer, parse_fn, structure_fn, end_token = representation_api(tokenizer_name)
     matcher = StructureMatcher()
     xrd_kwargs = clean_xrd_kwargs(config, args)
+    refinement_config = load_bragg_refinement_config(
+        args.refinement_config,
+        enabled=args.refine or args.refine_best,
+        domain=args.refinement_domain,
+        radiation=args.refinement_radiation,
+        wavelength=args.refinement_wavelength,
+        device=args.refinement_device,
+        policy_name=args.refinement_policy,
+        default_wavelength=XRDCalculator(
+            wavelength=args.wavelength
+        ).wavelength,
+        default_device=args.device,
+    )
     artifact_spec = (
         load_bragg_artifact_spec(args.artifact_config)
         if args.artifact_config
@@ -989,13 +1518,28 @@ def main():
         )
     plot_learning_curves(checkpoint, out_dir)
 
+    refinement_output = (
+        os.path.join(out_dir, "minicif_refinement_results.jsonl.gz")
+        if refinement_config.enabled
+        else None
+    )
+    refinement_handle = (
+        gzip.open(refinement_output, "wt", encoding="utf-8")
+        if refinement_output
+        else None
+    )
     frames = []
-    for split in args.splits:
-        path = dataset_path(dataset_dir, split)
-        frames.append(evaluate_split(
-            split, path, model, tokenizer, parse_fn, structure_fn, end_token,
-            matcher, xrd_kwargs, config, args, artifact_spec, out_dir,
-        ))
+    try:
+        for split in args.splits:
+            path = dataset_path(dataset_dir, split)
+            frames.append(evaluate_split(
+                split, path, model, tokenizer, parse_fn, structure_fn, end_token,
+                matcher, xrd_kwargs, config, args, artifact_spec, out_dir,
+                refinement_config, refinement_handle,
+            ))
+    finally:
+        if refinement_handle is not None:
+            refinement_handle.close()
     results = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     summary = summarize(results)
     crystal_system_summary = summarize_by_crystal_system(results)
@@ -1018,13 +1562,21 @@ def main():
                 if args.artifact_config
                 else None
             ),
+            "refinement": refinement_config.to_dict(),
+            "refinement_output": (
+                os.path.abspath(refinement_output)
+                if refinement_output
+                else None
+            ),
             "summary": summary.to_dict(orient="records"),
         }, f, indent=2)
     plot_metric_summary(summary, out_dir)
+    plot_refinement_metric_comparison(summary, out_dir)
     plot_rwp_distribution(results, out_dir)
     plot_best_rwp_cdf(results, out_dir)
     plot_crystal_system_metrics(crystal_system_summary, out_dir)
     plot_crystal_system_rwp(crystal_system_summary, out_dir)
+    plot_crystal_system_rwp_distribution(results, out_dir)
     plot_rwp_vs_rmsd(results, out_dir)
     print(summary.to_string(index=False))
     print(f"Wrote minicif report to {out_dir}")

@@ -22,6 +22,12 @@ compatible_evaluation_indices = visualize_minicif.compatible_evaluation_indices
 plot_best_rwp_cdf = visualize_minicif.plot_best_rwp_cdf
 plot_crystal_system_metrics = visualize_minicif.plot_crystal_system_metrics
 plot_crystal_system_rwp = visualize_minicif.plot_crystal_system_rwp
+plot_crystal_system_rwp_distribution = (
+    visualize_minicif.plot_crystal_system_rwp_distribution
+)
+plot_refinement_metric_comparison = (
+    visualize_minicif.plot_refinement_metric_comparison
+)
 plot_rwp_distribution = visualize_minicif.plot_rwp_distribution
 plot_rwp_vs_rmsd = visualize_minicif.plot_rwp_vs_rmsd
 save_evaluation_example = visualize_minicif.save_evaluation_example
@@ -201,25 +207,43 @@ class VisualizeMinicifTest(unittest.TestCase):
                     "crystal_system_match": True,
                     "rwp": rwp_value + 0.01 * crystal_system,
                     "rmsd": 0.3 + 0.1 * rep,
+                    "refinement_succeeded": True,
+                    "refined_match": True,
+                    "refined_element_set_match": True,
+                    "refined_composition_match": True,
+                    "refined_space_group_match": rep == 1,
+                    "refined_crystal_system_match": True,
+                    "refined_formula_match": True,
+                    "refined_rwp": rwp_value * 0.5,
+                    "refined_rmsd": 0.2 + 0.05 * rep,
                 })
         metrics = pd.DataFrame(rows)
 
         crystal_summary = summarize_by_crystal_system(metrics)
+        overall_summary = summarize(metrics)
 
         self.assertEqual(set(crystal_summary["reference_crystal_system"]), {1, 7})
         self.assertTrue((crystal_summary["best_of_k_match_rate"] == 1.0).all())
         self.assertTrue((crystal_summary["composition_match_rate"] == 1.0).all())
+        self.assertTrue(
+            (crystal_summary["refined_best_of_k_match_rate"] == 1.0).all()
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             plot_best_rwp_cdf(metrics, tmpdir)
             plot_crystal_system_metrics(crystal_summary, tmpdir)
             plot_crystal_system_rwp(crystal_summary, tmpdir)
+            plot_crystal_system_rwp_distribution(metrics, tmpdir)
+            plot_refinement_metric_comparison(overall_summary, tmpdir)
             plot_rwp_vs_rmsd(metrics, tmpdir)
 
             for filename in (
                 "best_rwp_cdf.png",
                 "crystal_system_metrics.png",
+                "crystal_system_refined_metrics.png",
                 "crystal_system_rwp.png",
+                "crystal_system_rwp_distribution.png",
+                "refinement_metric_comparison.png",
                 "rwp_vs_rmsd.png",
             ):
                 self.assertTrue(os.path.isfile(os.path.join(tmpdir, filename)))

@@ -6,7 +6,7 @@ setup(
     python_requires='>=3.12,<3.14',
     packages=find_packages(),
     install_requires=[
-        'braggcalculator>=0.3.0',
+        'braggcalculator[refinement]==0.4.1',
         'numpy',
         'pandas',
         'matplotlib',

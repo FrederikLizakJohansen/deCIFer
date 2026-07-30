@@ -76,6 +76,16 @@ sbatch minislurm/evaluate_minicif_v2.sh \
 The training artifact profile is intentionally unseeded. The evaluation profile
 has a fixed seed. Omit `--artifact-config` for clean conditions.
 
+To evaluate with BraggCalculator refinement:
+
+```bash
+sbatch minislurm/evaluate_minicif_v2.sh \
+  --refinement-config configs/refinement/quick.yaml
+```
+
+Use the CLI overrides documented in `configs/refinement/README.md` for
+two-theta/Q input, X-ray/neutron radiation, wavelength, device, and policy.
+
 `train_minicif_v2.sh` runs `bin/audit_minicif_v2.py` before allocating model
 memory. Set `AUDIT_MAX_ITEMS=0` to deeply validate every record, or
 `SKIP_PREFLIGHT=1` only after an unchanged dataset has already passed.
