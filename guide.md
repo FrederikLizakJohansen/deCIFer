@@ -117,11 +117,50 @@ python bin/visualize_minicif.py \
   --num-reps 8
 ```
 
+Evaluation progress is committed after each dataset sample and prompt mode under
+`OUT_DIR/evaluation_checkpoints/{split}.sqlite3`. Rerun the same command with
+the same output directory to resume. Configuration changes that affect results
+must use a new output directory or `--restart-splits`.
+
+Train, validation, and test can be evaluated as separate jobs:
+
+```bash
+python bin/visualize_minicif.py \
+  --checkpoint models/minicif_v2/peak/standard/medium/ckpt.pt \
+  --dataset-dir data/noma_minicif_v2 \
+  --out-dir models/minicif_v2/peak/standard/medium/minicif_report \
+  --splits train \
+  --prompt-modes pxrd-elements \
+  --num-reps 8
+
+# Run the same command later with --splits val, then --splits test.
+```
+
+Each run rebuilds the combined report from every split checkpoint in the output
+directory. Per-split tables are written to `split_metrics/`. Rebuild the
+combined CSV, JSON, refinement export, and figures without loading the model:
+
+```bash
+python bin/visualize_minicif.py \
+  --combine-only \
+  --out-dir models/minicif_v2/peak/standard/medium/minicif_report
+```
+
+To discard and recompute one split, run its evaluation command with
+`--restart-splits --splits SPLIT`.
+
 To plot examples from an existing evaluation:
 
 ```bash
 python bin/plot_minicif_examples.py \
   --report-dir models/minicif_v2/peak/standard/medium/minicif_report \
   --splits test \
-  --prompt-modes pxrd-elements
+  --prompt-modes pxrd-elements \
+  --show-refined
 ```
+
+`--show-refined` requires an evaluation run with refinement enabled. Each figure
+then compares reference, generated, and refined PXRD profiles and structures.
+Available evaluation presets are `quick.yaml`, `cautious.yaml`, `robust.yaml`,
+`cautious_coordinates.yaml`, and `cautious_species_assignment.yaml` under
+`configs/refinement/`. Use a separate report directory for each preset.

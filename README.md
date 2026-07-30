@@ -249,6 +249,36 @@ system. Candidate-specific refinement failures are recorded without stopping
 the run. Configuration and CLI options are listed in
 [`configs/refinement/README.md`](configs/refinement/README.md).
 
+Evaluation is resumable at each sample and prompt mode. Split checkpoints are
+stored in `OUT_DIR/evaluation_checkpoints/`, and rerunning the same command
+continues from the last committed unit. Run `train`, `val`, and `test` in
+separate commands with the same output directory to build a staged report.
+Every run combines all available split checkpoints and writes individual tables
+under `OUT_DIR/split_metrics/`. Reports can also be rebuilt without inference:
+
+```bash
+python bin/visualize_minicif.py \
+  --combine-only \
+  --out-dir models/minicif_v2/peak/standard/medium/minicif_report
+```
+
+Use `--restart-splits --splits SPLIT` to discard and recompute selected split
+checkpoints.
+
+Successful refinement results can be included when plotting examples from an
+existing report:
+
+```bash
+python bin/plot_minicif_examples.py \
+  --report-dir models/minicif_v2/peak/standard/medium/minicif_report \
+  --show-refined
+```
+
+The resulting figures show reference, generated, and refined PXRD profiles and
+structures. Evaluation presets for quick, cautious, robust, coordinate, and
+species-assignment experiments are described in
+[`configs/refinement/README.md`](configs/refinement/README.md).
+
 The v2 configs use record-aligned, length-bucketed token-budget batches, sparse
 Fourier or hybrid PXRD conditioning, cross-attention, typed vocabulary heads,
 constrained lattice generation, fused AdamW on CUDA, and cached

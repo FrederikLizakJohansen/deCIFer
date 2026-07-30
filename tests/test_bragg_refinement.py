@@ -16,6 +16,39 @@ from decifer.bragg_refinement import (
 
 
 class BraggRefinementTest(unittest.TestCase):
+    def test_repository_refinement_presets_load(self):
+        config_dir = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "configs",
+            "refinement",
+        )
+        expected = {
+            "quick.yaml": ("quick", False, 1, False),
+            "cautious.yaml": ("cautious", False, 1, False),
+            "robust.yaml": ("robust", False, 3, False),
+            "cautious_coordinates.yaml": ("cautious", True, 1, False),
+            "cautious_species_assignment.yaml": (
+                "cautious",
+                False,
+                1,
+                True,
+            ),
+        }
+
+        for filename, values in expected.items():
+            config = load_bragg_refinement_config(
+                os.path.join(config_dir, filename),
+                default_wavelength=1.5406,
+            )
+            actual = (
+                config.policy_name,
+                config.policy.refine_coordinates,
+                config.policy.restarts,
+                config.species_assignment is not None,
+            )
+            self.assertEqual(actual, values)
+
     def test_small_synthetic_q_refinement_returns_structured_result(self):
         reference = Structure(
             Lattice.cubic(5.43),

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
-import gzip
+import hashlib
 import json
 import os
 import sys
@@ -30,6 +30,13 @@ from decifer.bragg_refinement import (
 )
 from decifer.decifer_dataset import DeciferDataset, h5_record_token_lengths
 from decifer.decifer_model import Decifer, DeciferConfig
+from decifer.evaluation_checkpoint import (
+    EvaluationCheckpoint,
+    checkpoint_paths,
+    export_refinement_records,
+    export_split_metrics,
+    load_combined_checkpoint_frame,
+)
 from decifer.minicif import END_TOKEN, MinicifTokenizer, minicif_to_structure, parse_minicif
 from decifer.minicif_v2 import (
     END_TOKEN as V2_END_TOKEN,
@@ -163,12 +170,6 @@ def refined_structure_metrics(
         "refined_composition_match": composition_match,
         "refined_formula_match": composition_match,
     }
-
-
-def write_refinement_record(handle, identity, record):
-    if handle is None:
-        return
-    handle.write(json.dumps({**identity, **record}, allow_nan=False) + "\n")
 
 
 def load_checkpoint(path, device, use_best=True):
@@ -431,7 +432,7 @@ def generate_candidates(model, prompt, cond_vec, args, tokenizer):
 def evaluate_split(
     split, h5_path, model, tokenizer, parse_fn, structure_fn, end_token,
     matcher, xrd_kwargs, config, args, artifact_spec=None, out_dir="",
-    refinement_config=None, refinement_handle=None,
+    refinement_config=None, evaluation_checkpoint=None,
 ):
     compatible_indices = compatible_evaluation_indices(h5_path, config)
     dataset = DeciferDataset(
@@ -463,9 +464,22 @@ def evaluate_split(
     example_targets = set(available_crystal_systems[:args.plot_examples])
     plotted_examples = {mode: set() for mode in args.prompt_modes}
     plotted_example_counts = {mode: 0 for mode in args.prompt_modes}
-    rows = []
+    completed_units = evaluation_checkpoint.completed_units()
+    if completed_units:
+        print(
+            f"{h5_path}: resuming with {len(completed_units)} completed "
+            "sample/prompt units.",
+            flush=True,
+        )
     for sample_index in tqdm(range(n_items), desc=f"Evaluating {split}"):
         source_sample_index = dataset.source_index(sample_index)
+        pending_prompt_modes = [
+            mode
+            for mode in args.prompt_modes
+            if (source_sample_index, mode) not in completed_units
+        ]
+        if not pending_prompt_modes:
+            continue
         item = dataset[sample_index]
         reference_minicif = item["minicif_string"]
         try:
@@ -489,22 +503,29 @@ def evaluate_split(
                 artifact_device=model.device,
             )
         except Exception as exc:
-            rows.append({
-                "split": split,
-                "sample_index": source_sample_index,
-                "cif_name": item["cif_name"],
-                "rep": -1,
-                "prompt_mode": None,
-                "reference_error": str(exc),
-                "parse_ok": False,
-                "match": False,
-            })
+            for prompt_mode in pending_prompt_modes:
+                evaluation_checkpoint.save_unit(
+                    source_sample_index,
+                    prompt_mode,
+                    [{
+                        "split": split,
+                        "sample_index": source_sample_index,
+                        "cif_name": item["cif_name"],
+                        "rep": -1,
+                        "prompt_mode": prompt_mode,
+                        "reference_error": str(exc),
+                        "parse_ok": False,
+                        "match": False,
+                    }],
+                    [],
+                )
             continue
 
-        for prompt_mode in args.prompt_modes:
+        for prompt_mode in pending_prompt_modes:
             prompt = prompt_from_minicif(reference_minicif, prompt_mode, tokenizer)
             candidates = generate_candidates(model, prompt, cond, args, tokenizer)
             mode_rows = []
+            mode_refinement_records = []
             figure_rows = []
             reference_crystal_system = int(reference_parsed.crystal_system)
             missing_target = (
@@ -719,10 +740,8 @@ def evaluate_split(
                             f"InvalidCandidate: {exc}"
                         )
                 if refinement_record is not None:
-                    write_refinement_record(
-                        refinement_handle,
-                        refinement_identity,
-                        refinement_record,
+                    mode_refinement_records.append(
+                        {**refinement_identity, **refinement_record}
                     )
                 mode_rows.append(row)
 
@@ -744,11 +763,17 @@ def evaluate_split(
                 )
                 plotted_examples[prompt_mode].add(reference_crystal_system)
                 plotted_example_counts[prompt_mode] += 1
-            rows.extend(mode_rows)
-    return pd.DataFrame(rows)
+            evaluation_checkpoint.save_unit(
+                source_sample_index,
+                prompt_mode,
+                mode_rows,
+                mode_refinement_records,
+            )
 
 
 def summarize(df):
+    if df.empty or "split" not in df.columns:
+        return pd.DataFrame()
     summaries = []
     group_cols = ["split"]
     if "prompt_mode" in df.columns:
@@ -1344,12 +1369,139 @@ def plot_rwp_vs_rmsd(df, out_dir):
     plt.close(fig)
 
 
+def file_identity(path, *, content_hash=False):
+    path = os.path.abspath(path)
+    stat = os.stat(path)
+    identity = {
+        "path": path,
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+    if content_hash:
+        with open(path, "rb") as handle:
+            identity["sha256"] = hashlib.sha256(handle.read()).hexdigest()
+    return identity
+
+
+def evaluation_signature(
+    args,
+    checkpoint_path,
+    h5_path,
+    tokenizer_name,
+    xrd_kwargs,
+    refinement_config,
+):
+    return {
+        "schema_version": 1,
+        "checkpoint": file_identity(checkpoint_path),
+        "dataset": file_identity(h5_path),
+        "tokenizer": tokenizer_name,
+        "use_current": args.use_current,
+        "num_reps": args.num_reps,
+        "generation_batch_size": args.generation_batch_size,
+        "max_new_tokens": args.max_new_tokens,
+        "temperature": args.temperature,
+        "top_k": args.top_k,
+        "cfg_scale": args.cfg_scale,
+        "rmsd_threshold": args.rmsd_threshold,
+        "seed": args.seed,
+        "wavelength": args.wavelength,
+        "xrd_kwargs": xrd_kwargs,
+        "artifact_config": (
+            file_identity(args.artifact_config, content_hash=True)
+            if args.artifact_config
+            else None
+        ),
+        "refinement": refinement_config.to_dict(),
+    }
+
+
+def write_combined_report(out_dir, report_metadata=None, checkpoint=None):
+    paths = checkpoint_paths(out_dir)
+    if not paths:
+        raise ValueError(
+            f"no evaluation checkpoints found under {out_dir}"
+        )
+    results = load_combined_checkpoint_frame(paths)
+    summary = summarize(results)
+    crystal_system_summary = summarize_by_crystal_system(results)
+    export_split_metrics(paths, out_dir)
+
+    refinement_output = os.path.join(
+        out_dir, "minicif_refinement_results.jsonl.gz"
+    )
+    refinement_count = export_refinement_records(paths, refinement_output)
+    if refinement_count == 0:
+        os.unlink(refinement_output)
+        refinement_output = None
+
+    results.to_csv(
+        os.path.join(out_dir, "minicif_generation_metrics.csv"),
+        index=False,
+    )
+    summary.to_csv(os.path.join(out_dir, "minicif_summary.csv"), index=False)
+    crystal_system_summary.to_csv(
+        os.path.join(out_dir, "minicif_crystal_system_summary.csv"),
+        index=False,
+    )
+    metadata = dict(report_metadata or {})
+    metadata.update({
+        "checkpoint_files": [os.path.abspath(path) for path in paths],
+        "checkpoint_splits": [
+            os.path.splitext(os.path.basename(path))[0]
+            for path in paths
+        ],
+        "prompt_modes": (
+            sorted(results["prompt_mode"].dropna().unique().tolist())
+            if "prompt_mode" in results
+            else []
+        ),
+        "refinement_output": (
+            os.path.abspath(refinement_output)
+            if refinement_output
+            else None
+        ),
+        "refinement_record_count": refinement_count,
+        "summary": summary.to_dict(orient="records"),
+    })
+    with open(
+        os.path.join(out_dir, "minicif_summary.json"),
+        "w",
+        encoding="utf-8",
+    ) as handle:
+        json.dump(metadata, handle, indent=2)
+
+    if checkpoint is not None:
+        plot_learning_curves(checkpoint, out_dir)
+    plot_metric_summary(summary, out_dir)
+    plot_refinement_metric_comparison(summary, out_dir)
+    plot_rwp_distribution(results, out_dir)
+    plot_best_rwp_cdf(results, out_dir)
+    plot_crystal_system_metrics(crystal_system_summary, out_dir)
+    plot_crystal_system_rwp(crystal_system_summary, out_dir)
+    plot_crystal_system_rwp_distribution(results, out_dir)
+    plot_rwp_vs_rmsd(results, out_dir)
+    print(summary.to_string(index=False))
+    print(f"Wrote combined minicif report to {out_dir}")
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate minicif learning-curve and validation/test evaluation reports.")
-    parser.add_argument("--checkpoint", required=True, help="Path to ckpt.pt")
+    parser.add_argument("--checkpoint", default="", help="Path to ckpt.pt")
     parser.add_argument("--dataset-dir", default="", help="Dataset root containing serialized/{val,test}.h5; defaults to checkpoint config")
     parser.add_argument("--out-dir", default="", help="Output report directory; defaults to CHECKPOINT_DIR/minicif_report")
     parser.add_argument("--splits", nargs="+", default=["val", "test"])
+    parser.add_argument(
+        "--combine-only",
+        action="store_true",
+        help="Rebuild combined outputs from checkpoints already in --out-dir",
+    )
+    parser.add_argument(
+        "--restart-splits",
+        action="store_true",
+        help="Discard checkpoints for the requested --splits before evaluation",
+    )
     parser.add_argument("--max-items", type=int, default=0, help="Limit items per split; 0 means all")
     parser.add_argument("--num-reps", type=int, default=4, help="Generated candidates per dataset item")
     parser.add_argument("--generation-batch-size", type=int, default=8)
@@ -1478,6 +1630,29 @@ def main():
     args = parser.parse_args()
     args.prompt_modes = args.prompt_modes or [args.prompt_mode]
 
+    if args.combine_only:
+        if not args.out_dir:
+            parser.error("--out-dir is required with --combine-only")
+        os.makedirs(args.out_dir, exist_ok=True)
+        metadata = {}
+        summary_path = os.path.join(args.out_dir, "minicif_summary.json")
+        if os.path.exists(summary_path):
+            with open(summary_path, encoding="utf-8") as handle:
+                metadata = json.load(handle)
+            for key in (
+                "checkpoint_files",
+                "checkpoint_splits",
+                "prompt_modes",
+                "refinement_output",
+                "refinement_record_count",
+                "summary",
+            ):
+                metadata.pop(key, None)
+        write_combined_report(args.out_dir, metadata)
+        return
+    if not args.checkpoint:
+        parser.error("--checkpoint is required unless --combine-only is used")
+
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     device = torch.device(args.device)
@@ -1516,46 +1691,36 @@ def main():
             artifact_spec,
             artifacts=replace(artifact_spec.artifacts, seed=args.seed),
         )
-    plot_learning_curves(checkpoint, out_dir)
-
-    refinement_output = (
-        os.path.join(out_dir, "minicif_refinement_results.jsonl.gz")
-        if refinement_config.enabled
-        else None
-    )
-    refinement_handle = (
-        gzip.open(refinement_output, "wt", encoding="utf-8")
-        if refinement_output
-        else None
-    )
-    frames = []
-    try:
-        for split in args.splits:
-            path = dataset_path(dataset_dir, split)
-            frames.append(evaluate_split(
+    checkpoint_dir = os.path.join(out_dir, "evaluation_checkpoints")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    for split in args.splits:
+        path = dataset_path(dataset_dir, split)
+        split_checkpoint = EvaluationCheckpoint(
+            os.path.join(checkpoint_dir, f"{split}.sqlite3"),
+            evaluation_signature(
+                args,
+                args.checkpoint,
+                path,
+                tokenizer_name,
+                xrd_kwargs,
+                refinement_config,
+            ),
+            reset=args.restart_splits,
+        )
+        try:
+            evaluate_split(
                 split, path, model, tokenizer, parse_fn, structure_fn, end_token,
                 matcher, xrd_kwargs, config, args, artifact_spec, out_dir,
-                refinement_config, refinement_handle,
-            ))
-    finally:
-        if refinement_handle is not None:
-            refinement_handle.close()
-    results = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    summary = summarize(results)
-    crystal_system_summary = summarize_by_crystal_system(results)
+                refinement_config, split_checkpoint,
+            )
+        finally:
+            split_checkpoint.close()
 
-    results.to_csv(os.path.join(out_dir, "minicif_generation_metrics.csv"), index=False)
-    summary.to_csv(os.path.join(out_dir, "minicif_summary.csv"), index=False)
-    crystal_system_summary.to_csv(
-        os.path.join(out_dir, "minicif_crystal_system_summary.csv"),
-        index=False,
-    )
-    with open(os.path.join(out_dir, "minicif_summary.json"), "w") as f:
-        json.dump({
+    write_combined_report(
+        out_dir,
+        {
             "checkpoint": os.path.abspath(args.checkpoint),
             "dataset_dir": os.path.abspath(dataset_dir),
-            "prompt_mode": args.prompt_mode,
-            "prompt_modes": args.prompt_modes,
             "xrd_kwargs": xrd_kwargs,
             "artifact_config": (
                 os.path.abspath(args.artifact_config)
@@ -1563,23 +1728,9 @@ def main():
                 else None
             ),
             "refinement": refinement_config.to_dict(),
-            "refinement_output": (
-                os.path.abspath(refinement_output)
-                if refinement_output
-                else None
-            ),
-            "summary": summary.to_dict(orient="records"),
-        }, f, indent=2)
-    plot_metric_summary(summary, out_dir)
-    plot_refinement_metric_comparison(summary, out_dir)
-    plot_rwp_distribution(results, out_dir)
-    plot_best_rwp_cdf(results, out_dir)
-    plot_crystal_system_metrics(crystal_system_summary, out_dir)
-    plot_crystal_system_rwp(crystal_system_summary, out_dir)
-    plot_crystal_system_rwp_distribution(results, out_dir)
-    plot_rwp_vs_rmsd(results, out_dir)
-    print(summary.to_string(index=False))
-    print(f"Wrote minicif report to {out_dir}")
+        },
+        checkpoint=checkpoint,
+    )
 
 
 if __name__ == "__main__":

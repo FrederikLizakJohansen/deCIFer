@@ -1,4 +1,7 @@
+import contextlib
 import importlib.util
+import io
+import json
 import os
 import tempfile
 import unittest
@@ -8,6 +11,7 @@ import numpy as np
 import pandas as pd
 from pymatgen.core import Lattice, Structure
 
+from decifer.evaluation_checkpoint import EvaluationCheckpoint
 from decifer.minicif import MinicifTokenizer
 from decifer.minicif_v2 import MinicifV2Tokenizer
 
@@ -31,9 +35,67 @@ plot_refinement_metric_comparison = (
 plot_rwp_distribution = visualize_minicif.plot_rwp_distribution
 plot_rwp_vs_rmsd = visualize_minicif.plot_rwp_vs_rmsd
 save_evaluation_example = visualize_minicif.save_evaluation_example
+write_combined_report = visualize_minicif.write_combined_report
 
 
 class VisualizeMinicifTest(unittest.TestCase):
+    def test_empty_summary_is_supported(self):
+        self.assertTrue(summarize(pd.DataFrame()).empty)
+
+    def test_combined_report_reads_staged_split_checkpoints(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for split, sample_index in (("train", 1), ("val", 2)):
+                checkpoint = EvaluationCheckpoint(
+                    os.path.join(
+                        tmpdir,
+                        "evaluation_checkpoints",
+                        f"{split}.sqlite3",
+                    ),
+                    {"split": split},
+                )
+                checkpoint.save_unit(
+                    sample_index,
+                    "pxrd",
+                    [{
+                        "split": split,
+                        "sample_index": sample_index,
+                        "prompt_mode": "pxrd",
+                        "rep": 0,
+                        "parse_ok": True,
+                        "structure_ok": True,
+                        "finished": True,
+                        "match": False,
+                        "rwp": 0.2,
+                        "reference_crystal_system": 7,
+                    }],
+                    [],
+                )
+                checkpoint.close()
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                results = write_combined_report(tmpdir)
+
+            self.assertEqual(set(results["split"]), {"train", "val"})
+            self.assertTrue(
+                os.path.isfile(
+                    os.path.join(tmpdir, "minicif_generation_metrics.csv")
+                )
+            )
+            self.assertTrue(
+                os.path.isfile(
+                    os.path.join(tmpdir, "split_metrics", "train.csv")
+                )
+            )
+            with open(
+                os.path.join(tmpdir, "minicif_summary.json"),
+                encoding="utf-8",
+            ) as handle:
+                metadata = json.load(handle)
+            self.assertEqual(
+                set(metadata["checkpoint_splits"]),
+                {"train", "val"},
+            )
+
     def test_save_evaluation_example_writes_split_specific_figure(self):
         structure = Structure(Lattice.cubic(3.0), ["Na"], [[0, 0, 0]])
         reference_iq = np.asarray([1.0, 0.5, 0.0])

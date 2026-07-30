@@ -71,6 +71,38 @@ CLI overrides are available for common experimental settings:
 
 `--refine` enables the quick policy without requiring a YAML file.
 
+## Included presets
+
+| Config | Continuous optimization | Intended use |
+| --- | --- | --- |
+| `quick.yaml` | 200 steps, one start | Fast full-dataset baseline |
+| `cautious.yaml` | 550 steps, one start | More stable lattice/profile refinement |
+| `robust.yaml` | 420 coarse-to-fine steps, three restarts | Difficult profiles and final reporting |
+| `cautious_coordinates.yaml` | 700 steps including restrained coordinates | Test whether positional refinement improves generated structures |
+| `cautious_species_assignment.yaml` | Discrete site-species search followed by cautious refinement | Candidates with correct composition and uncertain site assignment |
+
+The step counts describe the built-in BraggCalculator 0.4.1 policies. Runtime
+also depends on structure size, profile length, device, and species-search
+candidate count. Coordinate and species-assignment presets change more of the
+candidate structure, so compare their refined structural metrics alongside Rwp.
+
+Evaluate the same checkpoint into separate report directories when comparing
+policies. The evaluation checkpoint signature prevents results from different
+refinement configurations from being mixed:
+
+```bash
+for preset in quick cautious robust cautious_coordinates; do
+  python bin/visualize_minicif.py \
+    --checkpoint models/minicif_v2/peak/standard/medium/ckpt.pt \
+    --dataset-dir data/noma_minicif_v2 \
+    --out-dir "models/minicif_v2/peak/standard/medium/refinement_${preset}" \
+    --splits test \
+    --prompt-modes pxrd-elements \
+    --num-reps 8 \
+    --refinement-config "configs/refinement/${preset}.yaml"
+done
+```
+
 Refinement adds scalar columns to `minicif_generation_metrics.csv` and writes
 `minicif_refinement_results.jsonl.gz`. Each JSONL record contains candidate
 identity, initial and refined fit statistics, convergence data, refined
@@ -78,3 +110,15 @@ parameters, warnings, objective and stage history, observed and calculated
 profiles, residuals, starting and refined CIFs, diagnostics, provenance, and
 species-assignment results. Candidate-specific failures are stored as error
 records and evaluation continues.
+
+Replay successful refinements in the example plotter:
+
+```bash
+python bin/plot_minicif_examples.py \
+  --report-dir models/minicif_v2/peak/standard/medium/refinement_cautious \
+  --show-refined
+```
+
+These figures contain reference, generated, and refined PXRD profiles and
+structures. The script streams the selected records from
+`minicif_refinement_results.jsonl.gz`.

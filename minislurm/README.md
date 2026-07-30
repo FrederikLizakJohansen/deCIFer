@@ -86,6 +86,24 @@ sbatch minislurm/evaluate_minicif_v2.sh \
 Use the CLI overrides documented in `configs/refinement/README.md` for
 two-theta/Q input, X-ray/neutron radiation, wavelength, device, and policy.
 
+Evaluation checkpoints are stored under `OUT_DIR/evaluation_checkpoints/`.
+Resubmit the same command to resume after interruption. Splits can be staged
+into one report:
+
+```bash
+sbatch minislurm/evaluate_minicif_v2.sh --splits train
+sbatch minislurm/evaluate_minicif_v2.sh --splits val
+sbatch minislurm/evaluate_minicif_v2.sh --splits test
+```
+
+Keep `CHECKPOINT`, `DATASET_DIR`, `OUT_DIR`, and evaluation options identical
+across those jobs. Each job combines all available split checkpoints. Rebuild
+the report locally without inference using:
+
+```bash
+python bin/visualize_minicif.py --combine-only --out-dir "$OUT_DIR"
+```
+
 `train_minicif_v2.sh` runs `bin/audit_minicif_v2.py` before allocating model
 memory. Set `AUDIT_MAX_ITEMS=0` to deeply validate every record, or
 `SKIP_PREFLIGHT=1` only after an unchanged dataset has already passed.

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import gzip
 import json
 import os
 import re
@@ -12,8 +13,10 @@ if REPO_ROOT not in sys.path:
 
 import numpy as np
 import pandas as pd
+from matplotlib import pyplot as plt
+from pymatgen.core import Structure
 
-from bin.test_minicif_realtime import save_fit_figure
+from bin.test_minicif_realtime import _plot_structure_panel, save_fit_figure
 from bin.visualize_minicif import rwp, structure_to_continuous_xrd
 from decifer.minicif import minicif_to_structure
 from decifer.minicif_v2 import minicif_v2_to_structure
@@ -29,7 +32,12 @@ REQUIRED_COLUMNS = {
 }
 
 
-def select_best_candidates(metrics, splits=None, prompt_modes=None):
+def select_best_candidates(
+    metrics,
+    splits=None,
+    prompt_modes=None,
+    require_refined=False,
+):
     missing = REQUIRED_COLUMNS - set(metrics.columns)
     if missing:
         raise ValueError(f"evaluation metrics are missing columns: {sorted(missing)}")
@@ -53,6 +61,30 @@ def select_best_candidates(metrics, splits=None, prompt_modes=None):
         candidates = candidates[
             candidates["prompt_mode"].astype(str).isin(prompt_modes)
         ]
+    if require_refined:
+        if "rep" not in candidates:
+            raise ValueError(
+                "evaluation metrics do not identify candidate repetitions"
+            )
+        status_column = next(
+            (
+                column
+                for column in ("refined_structure_ok", "refinement_succeeded")
+                if column in candidates
+            ),
+            None,
+        )
+        if status_column is None:
+            raise ValueError(
+                "evaluation metrics do not contain refinement results"
+            )
+        refined_ok = (
+            candidates[status_column]
+            .astype(str)
+            .str.lower()
+            .isin({"true", "1"})
+        )
+        candidates = candidates[refined_ok]
     if candidates.empty:
         raise ValueError("no valid generated structures match the requested filters")
 
@@ -115,7 +147,137 @@ def load_report(report_dir):
     return metrics, xrd_kwargs
 
 
-def plot_examples(candidates, xrd_kwargs, output_dir, wavelength, supercell):
+def candidate_identity(row):
+    return (
+        str(row["split"]),
+        int(row["sample_index"]),
+        str(row["prompt_mode"]),
+        int(row["rep"]),
+    )
+
+
+def load_saved_refinements(report_dir, candidates):
+    path = os.path.join(report_dir, "minicif_refinement_results.jsonl.gz")
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"{path} is required with --show-refined"
+        )
+    targets = {
+        candidate_identity(row)
+        for row in candidates.to_dict(orient="records")
+    }
+    records = {}
+    with gzip.open(path, "rt", encoding="utf-8") as handle:
+        for line in handle:
+            record = json.loads(line)
+            if not record.get("succeeded") or not record.get("refined_cif"):
+                continue
+            key = candidate_identity(record)
+            if key in targets:
+                records[key] = record
+                if len(records) == len(targets):
+                    break
+    missing = targets - set(records)
+    if missing:
+        raise ValueError(
+            f"refinement results are missing for {len(missing)} selected candidates"
+        )
+    return records
+
+
+def save_refined_example_figure(
+    path,
+    q_grid,
+    reference_iq,
+    generated_iq,
+    refined_iq,
+    reference_structure,
+    generated_structure,
+    refined_structure,
+    sample_name,
+    generated_rwp,
+    refined_rwp,
+    supercell,
+):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fig = plt.figure(figsize=(16, 10), dpi=180, constrained_layout=True)
+    grid = fig.add_gridspec(3, 3, height_ratios=[1.35, 0.55, 2.0])
+    ax_fit = fig.add_subplot(grid[0, :])
+    ax_residual = fig.add_subplot(grid[1, :], sharex=ax_fit)
+    structure_axes = [
+        fig.add_subplot(grid[2, index], projection="3d")
+        for index in range(3)
+    ]
+
+    ax_fit.plot(
+        q_grid,
+        reference_iq,
+        color="#202124",
+        linewidth=1.35,
+        label="reference",
+    )
+    ax_fit.plot(
+        q_grid,
+        generated_iq,
+        color="#0072B2",
+        linewidth=1.05,
+        alpha=0.85,
+        label=f"generated, Rwp={generated_rwp:.4f}",
+    )
+    ax_fit.plot(
+        q_grid,
+        refined_iq,
+        color="#D55E00",
+        linewidth=1.05,
+        alpha=0.9,
+        label=f"refined, Rwp={refined_rwp:.4f}",
+    )
+    ax_fit.set_ylabel("normalized intensity")
+    ax_fit.set_title(f"{sample_name} PXRD fit")
+    ax_fit.legend(frameon=False, loc="upper right")
+    ax_fit.grid(alpha=0.18)
+
+    ax_residual.axhline(0, color="#444444", linewidth=0.8)
+    ax_residual.plot(
+        q_grid,
+        reference_iq - generated_iq,
+        color="#0072B2",
+        linewidth=0.85,
+        alpha=0.8,
+        label="reference - generated",
+    )
+    ax_residual.plot(
+        q_grid,
+        reference_iq - refined_iq,
+        color="#D55E00",
+        linewidth=0.85,
+        alpha=0.85,
+        label="reference - refined",
+    )
+    ax_residual.set_xlabel("q")
+    ax_residual.set_ylabel("residual")
+    ax_residual.legend(frameon=False, loc="upper right")
+    ax_residual.grid(alpha=0.18)
+
+    for axis, structure, title in zip(
+        structure_axes,
+        (reference_structure, generated_structure, refined_structure),
+        ("reference structure", "generated structure", "refined structure"),
+    ):
+        _plot_structure_panel(axis, structure, supercell, title)
+
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_examples(
+    candidates,
+    xrd_kwargs,
+    output_dir,
+    wavelength,
+    supercell,
+    refinement_records=None,
+):
     os.makedirs(output_dir, exist_ok=True)
     manifest = []
     for row in candidates.to_dict(orient="records"):
@@ -141,21 +303,12 @@ def plot_examples(candidates, xrd_kwargs, output_dir, wavelength, supercell):
             float(xrd_kwargs["qmin"])
             + np.arange(len(reference_iq)) * float(xrd_kwargs["qstep"])
         )
-        save_fit_figure(
-            path,
-            q_grid,
-            reference_iq,
-            reference_structure,
-            [{
-                "rep": row.get("rep", 0),
-                "rwp": rendered_rwp,
-                "generated_iq": generated_iq,
-                "generated_structure": generated_structure,
-            }],
-            f"{row.get('cif_name', sample_index)} | {prompt_mode}",
-            supercell,
+        refinement_record = (
+            refinement_records.get(candidate_identity(row))
+            if refinement_records is not None
+            else None
         )
-        manifest.append({
+        manifest_row = {
             "split": split,
             "sample_index": sample_index,
             "prompt_mode": prompt_mode,
@@ -164,7 +317,53 @@ def plot_examples(candidates, xrd_kwargs, output_dir, wavelength, supercell):
             "rendered_rwp": rendered_rwp,
             "reference_crystal_system": row.get("reference_crystal_system"),
             "figure_path": os.path.abspath(path),
-        })
+        }
+        if refinement_record is None:
+            save_fit_figure(
+                path,
+                q_grid,
+                reference_iq,
+                reference_structure,
+                [{
+                    "rep": row.get("rep", 0),
+                    "rwp": rendered_rwp,
+                    "generated_iq": generated_iq,
+                    "generated_structure": generated_structure,
+                }],
+                f"{row.get('cif_name', sample_index)} | {prompt_mode}",
+                supercell,
+            )
+        else:
+            refined_structure = Structure.from_str(
+                refinement_record["refined_cif"],
+                fmt="cif",
+            )
+            refined_iq = structure_to_continuous_xrd(
+                refined_structure,
+                xrd_kwargs,
+                wavelength,
+            )
+            rendered_refined_rwp = rwp(reference_iq, refined_iq)
+            save_refined_example_figure(
+                path,
+                q_grid,
+                reference_iq,
+                generated_iq,
+                refined_iq,
+                reference_structure,
+                generated_structure,
+                refined_structure,
+                f"{row.get('cif_name', sample_index)} | {prompt_mode}",
+                rendered_rwp,
+                rendered_refined_rwp,
+                supercell,
+            )
+            manifest_row.update({
+                "refinement_status": refinement_record.get("status"),
+                "evaluation_refined_rwp": row.get("refined_rwp"),
+                "rendered_refined_rwp": rendered_refined_rwp,
+            })
+        manifest.append(manifest_row)
     manifest_path = os.path.join(output_dir, "examples.csv")
     pd.DataFrame(manifest).to_csv(manifest_path, index=False)
     return manifest_path
@@ -195,6 +394,14 @@ def main():
     parser.add_argument("--wavelength", default="CuKa")
     parser.add_argument("--figure-supercell", type=int, default=1)
     parser.add_argument("--seed", type=int, default=1337)
+    parser.add_argument(
+        "--show-refined",
+        action="store_true",
+        help=(
+            "Include the stored refined PXRD and structure; requires "
+            "minicif_refinement_results.jsonl.gz"
+        ),
+    )
     args = parser.parse_args()
 
     metrics, xrd_kwargs = load_report(args.report_dir)
@@ -202,6 +409,7 @@ def main():
         metrics,
         splits=args.splits,
         prompt_modes=args.prompt_modes,
+        require_refined=args.show_refined,
     )
     candidates = choose_examples(
         candidates,
@@ -212,12 +420,18 @@ def main():
     output_dir = args.out_dir or os.path.join(
         args.report_dir, "evaluation_examples"
     )
+    refinement_records = (
+        load_saved_refinements(args.report_dir, candidates)
+        if args.show_refined
+        else None
+    )
     manifest_path = plot_examples(
         candidates,
         xrd_kwargs,
         output_dir,
         args.wavelength,
         args.figure_supercell,
+        refinement_records,
     )
     print(f"Wrote {len(candidates)} figures to {os.path.abspath(output_dir)}")
     print(f"Wrote example manifest to {os.path.abspath(manifest_path)}")

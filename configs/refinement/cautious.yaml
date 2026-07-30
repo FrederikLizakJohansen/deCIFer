@@ -1,0 +1,17 @@
+enabled: true
+domain: q
+radiation: xray
+wavelength: null
+device: null
+
+policy:
+  preset: cautious
+  background_degree: 4
+  refine_lattice: true
+  refine_coordinates: false
+  occupancy_mode: fixed
+  refine_b_iso: false
+  refine_u_aniso: false
+
+species_assignment:
+  enabled: false
