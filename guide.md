@@ -61,6 +61,26 @@ Dense and hybrid configs sample the full BraggCalculator artifact profile from
 `configs/xrd_artifacts/full_training.yaml`. Peak configs apply q-position and
 intensity perturbations to sparse peaks.
 
+To run the experimental Forward XM comparison with `K = 1, 2, 4, 8`:
+
+```bash
+bash minislurm/run_xm_sweep.sh equal-updates
+bash minislurm/run_xm_sweep.sh equal-compute
+```
+
+Run one XM model directly with its self-contained config:
+
+```bash
+sbatch minislurm/train_minicif_v2.sh \
+  --config configs/config_v2/xm/peak/standard/k2/medium.yaml
+```
+
+Available XM configs follow
+`configs/config_v2/xm/{peak,dense,hybrid}/standard/{k2,k4,k8}/{small,medium,large}.yaml`.
+The `peak` configs use the Fourier peak encoder.
+
+See `XM-investigation.md` for the mapping, compute cost, and evaluation metrics.
+
 ## 3. Evaluate
 
 Evaluate the default peak-standard-medium model:

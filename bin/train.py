@@ -40,6 +40,7 @@ from tqdm.auto import tqdm
 from omegaconf import OmegaConf
 
 from decifer.decifer_model import Decifer, DeciferConfig
+from decifer.explorative_modeling import xm_best_of_k_forward
 from decifer.tokenizer import Tokenizer
 from decifer.minicif import END_TOKEN, START_TOKEN, MinicifTokenizer
 from decifer.minicif_v2 import (
@@ -219,6 +220,7 @@ class TrainConfig:
     condition_cross_attention_every_n_layers: int = 1
     condition_dropout_prob: float = 0.0
     typed_token_heads: bool = False
+    xm_best_of_k: int = 1
     pxrd_encoder_channels: int = 64
     pxrd_encoder_kernel_size: int = 7
     pxrd_encoder_layers: int = 0
@@ -295,6 +297,9 @@ class TrainConfig:
 def parse_config():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=False, help="Path to .yaml config file")
+    parser.add_argument("--xm-best-of-k", type=int, default=None)
+    parser.add_argument("--max-iters", type=int, default=None)
+    parser.add_argument("--out-dir", default=None)
     args = parser.parse_args()
 
     C = OmegaConf.structured(TrainConfig())
@@ -306,6 +311,13 @@ def parse_config():
         # Parse yaml to namespace and merge (DictConfig)
         yaml_dictconfig = OmegaConf.create(yaml_config)
         C = OmegaConf.merge(C, yaml_dictconfig)
+
+    if args.xm_best_of_k is not None:
+        C.xm_best_of_k = args.xm_best_of_k
+    if args.max_iters is not None:
+        C.max_iters = args.max_iters
+    if args.out_dir is not None:
+        C.out_dir = args.out_dir
     
     if not C.dataset:
         raise Exception("The 'dataset' option is required and cannot be empty")
@@ -339,6 +351,11 @@ def _decode_h5_string(value):
 
 def validate_training_dataset(C):
     """Fail before model initialization when a record-batched dataset is incompatible."""
+    xm_best_of_k = getattr(C, "xm_best_of_k", 1)
+    if xm_best_of_k < 1:
+        raise ValueError("xm_best_of_k must be >= 1")
+    if xm_best_of_k > 1 and C.batching_strategy != "record":
+        raise ValueError("Explorative Modeling requires batching_strategy='record'")
     expected_representation = C.tokenizer if C.tokenizer in {"minicif", "minicif_v2"} else None
     split_stats = {}
     for split in ("train", "val", "test"):
@@ -929,6 +946,7 @@ if __name__ == "__main__":
         condition_cross_attention=C.condition_cross_attention,
         condition_cross_attention_every_n_layers=C.condition_cross_attention_every_n_layers,
         condition_dropout_prob=C.condition_dropout_prob,
+        xm_best_of_k=C.xm_best_of_k,
         pxrd_encoder_channels=C.pxrd_encoder_channels,
         pxrd_encoder_kernel_size=C.pxrd_encoder_kernel_size,
         pxrd_encoder_layers=C.pxrd_encoder_layers,
@@ -957,8 +975,20 @@ if __name__ == "__main__":
         checkpoint_model_args = checkpoint["model_args"]
 
         # Force these config attributes to be equal otherwise we can't even resume training
-        for k in ["n_layer", "n_head", "n_embd", "block_size", "bias", "vocab_size"]:
+        for k in [
+            "n_layer",
+            "n_head",
+            "n_embd",
+            "block_size",
+            "bias",
+            "vocab_size",
+        ]:
             model_args[k] = checkpoint_model_args[k]
+        model_args["xm_best_of_k"] = checkpoint_model_args.get(
+            "xm_best_of_k",
+            1,
+        )
+        C.xm_best_of_k = model_args["xm_best_of_k"]
 
         # Init model and load state dict
         model = Decifer(DeciferConfig(**model_args))
@@ -1345,7 +1375,17 @@ if __name__ == "__main__":
             )
             with sync_context:
                 with ctx:
-                    logits, loss = model(X, cond, Y, start_indices)
+                    if C.xm_best_of_k == 1:
+                        logits, loss = model(X, cond, Y, start_indices)
+                    else:
+                        logits, loss = xm_best_of_k_forward(
+                            model,
+                            X,
+                            cond,
+                            Y,
+                            start_indices,
+                            C.xm_best_of_k,
+                        )
                     loss = loss / C.gradient_accumulation_steps
                 tokens_accum += batch_tokens
                 model_tokens_accum += batch_model_tokens

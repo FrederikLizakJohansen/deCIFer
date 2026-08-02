@@ -54,6 +54,7 @@ class DeciferConfig:
     minicif_constrained_decoding: bool = False
     record_aligned_attention: bool = False
     typed_token_heads: bool = False
+    xm_best_of_k: int = 1
 
 class LayerNorm(nn.Module):
 
@@ -739,6 +740,10 @@ class Decifer(nn.Module):
             raise ValueError("pxrd_encoder_layers must be >= 0")
         if config.typed_token_heads and config.tokenizer != "minicif_v2":
             raise ValueError("typed_token_heads requires tokenizer='minicif_v2'")
+        if config.xm_best_of_k < 1:
+            raise ValueError("xm_best_of_k must be >= 1")
+        if config.xm_best_of_k > 1 and not config.record_aligned_attention:
+            raise ValueError("Explorative Modeling requires record_aligned_attention")
 
         # Condtional embedding: either dense PXRD, sparse peak-list, or hybrid encoders.
         if config.condition:
@@ -769,12 +774,19 @@ class Decifer(nn.Module):
             TypedTokenHead(config, self.tokenizer.token_type_ids)
             if config.typed_token_heads else None
         )
-
         self.apply(self._init_weights)
         # apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():
             if pn.endswith("c_proj.weight"):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+        # Initialize XM after the shared model so equal seeds produce identical
+        # baseline parameters for controlled K comparisons.
+        self.xm_mode_embeddings = (
+            nn.Embedding(config.xm_best_of_k, config.n_embd)
+            if config.xm_best_of_k > 1 else None
+        )
+        if self.xm_mode_embeddings is not None:
+            self._init_weights(self.xm_mode_embeddings)
 
         print("number of total non-trainable parameters: %.2fM" % (self.get_num_params()/1e6,))
         print("number of total trainable parameters: %.2fM" % (self.get_num_params(trainable=True)/1e6,))
@@ -893,6 +905,8 @@ class Decifer(nn.Module):
         targets: Optional[torch.Tensor] = None,
         start_indices_batch: List[List[int]] = [[0]],
         custom_cond_emb: Optional[torch.Tensor] = None,
+        xm_mode_indices: Optional[torch.Tensor] = None,
+        return_per_sample_loss: bool = False,
         return_attn: Optional[bool] = None,
         past_kv: Optional[List[Tuple[torch.Tensor, ...]]] = None,
         past_length: int = 0,
@@ -1017,7 +1031,6 @@ class Decifer(nn.Module):
                     (b, insert_width), -1, dtype=targets.dtype, device=targets.device
                 )
                 targets = torch.cat((ignored, targets), dim=1)
-
         elif self.config.condition:
             start_indices_batch = [
                 [int(start) for start in start_indices if 0 <= int(start) < t]
@@ -1120,6 +1133,33 @@ class Decifer(nn.Module):
                                              torch.full((1,), float('-inf'), dtype=ptdtype, device=device))
                 # attention_bias is (B, T, T)
 
+        if self.xm_mode_embeddings is not None:
+            if xm_mode_indices is None:
+                xm_mode_indices = torch.randint(
+                    self.config.xm_best_of_k,
+                    (b,),
+                    device=device,
+                )
+            else:
+                xm_mode_indices = xm_mode_indices.to(device=device, dtype=torch.long)
+                if xm_mode_indices.shape != (b,):
+                    raise ValueError("xm_mode_indices must have shape (batch_size,)")
+                if torch.any(xm_mode_indices < 0) or torch.any(
+                    xm_mode_indices >= self.config.xm_best_of_k
+                ):
+                    raise ValueError("xm_mode_indices contains an invalid mode")
+            xm_emb = self.xm_mode_embeddings(xm_mode_indices).unsqueeze(1)
+            tok_emb = torch.cat((xm_emb, tok_emb), dim=1)
+            pos_emb = torch.cat((torch.zeros_like(xm_emb), pos_emb), dim=1)
+            t += 1
+            if targets is not None:
+                ignored = torch.full(
+                    (b, 1), -1, dtype=targets.dtype, device=targets.device
+                )
+                targets = torch.cat((ignored, targets), dim=1)
+        elif xm_mode_indices is not None:
+            raise ValueError("xm_mode_indices requires xm_best_of_k > 1")
+
         # Combine token and position embeddings
         x = self.transformer.drop(tok_emb + pos_emb)
 
@@ -1158,7 +1198,17 @@ class Decifer(nn.Module):
 
         if targets is not None:
             logits = self._project_logits(x)
-            loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1)
+            if return_per_sample_loss:
+                token_losses = F.cross_entropy(
+                    logits.reshape(-1, logits.size(-1)),
+                    targets.reshape(-1),
+                    ignore_index=-1,
+                    reduction="none",
+                ).view(targets.shape)
+                token_counts = targets.ne(-1).sum(dim=1)
+                loss = token_losses.sum(dim=1) / token_counts.clamp_min(1)
+            else:
+                loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1)
         else:
             # Inference mode
             logits = self._project_logits(x[:, [-1], :])  # only the last token
@@ -1252,6 +1302,27 @@ class Decifer(nn.Module):
 
         return mask_minicif_logits(logits, idx, self.tokenizer)
 
+    def _generation_xm_modes(
+        self,
+        batch_size: int,
+        device: torch.device,
+        xm_mode_indices: Optional[torch.Tensor],
+    ) -> Optional[torch.Tensor]:
+        if self.xm_mode_embeddings is None:
+            if xm_mode_indices is not None:
+                raise ValueError("xm_mode_indices requires xm_best_of_k > 1")
+            return None
+        if xm_mode_indices is None:
+            return torch.randint(
+                self.config.xm_best_of_k,
+                (batch_size,),
+                device=device,
+            )
+        xm_mode_indices = xm_mode_indices.to(device=device, dtype=torch.long)
+        if xm_mode_indices.shape != (batch_size,):
+            raise ValueError("xm_mode_indices must have shape (batch_size,)")
+        return xm_mode_indices
+
     def _next_token_logits(
         self,
         idx_cond: torch.Tensor,
@@ -1259,8 +1330,15 @@ class Decifer(nn.Module):
         start_indices_batch,
         custom_cond_emb,
         cfg_scale: Optional[float],
+        xm_mode_indices: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        logits, _ = self(idx_cond, cond_vec=cond_vec, start_indices_batch=start_indices_batch, custom_cond_emb=custom_cond_emb)
+        logits, _ = self(
+            idx_cond,
+            cond_vec=cond_vec,
+            start_indices_batch=start_indices_batch,
+            custom_cond_emb=custom_cond_emb,
+            xm_mode_indices=xm_mode_indices,
+        )
         logits = logits[:, -1, :]
         if cfg_scale is None or cfg_scale == 1.0 or not self.config.condition:
             return logits
@@ -1271,7 +1349,13 @@ class Decifer(nn.Module):
         else:
             n_starts = idx_cond.size(0)
         null_emb = self.null_cond_emb.unsqueeze(0).expand(n_starts, -1, -1)
-        uncond_logits, _ = self(idx_cond, cond_vec=None, start_indices_batch=start_indices_batch, custom_cond_emb=null_emb)
+        uncond_logits, _ = self(
+            idx_cond,
+            cond_vec=None,
+            start_indices_batch=start_indices_batch,
+            custom_cond_emb=null_emb,
+            xm_mode_indices=xm_mode_indices,
+        )
         uncond_logits = uncond_logits[:, -1, :]
         return uncond_logits + cfg_scale * (logits - uncond_logits)
 
@@ -1289,6 +1373,7 @@ class Decifer(nn.Module):
         cond_vec,
         start_indices_batch,
         custom_cond_emb,
+        xm_mode_indices: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, List[Tuple[torch.Tensor, ...]], int]:
         idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
         logits, _, past_kv = self(
@@ -1296,6 +1381,7 @@ class Decifer(nn.Module):
             cond_vec=cond_vec,
             start_indices_batch=start_indices_batch,
             custom_cond_emb=custom_cond_emb,
+            xm_mode_indices=xm_mode_indices,
             use_cache=True,
         )
         # NOTE: positional embeddings for content tokens are indexed by position in the
@@ -1344,19 +1430,36 @@ class Decifer(nn.Module):
         custom_cond_emb=None,
         constrain_minicif=None,
         cfg_scale=None,
+        xm_mode_indices=None,
     ):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         """
+        xm_mode_indices = self._generation_xm_modes(
+            idx.size(0), idx.device, xm_mode_indices
+        )
         prev_id = torch.full((idx.size(0),), fill_value=-1, dtype=torch.long, device=idx.device)
         use_cache = self._can_use_kv_cache(cfg_scale)
         if use_cache:
-            logits, past_kv, past_length = self._prefill(idx, cond_vec, start_indices_batch, custom_cond_emb)
+            logits, past_kv, past_length = self._prefill(
+                idx,
+                cond_vec,
+                start_indices_batch,
+                custom_cond_emb,
+                xm_mode_indices,
+            )
         else:
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
-            logits = self._next_token_logits(idx_cond, cond_vec, start_indices_batch, custom_cond_emb, cfg_scale)
+            logits = self._next_token_logits(
+                idx_cond,
+                cond_vec,
+                start_indices_batch,
+                custom_cond_emb,
+                cfg_scale,
+                xm_mode_indices,
+            )
 
         generation_pbar = tqdm(total=max_new_tokens, desc='Generating sequence', leave=False, disable=disable_pbar)
         for step in range(max_new_tokens):
@@ -1388,7 +1491,14 @@ class Decifer(nn.Module):
             else:
                 use_cache = False
                 idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
-                logits = self._next_token_logits(idx_cond, cond_vec, start_indices_batch, custom_cond_emb, cfg_scale)
+                logits = self._next_token_logits(
+                    idx_cond,
+                    cond_vec,
+                    start_indices_batch,
+                    custom_cond_emb,
+                    cfg_scale,
+                    xm_mode_indices,
+                )
         generation_pbar.close()
 
         return idx
@@ -1406,6 +1516,7 @@ class Decifer(nn.Module):
         custom_cond_emb=None,
         constrain_minicif=None,
         cfg_scale=None,
+        xm_mode_indices=None,
     ):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (batch_size, seq_len)) and complete
@@ -1413,6 +1524,9 @@ class Decifer(nn.Module):
         """
         batch_size = idx.size(0)
         device = idx.device
+        xm_mode_indices = self._generation_xm_modes(
+            batch_size, device, xm_mode_indices
+        )
 
         finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
         prev_id = torch.full((batch_size,), fill_value=-1, dtype=torch.long, device=device)
@@ -1420,10 +1534,23 @@ class Decifer(nn.Module):
 
         use_cache = self._can_use_kv_cache(cfg_scale)
         if use_cache:
-            logits, past_kv, past_length = self._prefill(idx, cond_vec, start_indices_batch, custom_cond_emb)
+            logits, past_kv, past_length = self._prefill(
+                idx,
+                cond_vec,
+                start_indices_batch,
+                custom_cond_emb,
+                xm_mode_indices,
+            )
         else:
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
-            logits = self._next_token_logits(idx_cond, cond_vec, start_indices_batch, custom_cond_emb, cfg_scale)
+            logits = self._next_token_logits(
+                idx_cond,
+                cond_vec,
+                start_indices_batch,
+                custom_cond_emb,
+                cfg_scale,
+                xm_mode_indices,
+            )
 
         generation_pbar = tqdm(total=max_new_tokens, desc='Generating sequence', leave=False, disable=disable_pbar)
         for step in range(max_new_tokens):
@@ -1465,7 +1592,14 @@ class Decifer(nn.Module):
             else:
                 use_cache = False
                 idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
-                logits = self._next_token_logits(idx_cond, cond_vec, start_indices_batch, custom_cond_emb, cfg_scale)
+                logits = self._next_token_logits(
+                    idx_cond,
+                    cond_vec,
+                    start_indices_batch,
+                    custom_cond_emb,
+                    cfg_scale,
+                    xm_mode_indices,
+                )
         generation_pbar.close()
         # For sequences that didn't finish, set seq_lens to idx.size(1)
         seq_lens[seq_lens == -1] = idx.size(1)
@@ -1488,12 +1622,16 @@ class Decifer(nn.Module):
         top_k=None,
         custom_cond_emb=None,
         constrain_minicif=None,
+        xm_mode_indices=None,
     ):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         """
+        xm_mode_indices = self._generation_xm_modes(
+            idx.size(0), idx.device, xm_mode_indices
+        )
         prev_id = torch.full((idx.size(0),), fill_value=-1, dtype=torch.long, device=idx.device)
             
         for id in idx[0]:
@@ -1506,7 +1644,13 @@ class Decifer(nn.Module):
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond, cond_vec=cond_vec, start_indices_batch=start_indices_batch, custom_cond_emb=custom_cond_emb)
+            logits, _ = self(
+                idx_cond,
+                cond_vec=cond_vec,
+                start_indices_batch=start_indices_batch,
+                custom_cond_emb=custom_cond_emb,
+                xm_mode_indices=xm_mode_indices,
+            )
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
             logits = self._mask_generation_logits(logits, idx, constrain_minicif)

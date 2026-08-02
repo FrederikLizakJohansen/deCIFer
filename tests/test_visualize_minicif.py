@@ -237,6 +237,45 @@ class VisualizeMinicifTest(unittest.TestCase):
         self.assertEqual(summary.loc[0, "element_set_accuracy"], 0.5)
         self.assertEqual(summary.loc[0, "formula_accuracy"], 0.5)
 
+    def test_summary_reports_per_sample_generation_diversity(self):
+        metrics = pd.DataFrame([
+            {
+                "split": "test",
+                "sample_index": 0,
+                "rep": 0,
+                "parse_ok": True,
+                "match": False,
+                "generated_minicif": "candidate-a",
+                "generated_formula": "NaCl",
+                "generated_space_group": 225,
+                "generated_crystal_system": 7,
+            },
+            {
+                "split": "test",
+                "sample_index": 0,
+                "rep": 1,
+                "parse_ok": True,
+                "match": False,
+                "generated_minicif": "candidate-b",
+                "generated_formula": "NaCl",
+                "generated_space_group": 221,
+                "generated_crystal_system": 7,
+            },
+        ])
+
+        summary = summarize(metrics)
+
+        self.assertEqual(summary.loc[0, "mean_unique_minicif_fraction"], 1.0)
+        self.assertEqual(summary.loc[0, "mean_unique_formulas_per_sample"], 1.0)
+        self.assertEqual(
+            summary.loc[0, "mean_unique_space_groups_per_sample"],
+            2.0,
+        )
+        self.assertEqual(
+            summary.loc[0, "mean_unique_crystal_systems_per_sample"],
+            1.0,
+        )
+
     def test_plot_rwp_distribution_writes_report(self):
         df = pd.DataFrame(
             {

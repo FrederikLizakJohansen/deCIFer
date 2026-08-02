@@ -598,6 +598,7 @@ def evaluate_split(
                         "rwp": rwp(reference_iq, generated_iq),
                         "rmsd": rmsd_value,
                         "match": match,
+                        "generated_formula": generated_structure.composition.reduced_formula,
                         "composition_match": generated_structure.composition.reduced_formula == reference_structure.composition.reduced_formula,
                     })
                     if plot_example:
@@ -783,6 +784,8 @@ def summarize(df):
             group_key = (group_key,)
         valid_rwp = split_df.dropna(subset=["rwp"]) if "rwp" in split_df else split_df.iloc[0:0]
         by_sample = split_df.groupby("sample_index")
+        candidates = split_df[split_df["rep"] >= 0]
+        candidate_samples = candidates.groupby("sample_index")
         best_rwp = by_sample["rwp"].min() if "rwp" in split_df else pd.Series(dtype=float)
         if "refined_rwp" in split_df:
             valid_refined_rwp = split_df.dropna(subset=["refined_rwp"])
@@ -813,6 +816,18 @@ def summarize(df):
             "element_set_accuracy": float(split_df["element_set_match"].fillna(False).mean()) if "element_set_match" in split_df else np.nan,
             "mean_extra_elements": float(split_df["extra_elements"].dropna().mean()) if "extra_elements" in split_df else np.nan,
             "mean_missing_elements": float(split_df["missing_elements"].dropna().mean()) if "missing_elements" in split_df else np.nan,
+            "mean_unique_minicif_fraction": _mean_unique_fraction(
+                candidate_samples, "generated_minicif"
+            ),
+            "mean_unique_formulas_per_sample": _mean_group_nunique(
+                candidate_samples, "generated_formula"
+            ),
+            "mean_unique_space_groups_per_sample": _mean_group_nunique(
+                candidate_samples, "generated_space_group"
+            ),
+            "mean_unique_crystal_systems_per_sample": _mean_group_nunique(
+                candidate_samples, "generated_crystal_system"
+            ),
             "composition_match_rate": float(split_df["composition_match"].fillna(False).mean()) if "composition_match" in split_df else np.nan,
             "formula_accuracy": float(split_df["formula_match"].fillna(False).mean()) if "formula_match" in split_df else np.nan,
             "refinement_success_rate": float(split_df["refinement_succeeded"].fillna(False).mean()) if "refinement_succeeded" in split_df else np.nan,
@@ -833,6 +848,22 @@ def summarize(df):
             summary["prompt_mode"] = group_key[1]
         summaries.append(summary)
     return pd.DataFrame(summaries)
+
+
+def _mean_unique_fraction(grouped, column):
+    if column not in grouped.obj or grouped.ngroups == 0:
+        return np.nan
+    values = grouped[column].agg(
+        lambda series: series.dropna().nunique() / max(series.notna().sum(), 1)
+    )
+    return float(values.mean()) if not values.empty else np.nan
+
+
+def _mean_group_nunique(grouped, column):
+    if column not in grouped.obj or grouped.ngroups == 0:
+        return np.nan
+    values = grouped[column].nunique(dropna=True)
+    return float(values.mean()) if not values.empty else np.nan
 
 
 def summarize_by_crystal_system(df):

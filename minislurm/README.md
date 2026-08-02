@@ -56,6 +56,19 @@ sbatch minislurm/train_minicif_v2.sh \
 This performs only a few optimizer steps and is not intended to produce a useful
 checkpoint.
 
+Run the experimental Forward XM sweep with the same number of optimizer updates
+or approximately equal training compute:
+
+```bash
+bash minislurm/run_xm_sweep.sh equal-updates
+bash minislurm/run_xm_sweep.sh equal-compute
+```
+
+The sweep uses the dedicated peak standard medium configs by default. Set
+`REPRESENTATION`, `SIZE`, `BASE_ITERS`, and `OUTPUT_ROOT` to select another XM
+matrix entry. `CONFIG` remains available for a fully custom base config. See
+`XM-investigation.md` for the experiment design.
+
 The full BraggCalculator artifact model uses clean sparse HDF5 records and
 samples artifacts during training:
 

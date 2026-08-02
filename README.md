@@ -17,6 +17,9 @@ Download `decifer_v1_ckpt.pt` for the pretrained deCIFer checkpoint. See [Data P
 6. [Troubleshooting](#troubleshooting)
 7. [License](#license)
 
+The experimental Explorative Modeling training path and controlled comparison
+are documented in [XM-investigation.md](XM-investigation.md).
+
 ## Setup
 deCIFer supports **Python 3.12 and 3.13**. Python 3.13 is used for the current test suite.
 

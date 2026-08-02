@@ -61,6 +61,38 @@ class ConfigV2Test(unittest.TestCase):
                 raw = yaml.safe_load(path.read_text())
                 self.assertTrue(raw["out_dir"].startswith("models/minicif_v2/"))
 
+    def test_xm_model_matrix_matches_standard_baselines(self):
+        root = Path("configs/config_v2")
+        expected = {
+            root / "xm" / representation / "standard" / f"k{best_of_k}" / f"{size}.yaml"
+            for representation in ("peak", "dense", "hybrid")
+            for best_of_k in (2, 4, 8)
+            for size in ("small", "medium", "large")
+        }
+
+        self.assertEqual(
+            set(root.glob("xm/*/standard/k*/*.yaml")),
+            expected,
+        )
+        for path in sorted(expected):
+            with self.subTest(path=path):
+                _, representation, allocation, k_dir, filename = path.relative_to(root).parts
+                size = Path(filename).stem
+                best_of_k = int(k_dir.removeprefix("k"))
+                raw = yaml.safe_load(path.read_text())
+                baseline = yaml.safe_load(
+                    (root / representation / allocation / filename).read_text()
+                )
+                baseline.update({
+                    "out_dir": (
+                        f"models/minicif_v2/xm/{representation}/{allocation}/"
+                        f"{k_dir}/{size}"
+                    ),
+                    "xm_best_of_k": best_of_k,
+                })
+
+                self.assertEqual(raw, baseline)
+
 
 if __name__ == "__main__":
     unittest.main()
