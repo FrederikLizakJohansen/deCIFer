@@ -1,4 +1,4 @@
-[![Static Badge](https://img.shields.io/badge/arXiv-2502.02189-brightgreen?style=flat)](https://arxiv.org/abs/2502.02189) [![Download Checkpoint](https://img.shields.io/badge/Data%20Archive-ERDA-blue?style=flat)](https://www.erda.dk/archives/b7342461e7c932bd99e8273c6a49e97b/published-archive.html)
+[![Static Badge](https://img.shields.io/badge/arXiv-2502.02189-brightgreen?style=flat)](https://arxiv.org/abs/2502.02189) [![Download Checkpoint](https://img.shields.io/badge/Data%20Archive-ERDA-blue?style=flat)](https://www.erda.dk/archives/b7342461e7c932bd99e8273c6a49e97b/published-archive.html) [![DOI](https://zenodo.org/badge/852757862.svg)](https://doi.org/10.5281/zenodo.21770315)
 
 <img src="deCIFer_logo.png" alt="logo" height="200"/>
 
